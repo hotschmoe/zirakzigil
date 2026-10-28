@@ -12,7 +12,7 @@
 //!   `[N]T`      element-wise; `[N]u8` is often all 0x00 or all 0xff
 //!   enums       exhaustive: a valid tag; non-exhaustive: mostly named tags,
 //!               sometimes any backing value
-//!   `Ranged`    always inside its range
+//!   `Ranged`    always inside its range; min, max, min+1, max-1 over-represented
 //!   `Bytes(n)`  variable-length byte string, lengths biased to 0, 1, n, n-1
 //!               and typical header sizes (8, 20, 40) -- for parser laws
 //!   structs     field by field
@@ -54,6 +54,19 @@ fn edgeInt(comptime T: type, selector: u8) ?T {
         1 => std.math.maxInt(T),
         2 => std.math.minInt(T),
         3 => 1,
+        else => null,
+    };
+}
+
+/// Ranged integers get the same treatment: the two ends of the range and their
+/// neighbours, where off-by-one bugs live. A range too small to have distinct
+/// neighbours just repeats its ends.
+fn edgeRanged(comptime T: type, selector: u8) ?T.T {
+    return switch (selector % edge_choices) {
+        0 => T.min,
+        1 => T.max,
+        2 => @min(T.min + 1, T.max),
+        3 => @max(T.max - 1, T.min),
         else => null,
     };
 }
@@ -114,7 +127,7 @@ fn fromRandom(comptime T: type, rnd: std.Random) T {
             return std.enums.values(T)[rnd.uintLessThan(usize, e.field_names.len)];
         },
         .@"struct" => |info| {
-            if (@hasDecl(T, "is_ranged")) return .{ .raw = rnd.intRangeAtMost(T.T, T.min, T.max) };
+            if (@hasDecl(T, "is_ranged")) return .{ .raw = edgeRanged(T, rnd.int(u8)) orelse rnd.intRangeAtMost(T.T, T.min, T.max) };
             if (@hasDecl(T, "is_bytes")) {
                 var v: T = .{};
                 v.len = edgeLen(T.max_len, rnd.int(u8)) orelse rnd.intRangeAtMost(usize, 0, T.max_len);
@@ -220,7 +233,8 @@ fn fromSmith(comptime T: type, smith: *std.testing.Smith) T {
             return std.enums.values(T)[smith.index(e.field_names.len)];
         },
         .@"struct" => |info| {
-            if (@hasDecl(T, "is_ranged")) return .{ .raw = smith.valueRangeAtMost(T.T, T.min, T.max) };
+            if (@hasDecl(T, "is_ranged"))
+                return .{ .raw = edgeRanged(T, smith.value(u8)) orelse smith.valueRangeAtMost(T.T, T.min, T.max) };
             if (@hasDecl(T, "is_bytes")) {
                 var v: T = .{};
                 v.len = edgeLen(T.max_len, smith.value(u8)) orelse smith.index(T.max_len + 1);
@@ -334,6 +348,41 @@ test "generators cover edge lengths and enum tags" {
     }
     try std.testing.expect(std.mem.allEqual(bool, &seen_len, true) and seen_other);
     try std.testing.expect(std.mem.allEqual(bool, &seen_tag, true));
+}
+
+test "Ranged arguments hit both ends and their neighbours, in both generators" {
+    const R = @import("zv.zig").Ranged(10, 200);
+    var prng: std.Random.DefaultPrng = .init(5);
+    const rnd = prng.random();
+    var seen_random: [4]bool = @splat(false); // 10, 11, 199, 200
+    var seen_smith: [4]bool = @splat(false);
+    var inside = true;
+    for (0..300) |i| {
+        const r = fromRandom(R, rnd).raw;
+        for ([_]u8{ 10, 11, 199, 200 }, &seen_random) |edge, *seen| seen.* = seen.* or r == edge;
+        inside = inside and r >= 10 and r <= 200;
+
+        // Smith reads each value as a little-endian u64: selector, then payload.
+        var input: [16]u8 = @splat(0);
+        std.mem.writeInt(u64, input[0..8], i % edge_choices, .little);
+        std.mem.writeInt(u64, input[8..16], 100, .little);
+        var smith: std.testing.Smith = .{ .in = &input };
+        const s = fromSmith(R, &smith).raw;
+        for ([_]u8{ 10, 11, 199, 200 }, &seen_smith) |edge, *seen| seen.* = seen.* or s == edge;
+        inside = inside and s >= 10 and s <= 200;
+    }
+    try std.testing.expect(inside);
+    try std.testing.expect(std.mem.allEqual(bool, &seen_random, true));
+    try std.testing.expect(std.mem.allEqual(bool, &seen_smith, true));
+}
+
+test "tiny Ranged types stay inside their range" {
+    var prng: std.Random.DefaultPrng = .init(9);
+    const rnd = prng.random();
+    for (0..50) |_| {
+        try std.testing.expectEqual(4, fromRandom(@import("zv.zig").Ranged(4, 4), rnd).raw);
+        try std.testing.expect(fromRandom(@import("zv.zig").Ranged(-1, 0), rnd).raw <= 0);
+    }
 }
 
 test "fuzzLaws replays a corpus and the empty input" {
