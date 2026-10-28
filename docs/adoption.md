@@ -22,6 +22,46 @@ The exported module carries no target or optimize mode, so it is compiled for wh
 
 `zv` allocates nothing and needs no OS on the library path. `zig build freestanding` compiles a smoke object using contracts, `Ranged`, `Pool`, `Slots`, `Linear`, `PinCheck` and `requireAssurance` for `aarch64` and `riscv64` freestanding in Debug and ReleaseSafe, so an OS dependency cannot slip in. `zv.laws`, `zv.checkLaws`, `zv.fuzzLaws` and `zv.report` are test and host tooling (they print and use `std.testing`); they are analyzed only where used. Two properties to know about: runtime panics go through the root's `panic` handler (the stock freestanding one traps), and the `Linear` ledger is a 2 KB global that is not thread safe.
 
+## Build matrix
+
+Every optimize mode catches different bugs, so build them all. `zig build test` stays your fast single-mode loop; one more line gives you the full matrix. Add `zirakzigil` to `build.zig.zon` as above, then in `build.zig`:
+
+```zig
+const zirakzigil = @import("zirakzigil"); // the dependency's build.zig; the name is its key in build.zig.zon
+
+pub fn build(b: *std.Build) void {
+    _ = zirakzigil.addTestMatrix(b, .{
+        .root_source_file = b.path("src/root.zig"),
+        .ghost = true, // also run every mode with ghost code compiled in
+        .cross = &.{ "aarch64-freestanding-none", "riscv64-freestanding-none" },
+    });
+}
+```
+
+`zig build matrix` then compiles and runs the tests of `root_source_file` in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each with ghost off and (with `.ghost = true`) on, all in parallel, and compile-checks each `.cross` target as an object in Debug and ReleaseSafe without running it. `zv` is imported into every cell for you, wired to that cell's ghost setting (each setting is its own instance of the dependency). Other options: `.imports` for extra modules (they must not import `zv` themselves, or they keep the ghost setting they were built with), `.target` for the runnable cells (default: the host), `.name` to tell several matrices apart. The cross check builds the root as an object, so it covers what the root exports or references; reference what you want checked.
+
+What each mode is for:
+
+| Mode | Contracts and safety checks | What a failure there means |
+| --- | --- | --- |
+| Debug | on | A panic with a location: a contract, overflow, bounds or stale handle. |
+| ReleaseSafe | on | The same, in optimized code. |
+| ReleaseFast | off | A wrong answer (a law returning false, a wrong value) or undefined behavior the checks were hiding. |
+| ReleaseSmall | off | The same as ReleaseFast, under size-oriented optimization. |
+| ghost=on | verification-only code runs | Ghost code that disagrees with the real code, and ghost code that no longer compiles. |
+
+Each cell is named for what it ran, so the build summary reads as a table and a failure points at its mode:
+
+```text
++- run test Debug ghost=off 3 pass (3 total) 68ms
++- run test ReleaseSafe ghost=on 3 pass (3 total) 29ms
++- run test ReleaseFast ghost=off 3 pass, 1 fail (4 total)
++- run test ReleaseSmall ghost=on 3 pass (3 total) 36ms
++- compile obj cross aarch64-freestanding-none ReleaseSafe safe aarch64-freestanding-none success
+```
+
+Use `zig build matrix --summary all` to see the passing cells too. `tests/consumer/build.zig` is a working example, and this repository's own `zig build matrix` uses the same machinery.
+
 ## Manifest rules
 
 Each module has `pub const assurance = .{ ... }` and `comptime { zv.requireAssurance(@This(), floor); }`. The gate is strict by default: **every public runtime declaration must be classified, and nothing is exempt by name**.

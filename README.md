@@ -100,16 +100,18 @@ Requires **Zig 0.17.0** (pinned in `build.zig.zon`), and Python 3 with `z3-solve
 zig build test                          # unit, example and law tests, freestanding cross-compile, tests/consumer
 zig build test -Doptimize=ReleaseFast   # contracts compile out
 zig build test -Dghost=true             # ghost (verification-only) code compiled in
+zig build matrix                        # every optimize mode x ghost off/on, plus freestanding and tests/consumer (what CI runs)
 zig build assurance                     # per-module assurance table for the examples
 zig build freestanding                  # zv for aarch64 / riscv64 freestanding, Debug and ReleaseSafe
 zig build test --fuzz                   # laws under the real fuzzer (Linux/macOS only; not implemented on Windows)
+zig build test --fuzz=100K              # the same, stopping after 100K iterations (what CI runs)
 ./tools/run_negative.sh                 # 6 must-fail + 36 must-not-compile cases
 ./tools/run_baseline.sh                 # the same bugs in plain Zig (about 1.5 min)
 pip install z3-solver
 python3 tools/zvc.py examples/search.zig   # expect 4 verified, 2 rejected, exit code 1
 ```
 
-To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, one `.{ "name", module }` line per module in the assurance report.
+To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, one `.{ "name", module }` line per module in the assurance report. Your own `zig build matrix` is one call to `zirakzigil.addTestMatrix`; see "Build matrix" there.
 
 ## Results (Zig 0.17.0, 2026-10-28)
 
