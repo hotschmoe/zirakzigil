@@ -128,9 +128,16 @@ pub fn build(b: *std.Build) void {
     const zv_tests = b.addTest(.{ .root_module = local });
     test_step.dependOn(&b.addRunArtifact(zv_tests).step);
 
+    // `zig build fuzz --fuzz=<n>`: only the test binaries that contain fuzz
+    // targets. Zig 0.17's fuzz report aborts on a binary without coverage
+    // points ("pcs_len was zero"), so the whole `test` step cannot be fuzzed.
+    const fuzz_step = b.step("fuzz", "Fuzz the laws; pass --fuzz=<n> (Linux only on Zig 0.17)");
+    fuzz_step.dependOn(&b.addRunArtifact(zv_tests).step);
+
     const examples = [_][]const u8{ "search", "ledger", "regress", "queries" };
+    const has_fuzz_targets = [_]bool{ false, true, true, false };
     var example_modules: [examples.len]*std.Build.Module = undefined;
-    for (examples, &example_modules) |name, *module| {
+    for (examples, has_fuzz_targets, &example_modules) |name, fuzzed, *module| {
         module.* = b.createModule(.{
             .root_source_file = b.path(b.fmt("examples/{s}.zig", .{name})),
             .target = target,
@@ -139,6 +146,7 @@ pub fn build(b: *std.Build) void {
         });
         const t = b.addTest(.{ .root_module = module.* });
         test_step.dependOn(&b.addRunArtifact(t).step);
+        if (fuzzed) fuzz_step.dependOn(&b.addRunArtifact(t).step);
     }
 
     // Programs that must PANIC at runtime (run by tools/run_negative.sh).

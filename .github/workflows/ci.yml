@@ -47,4 +47,4 @@ jobs:
         with:
           version: 0.17.0
       # --fuzz=<n> stops after n iterations and fails the build on a crash.
-      - run: zig build test --fuzz=100K
+      - run: zig build fuzz --fuzz=100K
