@@ -23,15 +23,15 @@ const manifest = @import("manifest.zig");
 const Level = manifest.Level;
 const Counts = manifest.Counts;
 
-const header = "{s:<24} {s:>4} {s:>8} {s:>7} {s:>6} {s:>7} {s:>8} {s:>8}  {s:<8} {s}\n";
-const row = "{s:<24} {d:>4} {d:>8} {d:>7} {d:>6} {d:>7} {d:>8} {d:>8}  {s:<8} {s}\n";
+const header = "{s:<24} {s:>4} {s:>8} {s:>7} {s:>6} {s:>7} {s:>8} {s:>9} {s:>8}  {s:<8} {s}\n";
+const row = "{s:<24} {d:>4} {d:>8} {d:>7} {d:>6} {d:>7} {d:>8} {d:>9} {d:>8}  {s:<8} {s}\n";
 
 /// Write the table for `modules` (a tuple of `.{ name, Module }` or
 /// `.{ name, Module, floor }`). Returns true when every module passes.
 pub fn write(w: *std.Io.Writer, comptime modules: anytype, comptime default_floor: Level) std.Io.Writer.Error!bool {
     var total: Counts = .{};
     var ok = true;
-    try w.print(header, .{ "module", "fns", "verified", "checked", "tested", "trusted", "governed", "external", "floor", "status" });
+    try w.print(header, .{ "module", "fns", "verified", "checked", "tested", "trusted", "governed", "unwitness", "external", "floor", "status" });
     inline for (modules) |entry| {
         const floor: Level = comptime if (entry.len > 2) entry[2] else default_floor;
         const a = comptime manifest.audit(entry[1], floor);
@@ -39,9 +39,9 @@ pub fn write(w: *std.Io.Writer, comptime modules: anytype, comptime default_floo
         const pass = a.problem.len == 0;
         ok = ok and pass;
         const c = a.counts;
-        try w.print(row, .{ entry[0], c.fns(), c.verified, c.checked, c.tested, c.trusted, c.governed, c.external, @tagName(floor), if (pass) "ok" else "FAIL" });
+        try w.print(row, .{ entry[0], c.fns(), c.verified, c.checked, c.tested, c.trusted, c.governed, c.unwitnessed, c.external, @tagName(floor), if (pass) "ok" else "FAIL" });
     }
-    try w.print(row, .{ "TOTAL", total.fns(), total.verified, total.checked, total.tested, total.trusted, total.governed, total.external, "", if (ok) "ok" else "FAIL" });
+    try w.print(row, .{ "TOTAL", total.fns(), total.verified, total.checked, total.tested, total.trusted, total.governed, total.unwitnessed, total.external, "", if (ok) "ok" else "FAIL" });
     inline for (modules) |entry| {
         const floor: Level = comptime if (entry.len > 2) entry[2] else default_floor;
         const a = comptime manifest.audit(entry[1], floor);

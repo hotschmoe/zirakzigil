@@ -8,7 +8,7 @@
 //! What a manifest entry may be, by kind of `pub` declaration:
 //!
 //!   pub fn f(...) R           `.f = .tested`  (any `Level`, at or above the floor)
-//!   pub fn T(comptime ...) type   `.T = .governed`  (see below)
+//!   pub fn T(comptime ...) type   `.T = zv.governed(T(u8))`  (see below)
 //!   pub const X = struct { pub fn m() void {} }
 //!                             `.X = .{ .m = .tested }`  (nested manifest), or
 //!                             `.X = .external` if the type is not ours
@@ -18,7 +18,9 @@
 //!   pub const n = 42, pub const E = error{...}   nothing: not runtime code
 //!
 //! Type constructors are not classified by level because their methods only
-//! exist once instantiated. `.governed` records the promise that the returned
+//! exist once instantiated. `zv.governed(T(u8))` names a witness instantiation
+//! that the walk audits like any other type; bare `.governed` only records the
+//! unchecked promise (and is counted as `unwitnessed`) that the returned
 //! type carries its own `pub const assurance` and gates itself with
 //! `comptime requireAssurance(@This(), floor)`; reviewers grep for it.
 
@@ -42,7 +44,10 @@ pub const Counts = struct {
     checked: usize = 0,
     tested: usize = 0,
     trusted: usize = 0,
+    /// Type constructors with a witness instantiation, audited recursively.
     governed: usize = 0,
+    /// Type constructors promised governed but not witnessed. Ratchet to zero.
+    unwitnessed: usize = 0,
     external: usize = 0,
 
     /// Classified functions (those that carry a `Level`).
@@ -56,6 +61,15 @@ pub const Counts = struct {
         return sum;
     }
 };
+
+/// Manifest entry for a type constructor, with a witness instantiation the
+/// walk audits like any other type: `.RingBuffer = zv.governed(RingBuffer(u8))`.
+/// Bare `.governed` is still accepted but reported as `unwitnessed`.
+pub fn governed(comptime witness: type) Governed {
+    return .{ .witness = witness };
+}
+
+pub const Governed = struct { witness: type };
 
 pub const Audit = struct {
     counts: Counts = .{},
@@ -98,11 +112,12 @@ const Walk = struct {
     seen: []const type = &.{},
 };
 
-const Entry = union(enum) { level: Level, governed, external, nested, bad: []const u8 };
+const Entry = union(enum) { level: Level, governed, witnessed: type, external, nested, bad: []const u8 };
 
 fn entryOf(comptime v: anytype) Entry {
     const V = @TypeOf(v);
     if (V == Level) return .{ .level = v };
+    if (V == Governed) return .{ .witnessed = v.witness };
     if (V == @TypeOf(.enum_literal)) {
         const tag = @tagName(v);
         if (std.meta.stringToEnum(Level, tag)) |level| return .{ .level = level };
@@ -162,12 +177,12 @@ fn walk(comptime T: type, comptime manifest: anytype, comptime floor: Level, com
             const makes_type = @typeInfo(D).@"fn".return_type == type;
             if (!has_entry)
                 return failed(w, "pub fn `" ++ name ++ "` in " ++ where ++ " is missing from its assurance manifest. " ++
-                    "Add `." ++ name ++ " = " ++ (if (makes_type) ".governed" else ".tested") ++ "` (or higher) to `pub const assurance`.");
+                    "Add `." ++ name ++ " = " ++ (if (makes_type) "zv.governed(" ++ name ++ "(...))" else ".tested") ++ "` (or higher) to `pub const assurance`.");
             switch (entryOf(@field(manifest, name))) {
                 .level => |level| {
                     if (makes_type)
                         return failed(w, "`" ++ name ++ "` in " ++ where ++ " returns a type, so it has no level of its own. " ++
-                            "Mark it `." ++ name ++ " = .governed` and give the returned type its own `pub const assurance` " ++
+                            "Mark it `." ++ name ++ " = zv.governed(" ++ name ++ "(...))` (or bare `.governed`) and give the returned type its own `pub const assurance` " ++
                             "plus `comptime { zv.requireAssurance(@This(), floor); }`.");
                     if (@backingInt(level) < @backingInt(floor))
                         return failed(w, "`" ++ name ++ "` is ." ++ @tagName(level) ++ ", below this module's floor ." ++ @tagName(floor) ++
@@ -180,7 +195,18 @@ fn walk(comptime T: type, comptime manifest: anytype, comptime floor: Level, com
                     if (!makes_type)
                         return failed(w, "`" ++ name ++ "` in " ++ where ++ " does not return a type, so `.governed` does not apply. " ++
                             "Give it a level such as `.tested`.");
+                    w.counts.unwitnessed += 1;
+                },
+                .witnessed => |W| {
+                    if (!makes_type)
+                        return failed(w, "`" ++ name ++ "` in " ++ where ++ " does not return a type, so `zv.governed(...)` does not apply. " ++
+                            "Give it a level such as `.tested`.");
+                    if (!isContainer(W) or !@hasDecl(W, "assurance"))
+                        return failed(w, "the witness `" ++ @typeName(W) ++ "` for `" ++ name ++ "` in " ++ where ++ " has no `pub const assurance` manifest. " ++
+                            "Add one inside the returned type, plus `comptime { zv.requireAssurance(@This(), floor); }`.");
                     w.counts.governed += 1;
+                    if (!contains(w.seen, W)) w = merge(w, walk(W, W.assurance, floor, w.seen));
+                    if (w.problem.len != 0) return w;
                 },
                 .external => w.counts.external += 1,
                 .nested => return failed(w, "`" ++ name ++ "` in " ++ where ++ " is a function; its entry must be a level, not a nested manifest."),
@@ -270,9 +296,28 @@ test "type constructors are governed, instances are walked" {
         };
     };
     const c = assuranceCounts(M);
-    try std.testing.expectEqual(@as(usize, 1), c.governed);
+    try std.testing.expectEqual(@as(usize, 1), c.unwitnessed);
     try std.testing.expectEqual(@as(usize, 1), c.checked);
     try std.testing.expectEqual(@as(usize, 2), c.tested); // gen and Instance.get
+}
+
+test "a witness instantiation is audited and counted" {
+    const M = struct {
+        pub const assurance = .{ .Box = governed(Box(u8)) };
+        pub fn Box(comptime T: type) type {
+            return struct {
+                v: T,
+                pub const assurance = .{ .get = .checked };
+                pub fn get(b: @This()) T {
+                    return b.v;
+                }
+            };
+        }
+    };
+    const c = assuranceCounts(M);
+    try std.testing.expectEqual(@as(usize, 1), c.governed);
+    try std.testing.expectEqual(@as(usize, 0), c.unwitnessed);
+    try std.testing.expectEqual(@as(usize, 1), c.checked);
 }
 
 test "audit reports problems without failing the build" {

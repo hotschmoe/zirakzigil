@@ -4,7 +4,7 @@ const std = @import("std");
 const zv = @import("zv");
 
 pub const assurance = .{
-    .RingBuffer = .governed, // methods are classified inside the returned type
+    .RingBuffer = zv.governed(RingBuffer(u8)), // audited through a witness instantiation
     .capacityOf = .tested,
 };
 

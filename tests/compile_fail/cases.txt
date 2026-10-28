@@ -184,3 +184,29 @@ const zv = @import("zv");
 comptime { zv.requireAssurance(@This(), .tested); }
 pub fn main() void {}
 ### expect: has no `pub const assurance` manifest
+### witness_without_manifest
+// A witness instantiation must itself carry a manifest.
+const zv = @import("zv");
+pub const assurance = .{ .main = .tested, .Box = zv.governed(Box(u8)) };
+comptime { zv.requireAssurance(@This(), .tested); }
+pub fn Box(comptime T: type) type {
+    return struct { v: T };
+}
+pub fn main() void {}
+### expect: has no `pub const assurance` manifest
+### witness_method_below_floor
+// The witness is held to the floor like any other type.
+const zv = @import("zv");
+pub const assurance = .{ .main = .checked, .Box = zv.governed(Box(u8)) };
+comptime { zv.requireAssurance(@This(), .checked); }
+pub fn Box(comptime T: type) type {
+    return struct {
+        v: T,
+        pub const assurance = .{ .get = .tested };
+        pub fn get(b: @This()) T {
+            return b.v;
+        }
+    };
+}
+pub fn main() void {}
+### expect: below this module's floor
