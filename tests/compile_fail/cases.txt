@@ -1,0 +1,54 @@
+### mixed_brands
+// Handles from two different pools must not be interchangeable.
+const zv = @import("zv");
+const Users = zv.Pool(u32, 8, struct {});
+const Orders = zv.Pool(u32, 8, struct {});
+pub fn main() !void {
+    var users: Users = .{};
+    var orders: Orders = .{};
+    const u = try users.alloc(1);
+    _ = orders.get(u);
+}
+### expect: expected type
+### missing_manifest_entry
+// A contributor adds a pub fn without declaring its assurance level.
+const zv = @import("zv");
+pub const assurance = .{ .a = .checked };
+comptime { zv.requireAssurance(@This(), .tested); }
+pub fn a() void {}
+pub fn b() void {}
+pub fn main() void {}
+### expect: missing from its assurance manifest
+### below_floor
+// A contributor downgrades a function below the module's floor.
+const zv = @import("zv");
+pub const assurance = .{ .a = .trusted, .main = .checked };
+comptime { zv.requireAssurance(@This(), .checked); }
+pub fn a() void {}
+pub fn main() void {}
+### expect: below this module's floor
+### ranged_literal
+// Out-of-range literal is a compile error, not a runtime one.
+const zv = @import("zv");
+pub fn main() void {
+    const pct = zv.Ranged(0, 100).lit(101);
+    _ = pct;
+}
+### expect: literal 101 outside [0, 100]
+### index_range
+// An index type for 8 elements cannot index a 4-element array.
+const zv = @import("zv");
+pub fn main() void {
+    const arr = [_]u8{ 1, 2, 3, 4 };
+    _ = zv.at(arr, zv.Index(8).lit(5));
+}
+### expect: index range does not fit
+### ranged_as_too_small
+// Converting a wider range into a narrower int is rejected statically.
+const zv = @import("zv");
+pub fn main() void {
+    const x = zv.Ranged(0, 1000).lit(7);
+    const y: u8 = x.as(u8);
+    _ = y;
+}
+### expect: does not fit u8
