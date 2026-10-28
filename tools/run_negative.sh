@@ -23,7 +23,7 @@ for name in "${!expect[@]}"; do
 done
 
 tmp=$(mktemp -d)
-mkdir -p "$tmp/src"; cp src/zv.zig "$tmp/src/"
+mkdir -p "$tmp/src"; cp src/*.zig "$tmp/src/"
 printf 'pub const ghost: bool = false;\n' > "$tmp/src/zv_options.zig"
 awk -v dir="$tmp" '
   /^### expect: / { sub(/^### expect: /, ""); print > (dir "/" name ".expect"); next }

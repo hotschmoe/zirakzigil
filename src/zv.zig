@@ -77,6 +77,11 @@ pub fn Ranged(comptime lo: comptime_int, comptime hi: comptime_int) type {
         pub const is_ranged = true;
         const Self = @This();
 
+        pub const assurance = .{ .lit = .checked, .from = .tested, .get = .checked, .as = .checked };
+        comptime {
+            manifest.requireAssurance(Self, .tested);
+        }
+
         /// Comptime literal: out-of-range is a compile error, not a runtime one.
         pub fn lit(comptime x: comptime_int) Self {
             if (x < lo or x > hi) @compileError(std.fmt.comptimePrint("zv.Ranged: literal {d} outside [{d}, {d}]", .{ x, lo, hi }));
@@ -184,6 +189,11 @@ pub fn Pool(comptime T: type, comptime capacity: u32, comptime Brand: type) type
         };
         const Self = @This();
 
+        pub const assurance = .{ .alloc = .tested, .get = .checked, .isLive = .tested, .free = .checked };
+        comptime {
+            manifest.requireAssurance(Self, .tested);
+        }
+
         pub fn alloc(self: *Self, value: T) error{PoolFull}!Handle {
             const i: u32 = if (self.free_len > 0) blk: {
                 self.free_len -= 1;
@@ -240,6 +250,11 @@ pub fn Linear(comptime T: type) type {
         ticket: u32,
         const Self = @This();
 
+        pub const assurance = .{ .init = .tested, .borrow = .checked, .consume = .checked };
+        comptime {
+            manifest.requireAssurance(Self, .tested);
+        }
+
         pub fn init(value: T) Self {
             const t = ledger_next % ledger_capacity;
             ledger_next +%= 1;
@@ -279,6 +294,11 @@ pub fn resetLedger() void {
 pub const PinCheck = struct {
     addr: usize = 0,
 
+    pub const assurance = .{ .pin = .tested, .check = .checked };
+    comptime {
+        manifest.requireAssurance(PinCheck, .tested);
+    }
+
     pub fn pin(self: *PinCheck) void {
         self.addr = @intFromPtr(self);
     }
@@ -291,89 +311,22 @@ pub const PinCheck = struct {
 // 4. Governance: assurance manifest + laws
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub const Level = enum(u8) {
-    /// Reviewed by a code owner; no machine-checked contract. Must be rare.
-    trusted = 0,
-    /// Covered by tests / laws only.
-    tested = 1,
-    /// Contracts present and checked at runtime in safe builds.
-    checked = 2,
-    /// Contracts discharged statically by zvc. CI fails if zvc cannot prove it.
-    verified = 3,
-};
+pub const manifest = @import("manifest.zig");
+pub const Level = manifest.Level;
+pub const Counts = manifest.Counts;
+pub const requireAssurance = manifest.requireAssurance;
+pub const assuranceCounts = manifest.assuranceCounts;
 
-/// Enforce at compile time that every `pub fn` of `M` is classified in
-/// `M.assurance` (an anonymous struct literal of `zv.Level`s) at or above
-/// `floor`. A contributor cannot add a public function without declaring how
-/// much assurance it carries, and cannot lower a module below its floor.
-pub fn requireAssurance(comptime M: type, comptime floor: Level) void {
-    comptime {
-        if (!@hasDecl(M, "assurance"))
-            @compileError("zv: " ++ @typeName(M) ++ " has no `pub const assurance` manifest");
-        const A = @TypeOf(M.assurance);
-        for (@typeInfo(M).@"struct".decl_names) |name| {
-            const F = @TypeOf(@field(M, name));
-            if (@typeInfo(F) != .@"fn") continue;
-            if (!@hasField(A, name))
-                @compileError("zv: pub fn `" ++ name ++ "` in " ++ @typeName(M) ++ " is missing from its assurance manifest");
-            const lvl: Level = @field(M.assurance, name);
-            if (@backingInt(lvl) < @backingInt(floor))
-                @compileError("zv: `" ++ name ++ "` is ." ++ @tagName(lvl) ++ ", below this module's floor ." ++ @tagName(floor));
-        }
-        for (@typeInfo(A).@"struct".field_names) |name| {
-            if (!@hasDecl(M, name))
-                @compileError("zv: assurance manifest names `" ++ name ++ "`, which is not a pub decl of " ++ @typeName(M));
-        }
-    }
-}
+/// Test-time property drivers (see `laws.zig`). Not analyzed unless used.
+pub const laws = @import("laws.zig");
+pub const checkLaws = laws.checkLaws;
+pub const fuzzLaws = laws.fuzzLaws;
 
-/// Run every law in `Laws` (a namespace of `fn(...) bool`) against `iterations`
-/// random argument tuples generated from the parameter types. Laws are
-/// executable today and become proof obligations for zvc tomorrow.
-pub fn checkLaws(comptime Laws: type, iterations: usize, seed: u64) !void {
-    var prng = std.Random.DefaultPrng.init(seed);
-    const rnd = prng.random();
-    inline for (@typeInfo(Laws).@"struct".decl_names) |name| {
-        const f = @field(Laws, name);
-        if (@typeInfo(@TypeOf(f)) != .@"fn") continue;
-        const Args = std.meta.ArgsTuple(@TypeOf(f));
-        var n: usize = 0;
-        while (n < iterations) : (n += 1) {
-            var args: Args = undefined;
-            const info = @typeInfo(Args).@"struct";
-            inline for (info.field_names, info.field_types) |fname, ftype| {
-                @field(args, fname) = genValue(ftype, rnd);
-            }
-            if (!@call(.auto, f, args)) {
-                std.debug.print("zv: law `{s}` falsified by {any}\n", .{ name, args });
-                return error.LawFalsified;
-            }
-        }
-    }
-}
+/// Host-side assurance table for `zig build assurance` (see `report.zig`).
+pub const report = @import("report.zig");
 
-fn genValue(comptime T: type, rnd: std.Random) T {
-    switch (@typeInfo(T)) {
-        .int => {
-            // Bias toward edges: that is where overflow bugs live.
-            return switch (rnd.uintLessThan(u8, 8)) {
-                0 => 0,
-                1 => std.math.maxInt(T),
-                2 => std.math.minInt(T),
-                3 => 1,
-                else => rnd.int(T),
-            };
-        },
-        .bool => return rnd.boolean(),
-        .@"struct" => {
-            if (@hasDecl(T, "is_ranged")) {
-                return .{ .raw = rnd.intRangeAtMost(T.T, T.min, T.max) };
-            }
-            var v: T = undefined;
-            const info = @typeInfo(T).@"struct";
-            inline for (info.field_names, info.field_types) |fname, ftype| @field(v, fname) = genValue(ftype, rnd);
-            return v;
-        },
-        else => @compileError("zv.checkLaws: cannot generate " ++ @typeName(T)),
-    }
+test {
+    _ = manifest;
+    _ = laws;
+    _ = report;
 }
