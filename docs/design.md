@@ -36,6 +36,12 @@ Zig makes the *mechanics* local and explicit (no hidden allocation, no hidden co
 
 The design goal follows directly: **move Zig's invariants out of heads and into signatures, and have a machine check every signature at every call site.** The borrow checker is one way to do that. Contracts plus a small ownership discipline is another, and it is the only one available to a language whose compiler we do not control.
 
+### Why this matters more now: agents as contributors
+
+The contributor population is changing. Projects will increasingly be worked on by agents as well as people, and the agents are not equal: some are frontier models, some are small models running locally, with very different context windows and reliability. An agent that cannot hold the whole program in context is exactly the "contributor who understands only part of the code" that Zig handles worst, because Zig's design assumes one author who knows every invariant. Rust absorbs that kind of contributor better: the borrow checker stops inadvertent bugs and gradual drift no matter who, or what, wrote the change.
+
+Agent-driven development so far favours languages with strong static checking or formal verification for the same reason. A checker that answers in seconds, with an error at the offending line or a concrete counterexample, keeps an agent on track and in its lane. Without one, an agent's mistakes surface late and far from their cause. The design below is aimed at that loop: every layer produces a local, machine-checked verdict that a weaker contributor, human or model, can act on without understanding the whole program, and the governance layer stops any contributor from quietly weakening the guarantees that maintainers set.
+
 ## Deep dive: Verus, the system we are imitating
 
 Verus is an SMT-based verifier for Rust in which specs and proofs are written in Rust syntax, inline, as ghost code that is erased before codegen. Its central trick is that **it borrows Rust's own borrow checker to enforce linearity on ghost permission tokens**, so the SMT solver almost never has to reason about aliasing. The OOPSLA 2023 paper states that no other tool does this ([Lattuada et al.](https://arxiv.org/pdf/2303.05491)).
@@ -297,7 +303,16 @@ The `lowerBound` result is the one that matters for teams: it proves every `xs[m
 
 Phase 0 needs nothing but the prototype and can start on a real codebase now; the compiler patch in Phase 1 is the one decision that commits us to maintaining a fork.
 
-&#91;embedded content: Roadmap · 5 phases with exit gates, 1 parallel track\]
+![Roadmap: Phase 0 to Phase 4 with exit gates, plus parallel track F](img/roadmap.png)
+
+| Phase | Scope | Exit gate |
+| --- | --- | --- |
+| 0. Adopt the comptime and runtime layers (no fork) | zv contracts, `Ranged`, `Pool`, `Linear`; manifests; laws and fuzzing in CI | Every module has a manifest at floor `.tested` or higher |
+| 1. AIR exporter | One small compiler patch: per-function AIR as versioned JSON in ghost builds | Every function in a pilot codebase exports and round-trips |
+| 2. `zvc` on AIR | Port the spike: modular calls, structs, termination, ghost `Int` and `Seq` | Spike results reproduce from AIR, plus one real kernel verified |
+| 3. `zv-own` | Linearity, allocator regions, pointer invalidation, pinned types | Catches seeded ownership bugs at a false-positive rate the team accepts |
+| 4. Verified core | `PointsTo` permission tokens, a verified allocator, proof agents in CI | The core is `.verified` and the `.trusted` count is falling |
+| Parallel track F | C backend plus CBMC proof harnesses | Needs no fork, so it can start any time |
 
 Phases are ordered by dependency, not dated: each gate is the evidence that the next phase is worth building.
 

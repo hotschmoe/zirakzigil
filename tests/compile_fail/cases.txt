@@ -36,18 +36,26 @@ pub fn main() void {
 }
 ### expect: literal 101 outside [0, 100]
 ### index_range
-// An index type for 8 elements cannot index a 4-element array.
+// An index type for 8 elements cannot index a 4-element array, even when the
+// index value is only known at runtime. (Plain `arr[i]` compiles: see
+// tests/baseline/index_range.zig.)
 const zv = @import("zv");
-pub fn main() void {
+pub fn main() !void {
     const arr = [_]u8{ 1, 2, 3, 4 };
-    _ = zv.at(arr, zv.Index(8).lit(5));
+    var raw: u8 = 5;
+    _ = &raw;
+    const i = try zv.Index(8).from(raw);
+    _ = zv.at(arr, i);
 }
 ### expect: index range does not fit
 ### ranged_as_too_small
-// Converting a wider range into a narrower int is rejected statically.
+// Converting a wider range into a narrower int is rejected statically, even
+// for a runtime value. (Plain `@intCast` compiles: see tests/baseline/narrowing.zig.)
 const zv = @import("zv");
-pub fn main() void {
-    const x = zv.Ranged(0, 1000).lit(7);
+pub fn main() !void {
+    var raw: u16 = 7;
+    _ = &raw;
+    const x = try zv.Ranged(0, 1000).from(raw);
     const y: u8 = x.as(u8);
     _ = y;
 }
