@@ -37,6 +37,14 @@ pub const laws = struct {
         const a: SeqNumber = .fromU32(start);
         return n == 0 or a.lt(a.add(n));
     }
+
+    /// Regressions: wrap-around boundaries, replayed before any random case.
+    pub const pinned = .{
+        .addThenLess = .{
+            .{ 0xffff_ffff, 1 },
+            .{ 0x7fff_ffff, 0xffff },
+        },
+    };
 };
 
 test "laws hold, deterministic and fuzz entry" {

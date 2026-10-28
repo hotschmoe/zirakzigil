@@ -24,7 +24,7 @@ Zig gives explicit *mechanics* (allocators, control flow, error handling) but no
 | --- | --- | --- |
 | **A. Contracts** `zv.requires` / `ensures` / `invariant` | Broken pre/postconditions, blamed on the side that broke them | Built |
 | **B. Refinement and brand types** `zv.Ranged`, `zv.Pool(..., struct {})` | Overflow in ranged arithmetic, out-of-range values, cross-pool handle mixups, unsafe narrowing | Built |
-| **C. Runtime ownership backstops** `zv.Linear`, generational handles, `zv.PinCheck` | Double consume, use-after-free via stale handle, copied self-referential structs, leaks | Built |
+| **C. Runtime ownership backstops** `zv.Linear`, generational handles (`zv.Pool`, and `zv.Slots` over borrowed storage), `zv.PinCheck` | Double consume, use-after-free via stale handle, copied self-referential structs, leaks | Built |
 | **D. Static ownership checker** `zv-own` (over AIR) | The bugs in C, at compile time, plus region escapes and pointer invalidation | Designed |
 | **E. Deductive verifier** `zvc` (Verus-style, Z3) | Functional correctness and absence of every safety panic | Spike, on a source subset |
 | **F. C backend + CBMC** | Panic-freedom of bounded proof harnesses | C emission tested, checker not wired |
@@ -71,11 +71,15 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 | Path | What it is |
 | --- | --- |
 | `src/zv.zig` | The library root: contracts, `Ranged` integers, branded generational `Pool`, `Linear(T)`, `PinCheck`; re-exports the rest |
+| `src/slots.zig` | `Slots(T, Brand)` and `Handle(Brand)`: generational handles over caller-provided slot slices, `error.StaleHandle` instead of a panic |
 | `src/manifest.zig` | Assurance manifests: `requireAssurance`, `assuranceCounts`, `audit` |
-| `src/laws.zig` | Executable laws: seeded `checkLaws` (with `replay`), fuzzer-driven `fuzzLaws`, `Bytes(max)` |
+| `src/laws.zig` | Executable laws: seeded `checkLaws` (with `replay`), fuzzer-driven `fuzzLaws`, `Bytes(max)`, pinned counterexamples replayed first |
+| `src/pinned.zig` | The `pub const pinned` corpus: literal-to-argument coercion with compile errors, paste-ready entry printer, fuzz-input encoder |
 | `src/report.zig` | `zv.report`: per-module assurance table for `zig build assurance` |
 | `examples/search.zig` | Functions with contracts. Two contain planted bugs (`midpointNaive`, `withdrawNaive`) |
 | `examples/ledger.zig` | Accounts in a branded pool, money as linear tokens, laws checked as properties |
+| `examples/regress.zig` | The regression workflow: a failed law's printed entry pinned, bug fixed, case kept forever |
+| `examples/queries.zig` | zmoltcp's DNS query-table pattern on `zv.Slots`, with a model-based law and one scenario test |
 | `examples/assurance.zig` | The one-line-per-module opt-in to the assurance report |
 | `tests/consumer/` | A downstream project depending on this package by path; built by `zig build test` |
 | `tests/freestanding/` | Smoke object cross-compiled for aarch64 and riscv64 freestanding |
@@ -86,7 +90,7 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 | `tools/run_negative.sh` | Runs the should-panic and compile-fail suites |
 | `tools/run_baseline.sh` | Runs the plain-Zig controls in three build modes |
 | `docs/design.md` | Design document |
-| `docs/adoption.md` | Consumer guide: dependency lines, manifest rules, report, laws and fuzzing |
+| `docs/adoption.md` | Consumer guide: dependency lines, manifest rules, report, laws, fuzzing, the testing policy (laws + scenarios, regressions are pinned entries) and borrowed slots |
 
 ## Running it
 
@@ -99,7 +103,7 @@ zig build test -Dghost=true             # ghost (verification-only) code compile
 zig build assurance                     # per-module assurance table for the examples
 zig build freestanding                  # zv for aarch64 / riscv64 freestanding, Debug and ReleaseSafe
 zig build test --fuzz                   # laws under the real fuzzer (Linux/macOS only; not implemented on Windows)
-./tools/run_negative.sh                 # 5 must-panic + 21 must-not-compile cases
+./tools/run_negative.sh                 # 6 must-fail + 36 must-not-compile cases
 ./tools/run_baseline.sh                 # the same bugs in plain Zig (about 1.5 min)
 pip install z3-solver
 python3 tools/zvc.py examples/search.zig   # expect 4 verified, 2 rejected, exit code 1
@@ -111,9 +115,9 @@ To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.
 
 | Check | Result |
 | --- | --- |
-| `zig build test` | 20/20 (unit, examples, consumer project, freestanding cross-compile) in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each with and without `-Dghost=true` |
-| Must panic: double consume, stale handle, pinned copy, violated precondition, parser law with an unguarded read | 5/5 |
-| Must not compile: the original 6 plus 15 manifest rules (type constructors, methods, re-exports, foreign types, witnesses, typos, stale entries) | 21/21 |
+| `zig build test` | 41/41 (unit, examples, consumer project, freestanding cross-compile) in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each with and without `-Dghost=true` |
+| Must panic: double consume, stale handle, pinned copy, violated precondition, parser law with an unguarded read, a falsified stateful law (must print a pasteable pinned entry) | 6/6 |
+| Must not compile: the original 6 plus 15 manifest rules (type constructors, methods, re-exports, foreign types, witnesses, typos, stale entries), 13 malformed `pinned` entries and 2 slot-brand mixups | 36/36 |
 | Plain-Zig controls | 9/9 behave as documented: 5 silent in every mode, 4 caught only at runtime in safe builds |
 | `zvc examples/search.zig` | 6 functions in ~0.6 s: 4 verified, 2 planted bugs rejected with counterexamples |
 
