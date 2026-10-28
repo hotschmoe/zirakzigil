@@ -1,6 +1,7 @@
 //! A downstream project consuming zirakzigil the way zmoltcp will.
 
 const std = @import("std");
+const zirakzigil = @import("zirakzigil");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -32,4 +33,11 @@ pub fn build(b: *std.Build) void {
         },
     }) });
     b.step("assurance", "Print the per-module assurance table").dependOn(&b.addRunArtifact(report).step);
+
+    // One line for every optimize mode, ghost on and off, plus freestanding checks.
+    _ = zirakzigil.addTestMatrix(b, .{
+        .root_source_file = b.path("src/root.zig"),
+        .ghost = true,
+        .cross = &.{ "aarch64-freestanding-none", "riscv64-freestanding-none" },
+    });
 }
