@@ -69,20 +69,80 @@ Do not list a re-exporting root next to its children: the table would count them
 
 ## Laws, two ways
 
-`zv.checkLaws(laws, .{ .iterations = 10_000, .seed = 7 })` is the deterministic CI gate: seeded, edge-biased (0, 1, min, max over-represented), same inputs every run. Every iteration seeds its own generator from `(seed, law, iteration)`, so any case can be regenerated alone. `zv.fuzzLaws(laws, corpus)` registers all laws as one `std.testing.fuzz` target; each input byte stream picks a law and derives its arguments (the same model). Call it from a single `test` block. Without `--fuzz` it replays `corpus` plus one empty input, so it also runs in plain `zig build test`.
+`zv.checkLaws(laws, .{ .iterations = 10_000, .seed = 7 })` is the deterministic CI gate: seeded, edge-biased (0, 1, min, max over-represented; for `Ranged`, min, max, min+1, max-1), same inputs every run. Every iteration seeds its own generator from `(seed, law, iteration)`, so any case can be regenerated alone. `zv.fuzzLaws(laws, corpus)` registers all laws as one `std.testing.fuzz` target; each input byte stream picks a law and derives its arguments (the same model). Call it from a single `test` block. Without `--fuzz` it replays `corpus` plus one empty input, so it also runs in plain `zig build test`.
 
-Argument types: integers (`usize` included), `bool`, `?T` (null a quarter of the time), `[N]T` (`[N]u8` is often all `0x00` or all `0xff`), enums (non-exhaustive ones also get arbitrary backing values), `zv.Ranged`, structs of those, and `zv.Bytes(max)`. `Bytes(max)` is the argument type for parser laws: `input.slice()` is a byte string whose *length* is edge-biased (0, 1, `max`, `max-1`, 8, 20, 40) as well as its content, so "this parser never panics on any bytes" and parse/emit round-trips are one-line laws. Anything else is a `@compileError` that says what to use.
+Argument types: integers (`usize` included), `bool`, `?T` (null a quarter of the time), `[N]T` (`[N]u8` is often all `0x00` or all `0xff`), enums (non-exhaustive ones also get arbitrary backing values), `zv.Ranged` (its two ends and their neighbours are over-represented, like ints), structs of those, and `zv.Bytes(max)`. `Bytes(max)` is the argument type for parser laws: `input.slice()` is a byte string whose *length* is edge-biased (0, 1, `max`, `max-1`, 8, 20, 40) as well as its content, so "this parser never panics on any bytes" and parse/emit round-trips are one-line laws. Anything else is a `@compileError` that says what to use.
+
+### Testing policy: laws and scenarios, regressions are pinned
+
+The policy `zv` is built to make cheap: **laws are the specification, and the only tests are laws and end-to-end scenario tests.** There are no small unit tests, because a unit test pins one example while a law states the rule, and a regression is a *pinned law instance*, not a new test function.
+
+- A property of a function or type goes in a `laws` namespace (`pub fn name(args...) bool`), gated by the manifest like any other code.
+- A whole-system behaviour goes in a scenario test that drives the public API end to end.
+- A bug found by a law, by the fuzzer, by a scenario or by a user becomes an entry in `pub const pinned` next to the law that should have caught it. Never a new `test` block.
+
+Workflow, with `examples/regress.zig` as the worked example (the buggy version is `tests/should_panic/law_falsified.zig`):
+
+1. A law fails. `checkLaws` prints the case as a ready-to-paste entry, plus the replay call:
+
+   ```
+   zv: law `neverExceedsCapacity` falsified by random case (seed 11, iteration 7).
+   zv: pin it: paste this into `pub const pinned` in the laws namespace (inside the existing `.neverExceedsCapacity` list if there is one):
+       .neverExceedsCapacity = .{
+           .{
+               .{
+                   .{ .kind = .pop, .weight = 0 },
+                   .{ .kind = .push, .weight = 255 },
+                   ... (one op per line, 12 in all)
+               },
+               2,
+               1,
+           },
+       },
+   zv: reproduce with zv.laws.replay(<laws>, "neverExceedsCapacity", 11, 7)
+   ```
+
+2. Paste it into the laws namespace and re-run: the pinned case now fails first, on every run, with no randomness involved.
+
+   ```zig
+   pub const laws = struct {
+       pub fn neverExceedsCapacity(ops: [12]Op, cap: Cap, tag: ?u8) bool { ... }
+
+       pub const pinned = .{
+           .neverExceedsCapacity = .{
+               .{ .{ ... 12 ops ... }, 2, 1 }, // one tuple per case, in argument order
+           },
+       };
+   };
+   ```
+
+3. Fix the code. The pinned case turns green and stays in the suite for good. Changing a generator, the seed or the iteration count can never lose it, because `checkLaws` replays `pinned` before the first random iteration (even with `.iterations = 0`) and `fuzzLaws` seeds its corpus with it.
+
+`pinned` is a `pub const`, not a function, so the manifest ignores it. It is also not a law: only `pub fn` declarations are. If the pinned case has a different reason to exist than "a law failed" (a protocol trace from a field report, say), write the tuple by hand; the spelling is the same.
+
+### Pinned entries
+
+`pub const pinned = .{ .lawName = .{ .{ arg0, arg1 }, .{ ... } } };` maps a law name to a list of cases, each a tuple of that law's arguments in order. It is checked at compile time (when `checkLaws` or `fuzzLaws` is instantiated): a name that is not a law, a case with the wrong number of arguments, an integer that does not fit, a `Ranged` value outside its range, a misspelled enum tag, a missing or unknown struct field are all compile errors that name the law, the case and the argument, and say what to write. Spelling by argument type:
+
+| Argument | Pinned as |
+| --- | --- |
+| ints, `bool` | `5`, `-1`, `true` |
+| enum | `.tag`; a non-exhaustive enum also takes an integer for an unnamed value |
+| `?T` | `null` or a `T` |
+| `[N]T` | `.{ a, b, ... }`; `[N]u8` also takes a string literal `"\x45\x00"` |
+| `zv.Ranged` | the integer |
+| `zv.Bytes(max)` | a string literal, or `.{ 0x45, 0x00 }` |
+| struct | `.{ .field = value, ... }`; fields with defaults may be left out |
+
+Any value of the argument's exact type is also accepted (`Pct.lit(5)`). Printed entries are the same syntax, multi-line when they would pass 96 columns: a law over `[32]Op` prints one op per line, and byte strings longer than 32 bytes are split into `"..." ++ "..."` chunks, so a pasted entry stays reviewable in a diff.
+
+`fuzzLaws` encodes each pinned case back into the byte stream `std.testing.Smith` consumes (the law's index, then each argument exactly as the generator would read it) and prepends those to its corpus, so the coverage-guided fuzzer starts from every regression. This is simple because `Smith` reads each scalar as a little-endian `u64` and byte strings verbatim; `src/laws.zig` tests that every supported shape survives the round trip. A case whose encoding exceeds 32 KiB is not seeded (`checkLaws` still replays it). `fuzzLaws`'s `corpus` parameter is `comptime` so the two lists can be joined without an allocator; string and array literals work as before.
 
 ### When a law fails
 
-A law that returns `false` prints its arguments and the exact call to reproduce it:
+A law that returns `false` prints the entry to pin, and, for a random case, the exact call to reproduce it (shown above). A pinned case that fails prints `zv: law X falsified by its pinned case N. Fix the code, not the pin:` and the entry.
 
-```
-zv: law `acceptedMeansComplete` falsified by .{ ... }
-zv: reproduce with zv.laws.replay(<laws>, "acceptedMeansComplete", 1, 85)
-```
-
-`zv.laws.replay(Laws, "acceptedMeansComplete", 1, 85)` regenerates exactly that tuple, prints it and calls the law once (put it in a scratch `test` and run it under a debugger).
+`zv.laws.replay(Laws, "neverExceedsCapacity", 11, 7)` regenerates exactly that tuple, prints it as an entry and calls the law once (put it in a scratch `test` and run it under a debugger).
 
 A law that **panics** (an unguarded `b[7]`, an overflow) aborts the test binary with the panic trace; Zig 0.17's test runner offers no hook, and a library cannot override the test root's `panic`, so the counterexample cannot be printed after the fact. Re-run with `.{ .trace = true }`: `checkLaws` prints `zv: law X seed S iteration I` to stderr before every call, and the last such line above the panic names the case. Feed it to `replay`. `tests/should_panic/law_oob.zig` demonstrates this and is part of `tools/run_negative.sh`.
 
