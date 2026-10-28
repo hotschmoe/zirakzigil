@@ -133,29 +133,60 @@ fn fromRandom(comptime T: type, rnd: std.Random) T {
     }
 }
 
-fn check(comptime Laws: type, iterations: usize, seed: u64, comptime verbose: bool) error{LawFalsified}!void {
-    var prng: std.Random.DefaultPrng = .init(seed);
+pub const Options = struct {
+    iterations: usize = 1000,
+    seed: u64 = 0,
+    /// Print `zv: law X seed S iteration I` to stderr before every call. Use
+    /// it when a law panics inside the test (an out-of-bounds read, say): the
+    /// panic cannot be caught, so the last printed line names the case.
+    trace: bool = false,
+};
+
+const Failure = struct { law: []const u8, iteration: usize };
+
+/// Argument tuple for one (law, seed, iteration). Every iteration seeds its
+/// own generator, so any case can be regenerated without running the others.
+fn argsFor(comptime Laws: type, comptime name: []const u8, seed: u64, iteration: usize) Args(Laws, name) {
+    var prng: std.Random.DefaultPrng = .init(std.hash.Wyhash.hash(seed ^ std.hash.int(@as(u64, iteration)), name));
     const rnd = prng.random();
+    var args: Args(Laws, name) = undefined;
+    inline for (@typeInfo(@TypeOf(args)).@"struct".field_names) |field| {
+        @field(args, field) = fromRandom(@TypeOf(@field(args, field)), rnd);
+    }
+    return args;
+}
+
+fn find(comptime Laws: type, options: Options, comptime verbose: bool) ?Failure {
     inline for (comptime lawFns(Laws)) |name| {
-        for (0..iterations) |_| {
-            var args: Args(Laws, name) = undefined;
-            inline for (@typeInfo(@TypeOf(args)).@"struct".field_names) |field| {
-                @field(args, field) = fromRandom(@TypeOf(@field(args, field)), rnd);
+        for (0..options.iterations) |i| {
+            const args = argsFor(Laws, name, options.seed, i);
+            if (options.trace) std.debug.print("zv: law `{s}` seed {d} iteration {d}\n", .{ name, options.seed, i });
+            if (!@call(.auto, @field(Laws, name), args)) {
+                if (verbose) std.debug.print(
+                    "zv: law `{s}` falsified by {any}\nzv: reproduce with zv.laws.replay(<laws>, \"{s}\", {d}, {d})\n",
+                    .{ name, args, name, options.seed, i },
+                );
+                return .{ .law = name, .iteration = i };
             }
-            if (!@call(.auto, @field(Laws, name), args)) return falsified(name, args, verbose);
         }
     }
+    return null;
 }
 
-fn falsified(comptime name: []const u8, args: anytype, comptime verbose: bool) error{LawFalsified} {
-    if (verbose) std.debug.print("zv: law `{s}` falsified by {any}\n", .{ name, args });
-    return error.LawFalsified;
+/// Run every law in `Laws` against `options.iterations` random argument
+/// tuples. Same seed, same inputs. A falsified law prints its arguments and
+/// the exact `replay` call.
+pub fn checkLaws(comptime Laws: type, options: Options) error{LawFalsified}!void {
+    if (find(Laws, options, true) != null) return error.LawFalsified;
 }
 
-/// Run every law in `Laws` against `iterations` random argument tuples.
-/// Same seed, same inputs.
-pub fn checkLaws(comptime Laws: type, iterations: usize, seed: u64) error{LawFalsified}!void {
-    return check(Laws, iterations, seed, true);
+/// Regenerate the argument tuple of one case reported by `checkLaws`, print it,
+/// and call the law once. Run it under a debugger, or let a panic show its
+/// full trace without the other cases around it.
+pub fn replay(comptime Laws: type, comptime name: []const u8, seed: u64, iteration: usize) error{LawFalsified}!void {
+    const args = argsFor(Laws, name, seed, iteration);
+    std.debug.print("zv: replaying law `{s}` seed {d} iteration {d}: {any}\n", .{ name, seed, iteration, args });
+    if (!@call(.auto, @field(Laws, name), args)) return error.LawFalsified;
 }
 
 // ── fuzzer source ────────────────────────────────────────────────────────────
@@ -223,7 +254,10 @@ pub fn fuzzLaws(comptime Laws: type, corpus: []const []const u8) anyerror!void {
                     inline for (@typeInfo(@TypeOf(args)).@"struct".field_names) |field| {
                         @field(args, field) = fromSmith(@TypeOf(@field(args, field)), smith);
                     }
-                    if (!@call(.auto, @field(Laws, name), args)) return falsified(name, args, true);
+                    if (!@call(.auto, @field(Laws, name), args)) {
+                        std.debug.print("zv: law `{s}` falsified by {any}\n", .{ name, args });
+                        return error.LawFalsified;
+                    }
                 }
             }
         }
@@ -267,11 +301,18 @@ const parser_laws = struct {
 };
 
 test "checkLaws is deterministic and passes true laws" {
-    try checkLaws(sample_laws, 500, 1);
+    try checkLaws(sample_laws, .{ .iterations = 500, .seed = 1 });
 }
 
-test "checkLaws finds an off-by-one in a parser at a fixed seed" {
-    try std.testing.expectError(error.LawFalsified, check(parser_laws, 2000, 1, false));
+test "a falsified case is found at a fixed seed and replays exactly" {
+    const failure = find(parser_laws, .{ .iterations = 2000, .seed = 1 }, false) orelse return error.TestExpectedFailure;
+    try std.testing.expectEqualStrings("acceptedMeansComplete", failure.law);
+    try std.testing.expect(failure.iteration < 500); // found quickly
+    try std.testing.expectError(
+        error.LawFalsified,
+        replay(parser_laws, "acceptedMeansComplete", 1, failure.iteration),
+    );
+    try replay(parser_laws, "acceptedMeansComplete", 1, 0); // iteration 0 passes
 }
 
 test "generators cover edge lengths and enum tags" {

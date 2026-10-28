@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
 
     // Programs that must PANIC at runtime (run by tools/run_negative.sh).
     const neg = b.step("negative", "Build should-panic programs");
-    for ([_][]const u8{ "double_consume", "stale_handle", "pin_copy", "precondition" }) |name| {
+    for ([_][]const u8{ "double_consume", "stale_handle", "pin_copy", "precondition", "law_oob" }) |name| {
         const exe = b.addExecutable(.{ .name = name, .root_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("tests/should_panic/{s}.zig", .{name})),
             .target = target,

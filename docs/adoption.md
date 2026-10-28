@@ -29,7 +29,7 @@ Each module has `pub const assurance = .{ ... }` and `comptime { zv.requireAssur
 | Public declaration | Classification | Why |
 | --- | --- | --- |
 | `pub fn f(...)`, including generic fns with `comptime` params or `anytype` | `.f = <Level>` at or above the floor | It is runtime code whatever its parameters are. |
-| `pub fn T(comptime ...) type` | `.T = .governed` | Its methods do not exist until instantiation, so it has no level. `.governed` promises that the returned type has its own `pub const assurance` and gates itself with `comptime { zv.requireAssurance(@This(), floor); }`. Forgetting the entry is an error; giving it a level is an error. Reviewers can grep `.governed`. |
+| `pub fn T(comptime ...) type` | `.T = zv.governed(T(u8))` | Its methods do not exist until instantiation, so it has no level. The *witness* instantiation is audited like any other type: it must carry its own `pub const assurance` (and gate itself with `comptime { zv.requireAssurance(@This(), floor); }`), and its methods count toward the module. Bare `.governed` is still accepted as an unchecked promise but is counted in the report's `unwitness` column so the gate can ratchet it to zero. Forgetting the entry is an error; giving it a level is an error. |
 | `pub const X = struct { pub fn m() void {} }` (any container with pub fns) | `.X = .{ .m = <Level> }`, a nested manifest that mirrors the declaration | Methods are public runtime functions. Nesting follows decl nesting, so `pub const wire = struct { pub const Y = struct {...} }` is `.wire = .{ .Y = .{ ... } }`. |
 | `pub const X = std.Random` or any foreign type | `.X = .external` | Not ours to classify, but the decision must be written down. Counted separately. |
 | `pub const m = @import("m.zig")`, or an instance like `pub const Ring = zv.Ranged(0, 9)` | nothing | A type with its own `assurance` is checked against it, recursively, at the caller's floor. A root.zig that only re-exports gets `assurance = .{}` and a `requireAssurance` that walks every re-exported module. Aliases of an already-visited type are counted once. |
@@ -43,7 +43,7 @@ The alternative considered for type constructors was exempting them. It is simpl
 
 ## Measuring the gate
 
-`zv.assuranceCounts(M)` returns `zv.Counts` (verified, checked, tested, trusted, governed, external) for one module; `zv.manifest.audit(M, floor)` also returns the first problem instead of failing the build. `zv.report` prints the table and exits non-zero if a module has no manifest, an unclassified function, or a level under its floor. A consumer adds one line per module:
+`zv.assuranceCounts(M)` returns `zv.Counts` (verified, checked, tested, trusted, governed, unwitnessed, external) for one module; `zv.manifest.audit(M, floor)` also returns the first problem instead of failing the build. `zv.report` prints the table and exits non-zero if a module has no manifest, an unclassified function, or a level under its floor. A consumer adds one line per module:
 
 ```zig
 // tools/assurance.zig
@@ -69,8 +69,21 @@ Do not list a re-exporting root next to its children: the table would count them
 
 ## Laws, two ways
 
-`zv.checkLaws(laws, iterations, seed)` is the deterministic CI gate: seeded, edge-biased (0, 1, min, max over-represented), same inputs every run. `zv.fuzzLaws(laws, corpus)` registers all laws as one `std.testing.fuzz` target; each input byte stream picks a law and derives its arguments (the same edge bias, `Ranged` values inside their range). Call it from a single `test` block. Without `--fuzz` it replays `corpus` plus one empty input, so it also runs in plain `zig build test`.
+`zv.checkLaws(laws, .{ .iterations = 10_000, .seed = 7 })` is the deterministic CI gate: seeded, edge-biased (0, 1, min, max over-represented), same inputs every run. Every iteration seeds its own generator from `(seed, law, iteration)`, so any case can be regenerated alone. `zv.fuzzLaws(laws, corpus)` registers all laws as one `std.testing.fuzz` target; each input byte stream picks a law and derives its arguments (the same model). Call it from a single `test` block. Without `--fuzz` it replays `corpus` plus one empty input, so it also runs in plain `zig build test`.
 
-Argument types: integers (`usize` included), `bool`, `zv.Ranged`, and structs of those.
+Argument types: integers (`usize` included), `bool`, `?T` (null a quarter of the time), `[N]T` (`[N]u8` is often all `0x00` or all `0xff`), enums (non-exhaustive ones also get arbitrary backing values), `zv.Ranged`, structs of those, and `zv.Bytes(max)`. `Bytes(max)` is the argument type for parser laws: `input.slice()` is a byte string whose *length* is edge-biased (0, 1, `max`, `max-1`, 8, 20, 40) as well as its content, so "this parser never panics on any bytes" and parse/emit round-trips are one-line laws. Anything else is a `@compileError` that says what to use.
+
+### When a law fails
+
+A law that returns `false` prints its arguments and the exact call to reproduce it:
+
+```
+zv: law `acceptedMeansComplete` falsified by .{ ... }
+zv: reproduce with zv.laws.replay(<laws>, "acceptedMeansComplete", 1, 85)
+```
+
+`zv.laws.replay(Laws, "acceptedMeansComplete", 1, 85)` regenerates exactly that tuple, prints it and calls the law once (put it in a scratch `test` and run it under a debugger).
+
+A law that **panics** (an unguarded `b[7]`, an overflow) aborts the test binary with the panic trace; Zig 0.17's test runner offers no hook, and a library cannot override the test root's `panic`, so the counterexample cannot be printed after the fact. Re-run with `.{ .trace = true }`: `checkLaws` prints `zv: law X seed S iteration I` to stderr before every call, and the last such line above the panic names the case. Feed it to `replay`. `tests/should_panic/law_oob.zig` demonstrates this and is part of `tools/run_negative.sh`.
 
 Findings on 0.17.0: the API is `std.testing.fuzz(context, testOne, .{ .corpus = ... })` with `testOne(context, *std.testing.Smith)`. `zig build test --fuzz` is **not implemented on Windows** (`error: --fuzz not yet implemented for windows`; the fuzzer runtime does not compile there either). A fuzz-instrumented build of the examples does compile for `x86_64-linux`. Run `--fuzz` in Linux CI; keep `checkLaws` as the gate that works everywhere. The `--fuzz` run itself was not exercised in this environment (no Zig on the available WSL image).

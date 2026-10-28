@@ -12,6 +12,7 @@ declare -A expect=(
   [stale_handle]="stale or foreign handle"
   [pin_copy]="pinned struct was copied"
   [precondition]="precondition violated"
+  [law_oob]="seed 1 iteration"
 )
 for name in "${!expect[@]}"; do
   out=$(./zig-out/bin/$name 2>&1); code=$?

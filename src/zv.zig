@@ -321,6 +321,7 @@ pub const assuranceCounts = manifest.assuranceCounts;
 /// Test-time property drivers (see `laws.zig`). Not analyzed unless used.
 pub const laws = @import("laws.zig");
 pub const checkLaws = laws.checkLaws;
+pub const LawOptions = laws.Options;
 pub const fuzzLaws = laws.fuzzLaws;
 pub const Bytes = laws.Bytes;
 

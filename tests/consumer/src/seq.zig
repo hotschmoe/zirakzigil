@@ -40,6 +40,6 @@ pub const laws = struct {
 };
 
 test "laws hold, deterministic and fuzz entry" {
-    try zv.checkLaws(laws, 2000, 7);
+    try zv.checkLaws(laws, .{ .iterations = 2000, .seed = 7 });
     try zv.fuzzLaws(laws, &.{});
 }

@@ -70,9 +70,15 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 
 | Path | What it is |
 | --- | --- |
-| `src/zv.zig` | The library: contracts, `Ranged` integers, branded generational `Pool`, `Linear(T)`, `PinCheck`, assurance gate, executable laws |
+| `src/zv.zig` | The library root: contracts, `Ranged` integers, branded generational `Pool`, `Linear(T)`, `PinCheck`; re-exports the rest |
+| `src/manifest.zig` | Assurance manifests: `requireAssurance`, `assuranceCounts`, `audit` |
+| `src/laws.zig` | Executable laws: seeded `checkLaws` (with `replay`), fuzzer-driven `fuzzLaws`, `Bytes(max)` |
+| `src/report.zig` | `zv.report`: per-module assurance table for `zig build assurance` |
 | `examples/search.zig` | Functions with contracts. Two contain planted bugs (`midpointNaive`, `withdrawNaive`) |
 | `examples/ledger.zig` | Accounts in a branded pool, money as linear tokens, laws checked as properties |
+| `examples/assurance.zig` | The one-line-per-module opt-in to the assurance report |
+| `tests/consumer/` | A downstream project depending on this package by path; built by `zig build test` |
+| `tests/freestanding/` | Smoke object cross-compiled for aarch64 and riscv64 freestanding |
 | `tests/should_panic/` | Contributor mistakes that must panic in safe builds |
 | `tests/compile_fail/cases.txt` | Contributor mistakes that must be rejected at compile time |
 | `tests/baseline/` | The same mistakes in plain Zig, showing what the stock compiler does with them |
@@ -80,28 +86,34 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 | `tools/run_negative.sh` | Runs the should-panic and compile-fail suites |
 | `tools/run_baseline.sh` | Runs the plain-Zig controls in three build modes |
 | `docs/design.md` | Design document |
+| `docs/adoption.md` | Consumer guide: dependency lines, manifest rules, report, laws and fuzzing |
 
 ## Running it
 
 Requires **Zig 0.17.0** (pinned in `build.zig.zon`), and Python 3 with `z3-solver` for the verifier.
 
 ```sh
-zig build test                          # contracts, laws (20k property checks), ownership tests
+zig build test                          # unit, example and law tests, freestanding cross-compile, tests/consumer
 zig build test -Doptimize=ReleaseFast   # contracts compile out
 zig build test -Dghost=true             # ghost (verification-only) code compiled in
-./tools/run_negative.sh                 # 4 must-panic + 6 must-not-compile cases
+zig build assurance                     # per-module assurance table for the examples
+zig build freestanding                  # zv for aarch64 / riscv64 freestanding, Debug and ReleaseSafe
+zig build test --fuzz                   # laws under the real fuzzer (Linux/macOS only; not implemented on Windows)
+./tools/run_negative.sh                 # 5 must-panic + 21 must-not-compile cases
 ./tools/run_baseline.sh                 # the same bugs in plain Zig (about 1.5 min)
 pip install z3-solver
 python3 tools/zvc.py examples/search.zig   # expect 4 verified, 2 rejected, exit code 1
 ```
 
+To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, one `.{ "name", module }` line per module in the assurance report.
+
 ## Results (Zig 0.17.0, 2026-10-28)
 
 | Check | Result |
 | --- | --- |
-| `zig build test` | 9/9 in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each with and without `-Dghost=true` |
-| Must panic: double consume, stale handle, pinned copy, violated precondition | 4/4 |
-| Must not compile: mixed brands, missing manifest entry, below floor, out-of-range literal, oversize index range, narrowing | 6/6 |
+| `zig build test` | 20/20 (unit, examples, consumer project, freestanding cross-compile) in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each with and without `-Dghost=true` |
+| Must panic: double consume, stale handle, pinned copy, violated precondition, parser law with an unguarded read | 5/5 |
+| Must not compile: the original 6 plus 15 manifest rules (type constructors, methods, re-exports, foreign types, witnesses, typos, stale entries) | 21/21 |
 | Plain-Zig controls | 9/9 behave as documented: 5 silent in every mode, 4 caught only at runtime in safe builds |
 | `zvc examples/search.zig` | 6 functions in ~0.6 s: 4 verified, 2 planted bugs rejected with counterexamples |
 

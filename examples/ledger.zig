@@ -76,7 +76,7 @@ pub const laws = struct {
 
 test "laws hold on 20k random edge-biased inputs" {
     zv.resetLedger();
-    try zv.checkLaws(laws, 10_000, 0xC0FFEE);
+    try zv.checkLaws(laws, .{ .iterations = 10_000, .seed = 0xC0FFEE });
     try std.testing.expectEqual(@as(usize, 0), zv.leakedTokens());
 }
 
