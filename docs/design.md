@@ -316,6 +316,18 @@ Phase 0 needs nothing but the prototype and can start on a real codebase now; th
 
 Phases are ordered by dependency, not dated: each gate is the evidence that the next phase is worth building.
 
+### Fork policy: stay fast-forwardable
+
+Phase 1 commits us to a compiler fork, and Zig changes a great deal between releases. The fork exists only to get AIR out of the compiler, so it must cost hours, not weeks, to move to each new Zig release. The rules:
+
+1. **A patch queue, not a branch.** Zirakzigil carries the fork in `compiler/`: new files that are copied into the Zig source tree, plus one small hook patch. A script fetches a pinned upstream Zig tag, applies both, and builds. There is no long-lived fork branch to rebase.
+2. **The hook stays tiny.** Edits to existing compiler files are limited to calling into our files at the point where a function's AIR is final, and to passing one command-line flag through. The target is under 50 changed lines in existing files. Everything else lives in files we own.
+3. **One adapter file touches compiler internals.** The exporter reads AIR through a single adapter, so a release that renames instructions or moves fields means updating that file and nothing else.
+4. **The compiler's output does not change.** The patched compiler only reads AIR; it never changes analysis or codegen. Binaries built with the stock compiler and the patched one must be identical, and CI checks that.
+5. **All analysis lives outside the compiler.** `zvc` and `zv-own` consume versioned JSON (a schema version plus the Zig version that produced it). They never link compiler code, so they don't move when the compiler does.
+6. **Early warning, then a port budget.** A scheduled CI job applies the patch to upstream Zig master and reports when it stops applying or building, so breakage shows up before a release does. A tagged release gets ported within a week.
+7. **Exit when upstream allows it.** If Zig gains an official way to dump AIR or a plugin interface, we switch to it and delete the fork. A hook small enough to propose upstream is the best outcome.
+
 **Pilot candidates from our own work.** Two of our Zig codebases fit the stack unusually well:
 
 - **ZenerCalc's calculation core** is pure numeric code with physically bounded inputs. `Ranged` types for loads, spans and section properties catch unit and range mistakes at compile time, and its check routines are natural `.verified` candidates, since a wrong capacity check is exactly the property a test suite under-samples.
@@ -335,7 +347,7 @@ The stack cannot make Zig safe by default the way Rust is. It can make every fun
 
 | Risk | Why it is real | Mitigation |
 | --- | --- | --- |
-| Compiler coupling | `zv-own` and production `zvc` need AIR, which requires our own compiler build; AIR changes every release | Keep the fork to one small patch that exports versioned AIR JSON; pin the compiler; budget a port per Zig release |
+| Compiler coupling | `zv-own` and production `zvc` need AIR, which requires our own compiler build; AIR changes every release | Fork policy (see Roadmap): a patch queue applied to a pinned upstream tag, a hook under 50 lines, output identical to stock, a master-tracking CI canary, a one-week port budget per release |
 | Runtime checks only see executed paths | Layers A to C are dynamic | Pair with the built-in fuzzer and edge-biased laws; move hot spots to `.verified` |
 | Proof cost | Verus case studies ran about 5 lines of proof per line of code | Restrict `.verified` to small cores (allocators, parsers, state machines). Most code stays `.checked`. Use proof agents |
 | Wrong specs | A proof of the wrong property is worse than none, because it reads as safe | Laws owned by maintainers, reviewed like API changes; prefer "prove a guard" (Bend lesson) over proving whole algorithms |
