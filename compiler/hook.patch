@@ -1,0 +1,87 @@
+diff --git a/src/Compilation.zig b/src/Compilation.zig
+index 309ed5d3..99e9da87 100644
+--- a/src/Compilation.zig
++++ b/src/Compilation.zig
+@@ -35,6 +35,7 @@ const Zcu = @import("Zcu.zig");
+ const Sema = @import("Sema.zig");
+ const InternPool = @import("InternPool.zig");
+ const Cache = std.Build.Cache;
++pub const zv_air = @import("zv_air/export.zig");
+ const c_codegen = @import("codegen/c.zig");
+ const libtsan = @import("libs/libtsan.zig");
+ const Zir = std.zig.Zir;
+@@ -163,6 +164,7 @@ clang_preprocessor_mode: ClangPreprocessorMode,
+ /// Whether to print clang argvs to stdout.
+ verbose_cc: bool,
+ verbose_air: bool,
++zv_air_options: zv_air.Options,
+ verbose_intern_pool: bool,
+ verbose_generic_instances: bool,
+ verbose_llvm_ir: ?[]const u8,
+@@ -1552,6 +1554,7 @@ pub const CreateOptions = struct {
+     verbose_cc: bool = false,
+     verbose_link: bool = false,
+     verbose_air: bool = false,
++    zv_air_options: zv_air.Options = .{},
+     verbose_intern_pool: bool = false,
+     verbose_generic_instances: bool = false,
+     verbose_llvm_ir: ?[]const u8 = null,
+@@ -2119,6 +2122,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
+             .clang_preprocessor_mode = options.clang_preprocessor_mode,
+             .verbose_cc = options.verbose_cc,
+             .verbose_air = options.verbose_air,
++            .zv_air_options = options.zv_air_options,
+             .verbose_intern_pool = options.verbose_intern_pool,
+             .verbose_generic_instances = options.verbose_generic_instances,
+             .verbose_llvm_ir = options.verbose_llvm_ir,
+@@ -3368,6 +3372,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
+         man.hash.add(comp.skip_linker_dependencies);
+         //man.hash.add(zcu.emit_h != .no);
+         man.hash.add(zcu.error_limit);
++        comp.zv_air_options.hash(&man.hash);
+     } else {
+         cache_helpers.addModule(&man.hash, comp.root_mod);
+     }
+diff --git a/src/Zcu/PerThread.zig b/src/Zcu/PerThread.zig
+index e8bf4fbc..9ea66d37 100644
+--- a/src/Zcu/PerThread.zig
++++ b/src/Zcu/PerThread.zig
+@@ -2295,6 +2295,7 @@ fn analyzeFuncBody(
+     tracy_trace.addTextFmt("func_ip_index={d}", .{func_index});
+ 
+     var air = try pt.analyzeFuncBodyInner(func_index, reason);
++    try Compilation.zv_air.exportFunc(pt, func_index, &air);
+     var air_owned = true;
+     defer if (air_owned) air.deinit(gpa);
+ 
+diff --git a/src/main.zig b/src/main.zig
+index 7d9d7e8e..0d992f15 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -939,6 +939,7 @@ fn buildOutputType(
+     var verbose_cc = (native_os != .wasi or builtin.link_libc) and
+         EnvVar.ZIG_VERBOSE_CC.isSet(environ_map);
+     var verbose_air = false;
++    var zv_air: Compilation.zv_air.Options = .fromEnviron(environ_map);
+     var verbose_intern_pool = false;
+     var verbose_generic_instances = false;
+     var verbose_llvm_ir: ?[]const u8 = null;
+@@ -1816,6 +1817,10 @@ fn buildOutputType(
+                         verbose_cc = true;
+                     } else if (mem.eql(u8, arg, "--verbose-air")) {
+                         verbose_air = true;
++                    } else if (mem.eql(u8, arg, "--zv-air-out")) {
++                        zv_air.out_dir = args_iter.nextOrFatal();
++                    } else if (mem.eql(u8, arg, "--zv-air-std")) {
++                        zv_air.include_std = true;
+                     } else if (mem.eql(u8, arg, "--verbose-intern-pool")) {
+                         verbose_intern_pool = true;
+                     } else if (mem.eql(u8, arg, "--verbose-generic-instances")) {
+@@ -3731,6 +3736,7 @@ fn buildOutputType(
+         .verbose_cc = verbose_cc,
+         .verbose_link = verbose_link,
+         .verbose_air = verbose_air,
++        .zv_air_options = zv_air,
+         .verbose_intern_pool = verbose_intern_pool,
+         .verbose_generic_instances = verbose_generic_instances,
+         .verbose_llvm_ir = verbose_llvm_ir,
