@@ -210,3 +210,198 @@ pub fn Box(comptime T: type) type {
 }
 pub fn main() void {}
 ### expect: below this module's floor
+### pinned_unknown_law
+// A pinned entry names a law that does not exist (typo or renamed law).
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: u8) bool {
+        return true;
+    }
+    pub const pinned = .{ .g = .{.{1}} };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: names `.g`, which is not a law there
+### pinned_wrong_arity
+// A pinned case has the wrong number of arguments.
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: u8, _: bool) bool {
+        return true;
+    }
+    pub const pinned = .{ .f = .{.{1}} };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: takes 2 argument(s) but the case has 1
+### pinned_int_out_of_range
+// A pinned integer does not fit the argument type.
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: u8) bool {
+        return true;
+    }
+    pub const pinned = .{ .f = .{.{256}} };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: 256 does not fit u8
+### pinned_ranged_outside
+// A pinned Ranged value is outside its range.
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: zv.Ranged(0, 100)) bool {
+        return true;
+    }
+    pub const pinned = .{ .f = .{.{101}} };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: 101 is outside zv.Ranged(0, 100)
+### pinned_bad_enum_tag
+// A pinned enum literal is not a tag of the enum.
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: Mode) bool {
+        return true;
+    }
+    pub const pinned = .{ .f = .{.{.maybe}} };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: is not a tag of
+### pinned_wrong_type
+// A pinned value has the wrong kind (a number for a bool).
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: bool) bool {
+        return true;
+    }
+    pub const pinned = .{ .f = .{.{1}} };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: expected `true` or `false`
+### pinned_case_not_tuple
+// A case is not wrapped in its own tuple (forgot the inner braces).
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: u8, _: u8) bool {
+        return true;
+    }
+    pub const pinned = .{ .f = .{ 1, 2 } };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: a case is a tuple of the law's arguments
+### pinned_bytes_too_long
+// A pinned byte string is longer than the zv.Bytes capacity.
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: zv.Bytes(2)) bool {
+        return true;
+    }
+    pub const pinned = .{ .f = .{.{"abc"}} };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: 3 bytes do not fit
+### pinned_array_length
+// A pinned array has the wrong number of elements.
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: [3]u8) bool {
+        return true;
+    }
+    pub const pinned = .{ .f = .{.{.{ 1, 2 }}} };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: needs exactly 3 elements
+### pinned_struct_field
+// A pinned struct names a field that does not exist.
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: S) bool {
+        return true;
+    }
+    pub const pinned = .{ .f = .{.{.{ .a = 1, .c = true }}} };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: has no field `c`
+### pinned_missing_field
+// A pinned struct omits a field that has no default.
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: S) bool {
+        return true;
+    }
+    pub const pinned = .{ .f = .{.{.{ .a = 1 }}} };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: missing field `.b`
+### pinned_not_a_struct
+// pinned must be keyed by law name, not a tuple.
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: u8) bool {
+        return true;
+    }
+    pub const pinned = .{ .{1} };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: must be a struct literal keyed by law name
+### pinned_list_not_tuple
+// A law's pinned list is not a tuple of cases.
+const zv = @import("zv");
+const Mode = enum { off, on };
+const S = struct { a: u8, b: bool };
+const laws = struct {
+    pub fn f(_: u8) bool {
+        return true;
+    }
+    pub const pinned = .{ .f = 5 };
+};
+pub fn main() !void {
+    try zv.checkLaws(laws, .{});
+}
+### expect: must be a list of argument tuples

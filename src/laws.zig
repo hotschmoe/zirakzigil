@@ -17,11 +17,19 @@
 //!               and typical header sizes (8, 20, 40) -- for parser laws
 //!   structs     field by field
 //!
+//! Regressions are pinned argument tuples, replayed before any random case:
+//!
+//!     pub const pinned = .{ .lawName = .{ .{ arg0, arg1 }, .{ ... } } };
+//!
+//! A falsified law prints a ready-to-paste entry. See `pinned.zig` for the
+//! spelling of each argument type and `docs/adoption.md` for the workflow.
+//!
 //! Test-time only: both drivers print on failure and use `std.testing`, so
 //! they are analyzed (and OS-dependent) only where a test calls them.
 
 const std = @import("std");
 const manifest = @import("manifest.zig");
+const pinned = @import("pinned.zig");
 
 /// A byte string of at most `max` bytes, the argument type for parser laws:
 /// `pub fn parses(input: zv.Bytes(64)) bool { _ = parse(input.slice()) catch {}; return true; }`
@@ -155,7 +163,12 @@ pub const Options = struct {
     trace: bool = false,
 };
 
-const Failure = struct { law: []const u8, iteration: usize };
+const Failure = struct {
+    law: []const u8,
+    /// Random case number, or the index within the law's pinned list.
+    iteration: usize,
+    pinned: bool = false,
+};
 
 /// Argument tuple for one (law, seed, iteration). Every iteration seeds its
 /// own generator, so any case can be regenerated without running the others.
@@ -169,16 +182,98 @@ fn argsFor(comptime Laws: type, comptime name: []const u8, seed: u64, iteration:
     return args;
 }
 
+// ── pinned cases ─────────────────────────────────────────────────────────────
+
+fn isTuple(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @typeInfo(T).@"struct".is_tuple;
+}
+
+fn lawList(comptime Laws: type) []const u8 {
+    comptime {
+        var list: []const u8 = "";
+        for (lawFns(Laws), 0..) |n, i| list = list ++ (if (i > 0) ", " else "") ++ "`" ++ n ++ "`";
+        return list;
+    }
+}
+
+/// The pinned argument tuples of one law, converted to its argument types.
+/// Every problem in `pinned` (unknown law, bad shape, wrong arity or type) is
+/// a compile error that says what to write. The key check runs for every law,
+/// so a typo in a law name is caught even though no law has that name.
+fn pinnedCases(comptime Laws: type, comptime name: []const u8) []const Args(Laws, name) {
+    return comptime buildPinned(Laws, name);
+}
+
+fn buildPinned(comptime Laws: type, comptime name: []const u8) []const Args(Laws, name) {
+    {
+        if (!@hasDecl(Laws, "pinned")) return &.{};
+        const P = @TypeOf(Laws.pinned);
+        const where_ns = "`pinned` in " ++ @typeName(Laws);
+        if (@typeInfo(P) != .@"struct" or @typeInfo(P).@"struct".is_tuple)
+            @compileError("zv: " ++ where_ns ++ " must be a struct literal keyed by law name: " ++
+                "`pub const pinned = .{ .lawName = .{ .{ arg0, arg1 } } };`.");
+        for (@typeInfo(P).@"struct".field_names) |key| {
+            const is_law = @hasDecl(Laws, key) and @typeInfo(@TypeOf(@field(Laws, key))) == .@"fn";
+            if (!is_law) @compileError("zv: " ++ where_ns ++ " names `." ++ key ++ "`, which is not a law there. Laws: " ++ lawList(Laws) ++ ".");
+        }
+        if (!@hasField(P, name)) return &.{};
+
+        const list = @field(Laws.pinned, name);
+        const A = Args(Laws, name);
+        const fields = @typeInfo(A).@"struct".field_names;
+        if (!isTuple(@TypeOf(list)))
+            @compileError("zv: " ++ where_ns ++ ": `." ++ name ++ "` must be a list of argument tuples: `." ++ name ++ " = .{ .{ arg0, arg1 }, .{ ... } }`.");
+        var out: [list.len]A = undefined;
+        for (0..list.len) |k| {
+            const case = list[k];
+            const where = std.fmt.comptimePrint("in {s}, `.{s}` case {d}", .{ @typeName(Laws), name, k });
+            if (!isTuple(@TypeOf(case)))
+                @compileError("zv: pinned " ++ where ++ ": a case is a tuple of the law's arguments, like `.{ arg0, arg1 }`.");
+            if (case.len != fields.len)
+                @compileError(std.fmt.comptimePrint("zv: pinned {s}: law `{s}` takes {d} argument(s) but the case has {d}.", .{ where, name, fields.len, case.len }));
+            for (fields, 0..) |field, i| {
+                const T = @FieldType(A, field);
+                @field(out[k], field) = pinned.coerce(T, case[i], where ++ std.fmt.comptimePrint(", argument {d} (`{s}`)", .{ i, @typeName(T) }));
+            }
+        }
+        const final = out;
+        return &final;
+    }
+}
+
+fn reportRandom(comptime name: []const u8, args: anytype, seed: u64, iteration: usize) void {
+    std.debug.print(
+        "zv: law `{s}` falsified by random case (seed {d}, iteration {d}).\n" ++
+            "zv: pin it: paste this into `pub const pinned` in the laws namespace (inside the existing `.{s}` list if there is one):\n{f}\n" ++
+            "zv: reproduce with zv.laws.replay(<laws>, \"{s}\", {d}, {d})\n",
+        .{ name, seed, iteration, name, pinned.entry(name, args), name, seed, iteration },
+    );
+}
+
+fn reportPinned(comptime name: []const u8, args: anytype, case: usize) void {
+    std.debug.print(
+        "zv: law `{s}` falsified by its pinned case {d}. Fix the code, not the pin:\n{f}\n",
+        .{ name, case, pinned.entry(name, args) },
+    );
+}
+
 fn find(comptime Laws: type, options: Options, comptime verbose: bool) ?Failure {
+    // Pinned regressions first, every run, whatever the generators do.
+    inline for (comptime lawFns(Laws)) |name| {
+        for (pinnedCases(Laws, name), 0..) |args, k| {
+            if (options.trace) std.debug.print("zv: law `{s}` pinned case {d}\n", .{ name, k });
+            if (!@call(.auto, @field(Laws, name), args)) {
+                if (verbose) reportPinned(name, args, k);
+                return .{ .law = name, .iteration = k, .pinned = true };
+            }
+        }
+    }
     inline for (comptime lawFns(Laws)) |name| {
         for (0..options.iterations) |i| {
             const args = argsFor(Laws, name, options.seed, i);
             if (options.trace) std.debug.print("zv: law `{s}` seed {d} iteration {d}\n", .{ name, options.seed, i });
             if (!@call(.auto, @field(Laws, name), args)) {
-                if (verbose) std.debug.print(
-                    "zv: law `{s}` falsified by {any}\nzv: reproduce with zv.laws.replay(<laws>, \"{s}\", {d}, {d})\n",
-                    .{ name, args, name, options.seed, i },
-                );
+                if (verbose) reportRandom(name, args, options.seed, i);
                 return .{ .law = name, .iteration = i };
             }
         }
@@ -186,9 +281,10 @@ fn find(comptime Laws: type, options: Options, comptime verbose: bool) ?Failure 
     return null;
 }
 
-/// Run every law in `Laws` against `options.iterations` random argument
-/// tuples. Same seed, same inputs. A falsified law prints its arguments and
-/// the exact `replay` call.
+/// Replay the `pinned` cases of every law, then run each law against
+/// `options.iterations` random argument tuples. Same seed, same inputs. A
+/// falsified law prints a ready-to-paste `pinned` entry and the exact `replay`
+/// call.
 pub fn checkLaws(comptime Laws: type, options: Options) error{LawFalsified}!void {
     if (find(Laws, options, true) != null) return error.LawFalsified;
 }
@@ -198,7 +294,7 @@ pub fn checkLaws(comptime Laws: type, options: Options) error{LawFalsified}!void
 /// full trace without the other cases around it.
 pub fn replay(comptime Laws: type, comptime name: []const u8, seed: u64, iteration: usize) error{LawFalsified}!void {
     const args = argsFor(Laws, name, seed, iteration);
-    std.debug.print("zv: replaying law `{s}` seed {d} iteration {d}: {any}\n", .{ name, seed, iteration, args });
+    std.debug.print("zv: replaying law `{s}` seed {d} iteration {d}:\n{f}\n", .{ name, seed, iteration, pinned.entry(name, args) });
     if (!@call(.auto, @field(Laws, name), args)) return error.LawFalsified;
 }
 
@@ -253,12 +349,38 @@ fn fromSmith(comptime T: type, smith: *std.testing.Smith) T {
     }
 }
 
+/// Fuzz inputs that regenerate each pinned case: the law's index, then its
+/// arguments in the encoding `fromSmith` reads. A case too large for the
+/// encoder's buffer is skipped (checkLaws still replays it).
+fn pinnedCorpus(comptime Laws: type, comptime names: []const []const u8) []const []const u8 {
+    comptime {
+        @setEvalBranchQuota(1_000_000_000);
+        var out: []const []const u8 = &.{};
+        for (names, 0..) |name, law_index| {
+            for (pinnedCases(Laws, name)) |args| {
+                var sink: pinned.Sink = .{};
+                sink.word(law_index);
+                for (@typeInfo(@TypeOf(args)).@"struct".field_names) |field| {
+                    pinned.encode(@FieldType(@TypeOf(args), field), @field(args, field), &sink);
+                }
+                if (sink.overflow) continue;
+                const bytes = sink.buf[0..sink.len].*;
+                out = out ++ &[_][]const u8{&bytes};
+            }
+        }
+        return out;
+    }
+}
+
 /// Run `Laws` as one fuzz target: each input picks a law, then derives its
-/// arguments from the input bytes. Under plain `zig build test` this only
-/// replays `corpus` plus an empty input (a smoke test); under
+/// arguments from the input bytes. The corpus is seeded with every `pinned`
+/// case, encoded back into input bytes, plus `corpus` (comptime, so the two
+/// can be joined without an allocator). Under plain `zig build test` this only
+/// replays the corpus plus an empty input (a smoke test); under
 /// `zig build test --fuzz` the fuzzer drives it. Call from a single `test`.
-pub fn fuzzLaws(comptime Laws: type, corpus: []const []const u8) anyerror!void {
+pub fn fuzzLaws(comptime Laws: type, comptime corpus: []const []const u8) anyerror!void {
     const names = comptime lawFns(Laws);
+    const seeds = comptime pinnedCorpus(Laws, names) ++ corpus;
     const Target = struct {
         fn one(_: void, smith: *std.testing.Smith) anyerror!void {
             const pick = smith.index(names.len);
@@ -269,14 +391,17 @@ pub fn fuzzLaws(comptime Laws: type, corpus: []const []const u8) anyerror!void {
                         @field(args, field) = fromSmith(@TypeOf(@field(args, field)), smith);
                     }
                     if (!@call(.auto, @field(Laws, name), args)) {
-                        std.debug.print("zv: law `{s}` falsified by {any}\n", .{ name, args });
+                        std.debug.print(
+                            "zv: law `{s}` falsified. Pin it by pasting this into `pub const pinned` in the laws namespace:\n{f}\n",
+                            .{ name, pinned.entry(name, args) },
+                        );
                         return error.LawFalsified;
                     }
                 }
             }
         }
     };
-    try std.testing.fuzz({}, Target.one, .{ .corpus = corpus });
+    try std.testing.fuzz({}, Target.one, .{ .corpus = seeds });
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -387,4 +512,140 @@ test "tiny Ranged types stay inside their range" {
 
 test "fuzzLaws replays a corpus and the empty input" {
     try fuzzLaws(sample_laws, &.{ "\x00\x01\x02\x03", &@as([64]u8, @splat(0xff)) });
+}
+
+// ── pinned tests ─────────────────────────────────────────────────────────────
+
+const Kind = enum { send, recv, tick };
+const Op = struct { kind: Kind, len: u8 = 0 };
+const Pct = @import("zv.zig").Ranged(0, 100);
+const Signed = @import("zv.zig").Ranged(-8, 8);
+
+/// One law over every supported argument shape, pinned with every spelling.
+const kitchen_sink = struct {
+    pub fn everything(a: i16, b: bool, c: ?u8, d: [3]u8, e: Kind, f: Mode, g: Pct, h: Bytes(16), i: Op, j: [2]Op, k: usize, l: i64, m: Signed, n: u128) bool {
+        _ = .{ a, b, c, d, e, f, g, h, i, j, k, l, m, n };
+        return true;
+    }
+
+    pub const pinned = .{
+        .everything = .{
+            .{ -5, true, null, "abc", .recv, 7, 100, "hi", .{ .kind = .tick }, .{ .{ .kind = .send, .len = 3 }, .{ .kind = .recv } }, 9, -1, -8, 1 << 100 },
+            .{ 0, false, 200, .{ 1, 2, 3 }, .tick, .on, Pct.lit(0), .{ 0x45, 0x00 }, .{ .kind = .send }, .{ .{ .kind = .send }, .{ .kind = .send } }, 0, 0, 8, 0 },
+        },
+    };
+};
+
+test "pinned cases pass through checkLaws before any random case" {
+    try checkLaws(kitchen_sink, .{ .iterations = 0 });
+}
+
+test "pinned cases survive a round trip through the fuzz encoding" {
+    const names = comptime lawFns(kitchen_sink);
+    const corpus = comptime pinnedCorpus(kitchen_sink, names);
+    try std.testing.expectEqual(2, corpus.len);
+    inline for (corpus, 0..) |bytes, k| {
+        var smith: std.testing.Smith = .{ .in = bytes };
+        try std.testing.expectEqual(0, smith.index(names.len));
+        var args: Args(kitchen_sink, "everything") = undefined;
+        inline for (@typeInfo(@TypeOf(args)).@"struct".field_names) |field| {
+            @field(args, field) = fromSmith(@TypeOf(@field(args, field)), &smith);
+        }
+        try std.testing.expectEqualDeep(pinnedCases(kitchen_sink, "everything")[k], args);
+        try std.testing.expectEqual(0, smith.in.?.len); // consumed exactly
+    }
+}
+
+test "fuzzLaws runs the pinned corpus" {
+    try fuzzLaws(kitchen_sink, &.{});
+}
+
+const too_big = struct {
+    pub fn huge(a: [40000]u8) bool {
+        return a.len == 40000;
+    }
+    pub const pinned = .{ .huge = .{.{@as([40000]u8, @splat(1))}} };
+};
+
+test "a pinned case too large for the fuzz encoder is skipped, not an error" {
+    try std.testing.expectEqual(0, comptime pinnedCorpus(too_big, lawFns(too_big)).len);
+    try checkLaws(too_big, .{ .iterations = 0 });
+}
+
+const regression_laws = struct {
+    pub fn lessThanTwo(a: u8, b: u8) bool {
+        return a +% b != 2;
+    }
+    pub fn notFortyTwo(x: u8) bool {
+        return x != 42;
+    }
+    pub const pinned = .{
+        .notFortyTwo = .{ .{0}, .{42}, .{43} },
+    };
+};
+
+test "a falsified pinned case is reported before random cases, with its index" {
+    const failure = find(regression_laws, .{ .iterations = 0 }, false) orelse return error.TestExpectedFailure;
+    try std.testing.expect(failure.pinned);
+    try std.testing.expectEqualStrings("notFortyTwo", failure.law);
+    try std.testing.expectEqual(1, failure.iteration);
+    // With random cases enabled the pinned failure still wins, even though
+    // `lessThanTwo` is declared first and falls to random cases quickly.
+    const again = find(regression_laws, .{ .iterations = 5000, .seed = 3 }, false).?;
+    try std.testing.expect(again.pinned);
+}
+
+/// The entry below was pasted from the output of `parser_laws` failing.
+const parser_regression = struct {
+    pub fn acceptedMeansComplete(input: Bytes(64)) bool {
+        const h = parseHeader(input.slice()) orelse return true;
+        return h.last_in_range;
+    }
+    pub const pinned = .{
+        .acceptedMeansComplete = .{
+            .{"\xff\xff\xff\xff\xff\xff\xff"},
+        },
+    };
+};
+
+test "an entry printed for a random failure, pasted into pinned, fails first" {
+    const failure = find(parser_regression, .{ .iterations = 0 }, false).?;
+    try std.testing.expect(failure.pinned);
+    try std.testing.expectEqual(0, failure.iteration);
+}
+
+test "pinned is not a law and does not trip the assurance manifest" {
+    const Module = struct {
+        pub const assurance = .{ .laws = .{ .conservation = .tested } };
+        pub const laws = struct {
+            pub fn conservation(a: u8, k: Kind, s: Bytes(4)) bool {
+                _ = .{ a, k, s };
+                return true;
+            }
+            pub const pinned = .{ .conservation = .{.{ 1, .tick, "ab" }} };
+        };
+    };
+    try std.testing.expectEqualStrings("", manifest.audit(Module, .tested).problem);
+    try checkLaws(Module.laws, .{ .iterations = 10 });
+    // And the laws list does not include it.
+    try std.testing.expectEqual(1, comptime lawFns(Module.laws).len);
+}
+
+test "the printed entry for a wide argument stays pasteable" {
+    var buf: [2048]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    const ops: [3]Op = .{ .{ .kind = .send, .len = 200 }, .{ .kind = .recv }, .{ .kind = .tick, .len = 1 } };
+    try w.print("{f}", .{pinned.entry("script", .{ ops, @as(u8, 4) })});
+    try std.testing.expectEqualStrings(
+        \\    .script = .{
+        \\        .{
+        \\            .{
+        \\                .{ .kind = .send, .len = 200 },
+        \\                .{ .kind = .recv, .len = 0 },
+        \\                .{ .kind = .tick, .len = 1 },
+        \\            },
+        \\            4,
+        \\        },
+        \\    },
+    , w.buffered());
 }

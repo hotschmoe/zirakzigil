@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
     const zv_tests = b.addTest(.{ .root_module = local });
     test_step.dependOn(&b.addRunArtifact(zv_tests).step);
 
-    const examples = [_][]const u8{ "search", "ledger" };
+    const examples = [_][]const u8{ "search", "ledger", "regress" };
     var example_modules: [examples.len]*std.Build.Module = undefined;
     for (examples, &example_modules) |name, *module| {
         module.* = b.createModule(.{
@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
 
     // Programs that must PANIC at runtime (run by tools/run_negative.sh).
     const neg = b.step("negative", "Build should-panic programs");
-    for ([_][]const u8{ "double_consume", "stale_handle", "pin_copy", "precondition", "law_oob" }) |name| {
+    for ([_][]const u8{ "double_consume", "stale_handle", "pin_copy", "precondition", "law_oob", "law_falsified" }) |name| {
         const exe = b.addExecutable(.{ .name = name, .root_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("tests/should_panic/{s}.zig", .{name})),
             .target = target,
