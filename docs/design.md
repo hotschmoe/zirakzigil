@@ -308,7 +308,7 @@ Phase 0 needs nothing but the prototype and can start on a real codebase now; th
 | Phase | Scope | Exit gate |
 | --- | --- | --- |
 | 0. Adopt the comptime and runtime layers (no fork) | zv contracts, `Ranged`, `Pool`, `Linear`; manifests; laws and fuzzing in CI | Every module has a manifest at floor `.tested` or higher |
-| 1. AIR exporter | One small compiler patch: per-function AIR as versioned JSON in ghost builds | Every function in a pilot codebase exports and round-trips |
+| 1. AIR exporter ([plan](phase1.md)) | One small compiler patch: per-function AIR as versioned JSON | Every function in a pilot codebase exports and round-trips |
 | 2. `zvc` on AIR | Port the spike: modular calls, structs, termination, ghost `Int` and `Seq` | Spike results reproduce from AIR, plus one real kernel verified |
 | 3. `zv-own` | Linearity, allocator regions, pointer invalidation, pinned types | Catches seeded ownership bugs at a false-positive rate the team accepts |
 | 4. Verified core | `PointsTo` permission tokens, a verified allocator, proof agents in CI | The core is `.verified` and the `.trusted` count is falling |
