@@ -20,7 +20,7 @@ const zv = b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv");
 
 The exported module carries no target or optimize mode, so it is compiled for whatever the importing artifact targets (freestanding included). Only `ghost` travels through the dependency arguments.
 
-`zv` allocates nothing and needs no OS on the library path. `zig build freestanding` compiles a smoke object using contracts, `Ranged`, `Pool`, `Linear`, `PinCheck` and `requireAssurance` for `aarch64` and `riscv64` freestanding in Debug and ReleaseSafe, so an OS dependency cannot slip in. `zv.laws`, `zv.checkLaws`, `zv.fuzzLaws` and `zv.report` are test and host tooling (they print and use `std.testing`); they are analyzed only where used. Two properties to know about: runtime panics go through the root's `panic` handler (the stock freestanding one traps), and the `Linear` ledger is a 2 KB global that is not thread safe.
+`zv` allocates nothing and needs no OS on the library path. `zig build freestanding` compiles a smoke object using contracts, `Ranged`, `Pool`, `Slots`, `Linear`, `PinCheck` and `requireAssurance` for `aarch64` and `riscv64` freestanding in Debug and ReleaseSafe, so an OS dependency cannot slip in. `zv.laws`, `zv.checkLaws`, `zv.fuzzLaws` and `zv.report` are test and host tooling (they print and use `std.testing`); they are analyzed only where used. Two properties to know about: runtime panics go through the root's `panic` handler (the stock freestanding one traps), and the `Linear` ledger is a 2 KB global that is not thread safe.
 
 ## Manifest rules
 
@@ -66,6 +66,44 @@ b.step("assurance", "Per-module assurance table").dependOn(&b.addRunArtifact(rep
 ```
 
 Do not list a re-exporting root next to its children: the table would count them twice. The root's own `requireAssurance` already gates the whole tree.
+
+## Borrowed slots: `zv.Slots`
+
+`zv.Pool` owns comptime-capacity storage and panics on a stale handle, which is right when a stale handle is a bug in the application. A *library* socket has the other contract: the caller hands it a slice of slots (`queries: []QuerySlot`), the capacity is a runtime value, and a stale handle is a normal outcome (the user cancelled, or read the result twice) that must come back as an error. `zv.Slots(T, Brand)` is that building block; `Pool` is unchanged.
+
+```zig
+const Table = zv.Slots(QueryState, struct {});      // brand: a unique type per table
+pub const QuerySlot = Table.Slot;                   // what callers declare storage of
+pub const QueryHandle = Table.Handle;               // plain data: {index: u32, generation: u32}
+
+var storage: [4]QuerySlot = @splat(.empty);         // caller-owned
+var queries: Table = .init(&storage);               // borrows; frees every slot, keeps generations
+
+const h = try queries.insert(state);                // error.NoFreeSlot when full
+const s = try queries.get(h);                       // *QueryState, error.StaleHandle if freed or reused
+const owned = try queries.take(h);                  // move out and free
+try queries.free(h);                                // error.StaleHandle if already freed
+var it = queries.iterator();                        // live entries: .handle and .value (*T)
+while (it.next()) |e| e.value.* = ...;
+```
+
+A slot's generation counts how often it has been filled (0 means never used, so a zeroed handle is never live) and survives freeing, so a reused slot never honours an old handle. Handles of different brands are different types and so are their slots: passing a socket's handle to a query table, or the wrong storage to `init`, is a compile error (`tests/compile_fail/cases.txt`: `slots_brand_mix`, `slots_storage_mix`). Two tables of the *same* brand (two instances of one socket type) are told apart only by generation; if that matters, give each its own brand (its own type). `insert` is a linear scan, as `findFreeSlot` is today, which suits tables of a handful of entries. The error names are chosen so a caller's own error set can include them and `try` straight through: `NoFreeSlot`, `StaleHandle`.
+
+The mapping from `zmoltcp/src/socket/dns.zig`, worked out in `examples/queries.zig` (a compact socket with a model-based law and one scenario test):
+
+| `dns.zig` today | with `zv.Slots` |
+| --- | --- |
+| `pub const QueryHandle = struct { index: usize, generation: u32 }` | `pub const QueryHandle = Table.Handle` |
+| `pub const QuerySlot = struct { state: ?QueryState = null, generation: u32 = 0 }` | `pub const QuerySlot = Table.Slot` (`value: ?QueryState`, `generation`; users write `@splat(.empty)`) |
+| `queries: []QuerySlot` | `queries: Table`, built by `Table.init(slots)` |
+| `findFreeSlot()` then `state = .{ .pending = pq }` and `generation = handle.generation` | `try self.queries.insert(.{ .pending = pq })` |
+| `liveSlot(handle) orelse return error.StaleHandle` | `try self.queries.get(handle)` |
+| `slot.state = null` after a completed or failed result | `self.queries.take(handle)` (or `free`) |
+| `cancelQuery`: `if (self.liveSlot(h)) \|slot\| slot.state = null` | `self.queries.free(h) catch {}` |
+| `for (self.queries) \|*slot\| { const state = slot.state orelse continue; ... }` in `process`, `dispatch`, `pollAt` | `var it = self.queries.iterator(); while (it.next()) \|e\| ...` (`e.value` is `*QueryState`, so `.pending` can be updated in place) |
+| tests peeking at `s.queries[h.index].state` | `try s.queries.get(h)` |
+
+`findFreeSlot`, `liveSlot`, the `generation` bookkeeping in `startQueryRaw` and the two `generation`/`state == null` checks go away. One observable difference: `QuerySlot.state` is `QuerySlot.value`, which only matters to code that reaches into the slice directly.
 
 ## Laws, two ways
 
