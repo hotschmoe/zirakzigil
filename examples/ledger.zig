@@ -22,6 +22,7 @@ pub const assurance = .{
     .withdraw = .checked,
     .deposit = .checked,
     .total = .tested,
+    .laws = .{ .conservation = .tested, .ranged_sum_in_range = .tested },
 };
 
 comptime {
@@ -130,4 +131,8 @@ test "ghost code compiles away unless -Dghost=true" {
     var ghost_counter: usize = 0;
     if (zv.ghost) ghost_counter += 1;
     try std.testing.expectEqual(@as(usize, if (zv.ghost) 1 else 0), ghost_counter);
+}
+
+test "laws under the fuzzer (corpus replay without --fuzz)" {
+    try zv.fuzzLaws(laws, &.{ &@as([32]u8, @splat(0)), &@as([32]u8, @splat(0xff)) });
 }
