@@ -8,5 +8,7 @@ pub fn main(init: std.process.Init) !void {
     try zv.report.run(init.io, .{
         .{ "examples/search", @import("search") },
         .{ "examples/ledger", @import("ledger") },
+        .{ "examples/regress", @import("regress") },
+        .{ "examples/queries", @import("queries") },
     }, .tested);
 }

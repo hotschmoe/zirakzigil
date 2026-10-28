@@ -230,6 +230,12 @@ pub fn Pool(comptime T: type, comptime capacity: u32, comptime Brand: type) type
     };
 }
 
+/// Generational handles over caller-provided slot slices: the `Pool`
+/// counterpart for libraries that borrow storage and report stale handles as
+/// errors instead of panicking (see `slots.zig`).
+pub const slots = @import("slots.zig");
+pub const Slots = slots.Slots;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 3b. Linear(T): affine ownership tokens, enforced at runtime
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,4 +338,5 @@ test {
     _ = manifest;
     _ = laws;
     _ = report;
+    _ = slots;
 }

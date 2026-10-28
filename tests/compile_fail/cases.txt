@@ -405,3 +405,28 @@ pub fn main() !void {
     try zv.checkLaws(laws, .{});
 }
 ### expect: must be a list of argument tuples
+### slots_brand_mix
+// A handle from one slot set must not be accepted by another set.
+const zv = @import("zv");
+const Sockets = zv.Slots(u32, struct {});
+const Queries = zv.Slots(u32, struct {});
+pub fn main() !void {
+    var a: [2]Sockets.Slot = @splat(.empty);
+    var b: [2]Queries.Slot = @splat(.empty);
+    var sockets: Sockets = .init(&a);
+    var queries: Queries = .init(&b);
+    const h = try sockets.insert(1);
+    _ = try queries.get(h);
+}
+### expect: expected type
+### slots_storage_mix
+// Storage for one set cannot back another: slots carry the brand too.
+const zv = @import("zv");
+const Sockets = zv.Slots(u32, struct {});
+const Queries = zv.Slots(u32, struct {});
+pub fn main() void {
+    var b: [2]Queries.Slot = @splat(.empty);
+    var sockets: Sockets = .init(&b);
+    _ = &sockets;
+}
+### expect: expected type

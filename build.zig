@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
     const zv_tests = b.addTest(.{ .root_module = local });
     test_step.dependOn(&b.addRunArtifact(zv_tests).step);
 
-    const examples = [_][]const u8{ "search", "ledger", "regress" };
+    const examples = [_][]const u8{ "search", "ledger", "regress", "queries" };
     var example_modules: [examples.len]*std.Build.Module = undefined;
     for (examples, &example_modules) |name, *module| {
         module.* = b.createModule(.{
@@ -59,6 +59,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zv", .module = local },
             .{ .name = "search", .module = example_modules[0] },
             .{ .name = "ledger", .module = example_modules[1] },
+            .{ .name = "regress", .module = example_modules[2] },
+            .{ .name = "queries", .module = example_modules[3] },
         },
     }) });
     assurance.dependOn(&b.addRunArtifact(report).step);

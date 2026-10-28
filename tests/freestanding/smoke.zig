@@ -6,6 +6,7 @@ const zv = @import("zv");
 const Percent = zv.Ranged(0, 100);
 const Slots = zv.Pool(u32, 4, struct {});
 const Token = zv.Linear(u32);
+const Borrowed = zv.Slots(u32, struct {});
 
 pub const assurance = .{ .smoke = .checked, .clamp = .verified };
 
@@ -33,7 +34,12 @@ pub fn smoke(x: u32) u32 {
     pinned.check();
     if (zv.ghost) zv.assume(true);
 
-    const v = pool.get(h).* + token.consume() + clamp(x, 10);
+    var storage: [2]Borrowed.Slot = @splat(.empty);
+    var borrowed: Borrowed = .init(&storage);
+    const bh = borrowed.insert(x) catch return 0;
+    const taken = borrowed.take(bh) catch return 0;
+
+    const v = pool.get(h).* + token.consume() + clamp(x, 10) +% taken;
     _ = pool.isLive(h);
     pool.free(h);
     return v;
