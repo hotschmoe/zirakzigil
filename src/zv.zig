@@ -1,6 +1,6 @@
 //! zv — the comptime layer of "Zirakzigil", a verification stack for Zig.
 //!
-//! Everything in this file is plain Zig 0.16. No compiler fork, no plugin.
+//! Everything in this file is plain Zig 0.17. No compiler fork, no plugin.
 //! It gives a team four things the language does not:
 //!
 //!   1. Contracts      requires / ensures / invariant / assume, written in Zig,
@@ -171,7 +171,7 @@ pub fn at(arr: anytype, idx: anytype) @TypeOf(arr[0]) {
 pub fn Pool(comptime T: type, comptime capacity: u32, comptime Brand: type) type {
     return struct {
         items: [capacity]T = undefined,
-        gens: [capacity]u32 = [_]u32{0} ** capacity, // even = free, odd = live
+        gens: [capacity]u32 = @splat(0), // even = free, odd = live
         free_list: [capacity]u32 = undefined,
         free_len: u32 = 0,
         high: u32 = 0,
@@ -231,7 +231,7 @@ pub fn Pool(comptime T: type, comptime capacity: u32, comptime Brand: type) type
 // at compile time; this is the backstop that works today.
 
 const ledger_capacity = 1 << 14;
-var ledger: std.StaticBitSet(ledger_capacity) = std.StaticBitSet(ledger_capacity).initEmpty();
+var ledger: std.StaticBitSet(ledger_capacity) = .empty;
 var ledger_next: u32 = 0;
 
 pub fn Linear(comptime T: type) type {
@@ -269,7 +269,7 @@ pub fn leakedTokens() usize {
     return ledger.count();
 }
 pub fn resetLedger() void {
-    ledger = std.StaticBitSet(ledger_capacity).initEmpty();
+    ledger = .empty;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -311,18 +311,18 @@ pub fn requireAssurance(comptime M: type, comptime floor: Level) void {
         if (!@hasDecl(M, "assurance"))
             @compileError("zv: " ++ @typeName(M) ++ " has no `pub const assurance` manifest");
         const A = @TypeOf(M.assurance);
-        for (@typeInfo(M).@"struct".decls) |d| {
-            const F = @TypeOf(@field(M, d.name));
+        for (@typeInfo(M).@"struct".decl_names) |name| {
+            const F = @TypeOf(@field(M, name));
             if (@typeInfo(F) != .@"fn") continue;
-            if (!@hasField(A, d.name))
-                @compileError("zv: pub fn `" ++ d.name ++ "` in " ++ @typeName(M) ++ " is missing from its assurance manifest");
-            const lvl: Level = @field(M.assurance, d.name);
-            if (@intFromEnum(lvl) < @intFromEnum(floor))
-                @compileError("zv: `" ++ d.name ++ "` is ." ++ @tagName(lvl) ++ ", below this module's floor ." ++ @tagName(floor));
+            if (!@hasField(A, name))
+                @compileError("zv: pub fn `" ++ name ++ "` in " ++ @typeName(M) ++ " is missing from its assurance manifest");
+            const lvl: Level = @field(M.assurance, name);
+            if (@backingInt(lvl) < @backingInt(floor))
+                @compileError("zv: `" ++ name ++ "` is ." ++ @tagName(lvl) ++ ", below this module's floor ." ++ @tagName(floor));
         }
-        for (@typeInfo(A).@"struct".fields) |f| {
-            if (!@hasDecl(M, f.name))
-                @compileError("zv: assurance manifest names `" ++ f.name ++ "`, which is not a pub decl of " ++ @typeName(M));
+        for (@typeInfo(A).@"struct".field_names) |name| {
+            if (!@hasDecl(M, name))
+                @compileError("zv: assurance manifest names `" ++ name ++ "`, which is not a pub decl of " ++ @typeName(M));
         }
     }
 }
@@ -333,18 +333,19 @@ pub fn requireAssurance(comptime M: type, comptime floor: Level) void {
 pub fn checkLaws(comptime Laws: type, iterations: usize, seed: u64) !void {
     var prng = std.Random.DefaultPrng.init(seed);
     const rnd = prng.random();
-    inline for (@typeInfo(Laws).@"struct".decls) |d| {
-        const f = @field(Laws, d.name);
+    inline for (@typeInfo(Laws).@"struct".decl_names) |name| {
+        const f = @field(Laws, name);
         if (@typeInfo(@TypeOf(f)) != .@"fn") continue;
         const Args = std.meta.ArgsTuple(@TypeOf(f));
         var n: usize = 0;
         while (n < iterations) : (n += 1) {
             var args: Args = undefined;
-            inline for (std.meta.fields(Args)) |fld| {
-                @field(args, fld.name) = genValue(fld.type, rnd);
+            const info = @typeInfo(Args).@"struct";
+            inline for (info.field_names, info.field_types) |fname, ftype| {
+                @field(args, fname) = genValue(ftype, rnd);
             }
             if (!@call(.auto, f, args)) {
-                std.debug.print("zv: law `{s}` falsified by {any}\n", .{ d.name, args });
+                std.debug.print("zv: law `{s}` falsified by {any}\n", .{ name, args });
                 return error.LawFalsified;
             }
         }
@@ -369,7 +370,8 @@ fn genValue(comptime T: type, rnd: std.Random) T {
                 return .{ .raw = rnd.intRangeAtMost(T.T, T.min, T.max) };
             }
             var v: T = undefined;
-            inline for (std.meta.fields(T)) |fld| @field(v, fld.name) = genValue(fld.type, rnd);
+            const info = @typeInfo(T).@"struct";
+            inline for (info.field_names, info.field_types) |fname, ftype| @field(v, fname) = genValue(ftype, rnd);
             return v;
         },
         else => @compileError("zv.checkLaws: cannot generate " ++ @typeName(T)),

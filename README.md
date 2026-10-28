@@ -55,7 +55,7 @@ The full rationale, the survey of prior art (Verus, Bend 2, SPARK, CN, Kani) and
 
 ## Running it
 
-Requires Zig 0.16.0, and Python 3 with `z3-solver` for the verifier.
+Requires **Zig 0.17.0** (pinned in `build.zig.zon`), and Python 3 with `z3-solver` for the verifier.
 
 ```sh
 zig build test                          # contracts, laws (20k property checks), ownership tests
@@ -66,14 +66,16 @@ pip install z3-solver
 python3 tools/zvc.py examples/search.zig   # expect 4 verified, 2 rejected, exit code 1
 ```
 
-## Results
+## Results (Zig 0.17.0, 2026-10-28)
 
 | Check | Result |
 | --- | --- |
-| `zig build test` | 9/9 in Debug, ReleaseSafe, ReleaseFast, and with `-Dghost=true` |
+| `zig build test` | 9/9 in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each with and without `-Dghost=true` |
 | Must panic: double consume, stale handle, pinned copy, violated precondition | 4/4 |
 | Must not compile: mixed brands, missing manifest entry, below floor, out-of-range literal, oversize index, narrowing | 6/6 |
-| `zvc examples/search.zig` | 34 obligations, 6 functions, ~1 s: 4 verified, 2 planted bugs rejected |
+| `zvc examples/search.zig` | 6 functions in ~0.6 s: 4 verified, 2 planted bugs rejected with counterexamples |
+
+The prototype was first built on Zig 0.16.0. Porting it to 0.17 took four mechanical changes: `**` array repetition became `@splat`, `StaticBitSet.initEmpty()` became `.empty`, `@typeInfo(T).@"struct"` exposes `decl_names` / `field_names` / `field_types` in place of `decls` / `fields`, and `@intFromEnum` became `@backingInt`. None of them touched the design. Only layers that read compiler internals (AIR) will need real rework per release.
 
 ### What `zvc` understands today
 

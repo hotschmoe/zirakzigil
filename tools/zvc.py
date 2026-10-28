@@ -576,6 +576,9 @@ def find_fn(toks, name):
 
 
 def main():
+    # Windows consoles default to cp1252, which cannot print the ✓/✗ marks.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     args = sys.argv[1:]
     path = args[0]
     only = args[args.index("--only") + 1] if "--only" in args else None
