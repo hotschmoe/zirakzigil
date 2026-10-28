@@ -38,13 +38,7 @@ jobs:
           python tools/zvc.py examples/search.zig | tee zvc.out || true
           grep -q "4 verified, 2 rejected" zvc.out
 
-  fuzz:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.17.0
-      # --fuzz=<n> stops after n iterations and fails the build on a crash.
-      - run: zig build fuzz --fuzz=100K
+
+  # Fuzzing is off in CI: Zig 0.17's fuzz report aborts with "corrupted
+  # coverage file ...: pcs_len was zero". Run `zig build fuzz --fuzz=<n>`
+  # locally on Linux; re-enable here once the upstream bug is fixed.
