@@ -321,6 +321,7 @@ pub const assuranceCounts = manifest.assuranceCounts;
 pub const laws = @import("laws.zig");
 pub const checkLaws = laws.checkLaws;
 pub const fuzzLaws = laws.fuzzLaws;
+pub const Bytes = laws.Bytes;
 
 /// Host-side assurance table for `zig build assurance` (see `report.zig`).
 pub const report = @import("report.zig");
