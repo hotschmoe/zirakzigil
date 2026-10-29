@@ -257,8 +257,8 @@ const OwnerKind = enum {
     buffer,
     /// The object stored at `place` (an arena, a container): while it lives, what it handed out is valid.
     object,
-    /// Storage that was read at `place` and moved by the call `n` into another object (`mem.swap`): it ends with
-    /// whatever ends it at `place`, and with the object it moved into.
+    /// Storage that the call `n` moved to `place` (`mem.swap`): it ends with whatever ends `place`, and the pointers
+    /// that were read from where it came from (`moved_origin`) end with it.
     moved,
 };
 
@@ -414,6 +414,8 @@ const Run = struct {
     /// For the summary: bit i is set when a linear value that came in as parameter i went into memory the function
     /// does not own.
     token_stored: u64 = 0,
+    /// Where the storage of a `.moved` owner was read: the owner itself is keyed by where it was put.
+    moved_origin: std.AutoHashMapUnmanaged(dom.Id, PlaceId) = .empty,
     /// For the summary: the parameter the result is the pointer of, on every path that returns.
     ret_same: ?u32 = null,
     ret_same_conflict: bool = false,
@@ -1337,10 +1339,11 @@ const Run = struct {
                     from = rec.n;
                 },
                 .buffer, .moved => {
-                    const at = r.places.rec(rec.place);
+                    const source = if (rec.kind == .moved) r.moved_origin.get(o) orelse continue else rec.place;
+                    const at = r.places.rec(source);
                     if (at.kind != .param or at.n == root.n) continue;
                     from = at.n;
-                    from_path = try r.places.path(r.arena, rec.place);
+                    from_path = try r.places.path(r.arena, source);
                     moves = rec.kind == .moved;
                 },
                 else => continue,
@@ -1468,8 +1471,9 @@ const Run = struct {
                     try r.noteRet(.{ .param = rec.n, .path = &.{}, .stored = false, .interior = inside });
                 },
                 .buffer, .object, .moved => {
-                    const root = r.places.rec(rec.place);
-                    if (root.kind == .param) try r.noteRet(.{ .param = root.n, .path = try r.places.path(r.arena, rec.place), .stored = true });
+                    const source = if (rec.kind == .moved) r.moved_origin.get(o) orelse rec.place else rec.place;
+                    const root = r.places.rec(source);
+                    if (root.kind == .param) try r.noteRet(.{ .param = root.n, .path = try r.places.path(r.arena, source), .stored = true });
                 },
                 .heap => r.ret_alloc = true,
             }
@@ -1611,8 +1615,8 @@ const Run = struct {
                 const pointee = r.pointeeOf(arg_tys[0]);
                 var first = try r.load(st, inst, args[0], pointee);
                 var second = try r.load(st, inst, args[1], pointee);
-                first.owners = try r.moveStorage(st, first.owners, args[0]);
-                second.owners = try r.moveStorage(st, second.owners, args[1]);
+                first.owners = try r.moveStorage(st, first.owners, args[0], args[1]);
+                second.owners = try r.moveStorage(st, second.owners, args[1], args[0]);
                 try r.store(inst, st, args[0], second, pointee);
                 try r.store(inst, st, args[1], first, pointee);
             },
@@ -1721,17 +1725,19 @@ const Run = struct {
         r.set(inst, res);
     }
 
-    /// What was read from the place `from` points to, as storage that moves along with the value: it is now reached
-    /// through wherever the value is stored, and ends with the object it is stored in.
-    fn moveStorage(r: *Run, st: *State, owners: Set, from: Val) Allocator.Error!Set {
-        const pl = from.place orelse return owners;
+    /// What was read from the place `from` points to, as storage that now lives where `to` points: it ends with
+    /// whatever ends that place, and what was read from `from` ends with it.
+    fn moveStorage(r: *Run, st: *State, owners: Set, from: Val, to: Val) Allocator.Error!Set {
+        const source = from.place orelse return owners;
+        const dest = to.place orelse return owners;
         var out: Set = .empty;
         for (owners.ids) |o| {
             const rec = r.owners.items[o];
-            if (rec.kind == .buffer and rec.place == pl) {
+            if (rec.kind == .buffer and rec.place == source) {
                 // The read of this very call: the same storage under another name.
-                const gone = try r.owner(.moved, rec.n, pl);
+                const gone = try r.owner(.moved, rec.n, dest);
                 st.revive(gone);
+                try r.moved_origin.put(r.arena, gone, source);
                 out = try out.with(r.arena, gone);
             } else out = try out.with(r.arena, o);
         }
@@ -1993,7 +1999,13 @@ const Run = struct {
                 if (args[put.from].place orelse args[put.from].src) |base| {
                     var from_at = base;
                     for (fp) |down| from_at = try r.places.child(r.arena, from_at, down);
-                    const kept = try r.owner(if (put.moves) .moved else .buffer, inst.id, from_at);
+                    var kept = try r.owner(.buffer, inst.id, from_at);
+                    if (put.moves) if (args[put.into].place) |into| {
+                        var to_at = into;
+                        for (put.path) |down| to_at = try r.places.child(r.arena, to_at, down);
+                        kept = try r.owner(.moved, inst.id, to_at);
+                        try r.moved_origin.put(r.arena, kept, from_at);
+                    };
                     st.revive(kept);
                     value.owners = try Set.single(r.arena, kept);
                 }
@@ -2033,6 +2045,15 @@ const Run = struct {
             for (path) |down| at = try r.places.child(r.arena, at, down);
             try out.append(r.arena, at);
             return out.items;
+        }
+        // A pointer into the storage an object holds is not a pointer to the object.
+        for (val.owners.ids) |o| {
+            const rec = r.owners.items[o];
+            const from_call = if (r.by_id[rec.n]) |i| switch (i.tag) {
+                .call, .call_always_tail, .call_never_tail, .call_never_inline => true,
+                else => false,
+            } else false;
+            if (rec.kind == .moved or (rec.kind == .buffer and from_call)) return out.items;
         }
         for (val.owners.ids) |o| {
             const rec = r.owners.items[o];
@@ -2100,21 +2121,21 @@ const Run = struct {
             };
             if (!hit) continue;
             try st.die(r.arena, @intCast(id), .{ .loc = loc, .text = text, .trail = st.trail });
+            // Pointers read from where the storage came from end with it.
+            if (o.kind == .moved) if (r.moved_origin.get(@intCast(id))) |from| {
+                for (r.owners.items, 0..) |q, qid| {
+                    if (q.kind == .buffer and r.places.overlaps(q.place, from))
+                        try st.die(r.arena, @intCast(qid), .{ .loc = loc, .text = text, .trail = st.trail });
+                }
+                try r.noteKill(from, false);
+            };
         }
         if (ends) {
             const obj = try r.owner(.object, 0, pl);
             try st.die(r.arena, obj, .{ .loc = loc, .text = text, .trail = st.trail });
+            // The allocations an object holds (a list built by `fromOwnedSlice`) go with it.
             for ((try r.readPlace(st, pl)).owners.ids) |o| {
-                const rec = r.owners.items[o];
-                switch (rec.kind) {
-                    .heap => try st.die(r.arena, o, .{ .loc = loc, .text = text, .trail = st.trail }),
-                    // Storage that moved into the object goes with it.
-                    .moved => if (!r.places.overlaps(rec.place, pl)) {
-                        try r.killPlace(st, rec.place, false, loc, text);
-                        try r.noteKill(rec.place, false);
-                    },
-                    else => {},
-                }
+                if (r.owners.items[o].kind == .heap) try st.die(r.arena, o, .{ .loc = loc, .text = text, .trail = st.trail });
             }
         }
     }
@@ -2150,6 +2171,7 @@ const Run = struct {
                 },
                 .buffer, .moved => {
                     try r.noteKill(rec.place, false);
+                    if (rec.kind == .moved) if (r.moved_origin.get(o)) |from| try r.noteKill(from, false);
                     try r.endOne(st, inst, o, what, deferred);
                 },
                 else => {},

@@ -417,6 +417,154 @@ pub fn okValueCopyAcrossPut(gpa: Allocator) !u32 {
     return v;
 }
 
+pub fn okGetOrPutDupeKey(gpa: Allocator, words: []const []const u8) !usize {
+    var map: std.StringHashMapUnmanaged(u32) = .empty;
+    defer {
+        var it = map.keyIterator();
+        while (it.next()) |k| gpa.free(k.*);
+        map.deinit(gpa);
+    }
+    for (words) |w| {
+        const gop = try map.getOrPut(gpa, w);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = gpa.dupe(u8, w) catch |e| {
+                _ = map.remove(w);
+                return e;
+            };
+            gop.value_ptr.* = 0;
+        }
+        gop.value_ptr.* += 1;
+    }
+    return map.count();
+}
+
+pub fn okNested(gpa: Allocator) !usize {
+    var rows: std.ArrayList(std.ArrayList(u32)) = .empty;
+    defer {
+        for (rows.items) |*r| r.deinit(gpa);
+        rows.deinit(gpa);
+    }
+    var i: u32 = 0;
+    while (i < 4) : (i += 1) {
+        var row: std.ArrayList(u32) = .empty;
+        errdefer row.deinit(gpa);
+        try row.append(gpa, i);
+        try rows.append(gpa, row);
+    }
+    try rows.items[0].append(gpa, 9);
+    return rows.items[0].items.len;
+}
+
+pub fn okArenaContainers(gpa: Allocator) !usize {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var map: std.StringHashMapUnmanaged(std.ArrayList(u8)) = .empty;
+    const gop = try map.getOrPut(a, "k");
+    gop.value_ptr.* = .empty;
+    try gop.value_ptr.appendSlice(a, "hello");
+    try gop.value_ptr.append(a, '!');
+    return map.get("k").?.items.len;
+}
+
+pub fn okMultiSet(gpa: Allocator) !u32 {
+    const P = struct { a: u32, b: u32 };
+    var list: std.MultiArrayList(P) = .empty;
+    defer list.deinit(gpa);
+    try list.append(gpa, .{ .a = 1, .b = 2 });
+    try list.append(gpa, .{ .a = 3, .b = 4 });
+    list.set(0, .{ .a = 9, .b = 9 });
+    _ = list.swapRemove(1);
+    return list.get(0).a;
+}
+
+pub fn okPriority(gpa: Allocator) !u32 {
+    var pq: std.PriorityQueue(u32, void, struct {
+        fn less(_: void, a: u32, b: u32) std.math.Order {
+            return std.math.order(a, b);
+        }
+    }.less) = .empty;
+    defer pq.deinit(gpa);
+    try pq.push(gpa, 5);
+    try pq.push(gpa, 1);
+    return pq.pop().?;
+}
+
+pub fn okArrayHashGetOrPut(gpa: Allocator) !u32 {
+    var m: std.AutoArrayHashMapUnmanaged(u32, u32) = .empty;
+    defer m.deinit(gpa);
+    var i: u32 = 0;
+    while (i < 20) : (i += 1) {
+        const gop = try m.getOrPut(gpa, i % 7);
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        gop.value_ptr.* += 1;
+    }
+    var sum: u32 = 0;
+    for (m.values()) |v| sum += v;
+    return sum;
+}
+
+pub fn okTakeOwnership(gpa: Allocator) ![]u32 {
+    var list: std.ArrayList(u32) = try .initCapacity(gpa, 4);
+    errdefer list.deinit(gpa);
+    list.appendAssumeCapacity(1);
+    list.appendAssumeCapacity(2);
+    const view = list.items;
+    const sum = view[0] + view[1];
+    try list.append(gpa, sum);
+    return list.toOwnedSlice(gpa);
+}
+
+pub fn okSplitJoin(gpa: Allocator, text: []const u8) ![][]const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    errdefer parts.deinit(gpa);
+    var it = std.mem.splitScalar(u8, text, ',');
+    while (it.next()) |p| try parts.append(gpa, p);
+    return parts.toOwnedSlice(gpa);
+}
+
+pub fn okPopAll(gpa: Allocator) !u32 {
+    var stack: std.ArrayList(u32) = .empty;
+    defer stack.deinit(gpa);
+    try stack.appendSlice(gpa, &.{ 1, 2, 3 });
+    var sum: u32 = 0;
+    while (stack.pop()) |v| sum += v;
+    return sum;
+}
+
+pub fn okSwapContainers(gpa: Allocator) !usize {
+    var a: std.ArrayList(u8) = .empty;
+    defer a.deinit(gpa);
+    var b: std.ArrayList(u8) = .empty;
+    defer b.deinit(gpa);
+    try a.appendSlice(gpa, "aa");
+    try b.appendSlice(gpa, "bbbb");
+    std.mem.swap(std.ArrayList(u8), &a, &b);
+    return a.items.len * 10 + b.items.len;
+}
+
+pub fn okFetchRemove(gpa: Allocator) !u32 {
+    var m: std.AutoHashMapUnmanaged(u32, []u8) = .empty;
+    defer {
+        var it = m.valueIterator();
+        while (it.next()) |v| gpa.free(v.*);
+        m.deinit(gpa);
+    }
+    try m.put(gpa, 1, try gpa.dupe(u8, "one"));
+    try m.put(gpa, 2, try gpa.dupe(u8, "two"));
+    if (m.fetchRemove(1)) |kv| gpa.free(kv.value);
+    return m.count();
+}
+
+pub fn okClearAndRefill(gpa: Allocator) !u8 {
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(gpa);
+    try list.appendSlice(gpa, "abc");
+    list.clearRetainingCapacity();
+    try list.appendSlice(gpa, "xyz");
+    return list.items[0];
+}
+
 // Mistakes.
 
 pub fn badSliceAcrossAppend(gpa: Allocator) !u8 {
@@ -618,4 +766,18 @@ pub fn gapConditionalFree(gpa: Allocator) !u32 {
     t.* = .{ .v = 3 };
     freeIfSome(gpa, t);
     return t.v;
+}
+
+pub fn badNestedPtr(gpa: Allocator) !u32 {
+    var rows: std.ArrayList(std.ArrayList(u32)) = .empty;
+    defer {
+        for (rows.items) |*r| r.deinit(gpa);
+        rows.deinit(gpa);
+    }
+    try rows.append(gpa, .empty);
+    const first = &rows.items[0];
+    var i: u32 = 0;
+    while (i < 100) : (i += 1) try rows.append(gpa, .empty);
+    try first.append(gpa, 1);
+    return first.items[0];
 }
