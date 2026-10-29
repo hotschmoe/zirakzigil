@@ -6,7 +6,8 @@
 tools/zvc_export.sh OUT_DIR FILE.zig [--dep NAME=FILE.zig]...   AIR pack of a file (Debug, fixed target)
 zig build zv-own                                                 zig-out/bin/zv-own
 zv-own [--src DIR] [--module NAME=DIR] [--only TEXT] [--files PREFIX] [--expect FILE] [--pins FILE]
-       [--max-unproven N] [--summary] [--dump] PACK|INDEX_DIR...
+       [--max-unproven N] [--max-trusted N] [--summary] [--dump] PACK|INDEX_DIR...
+ZVC_DEEP=1 tools/zvc_export.sh OUT_DIR FILE.zig [--only PATH]...   a whole project: nested containers and imported files too
 tools/run_own.sh                                                 the suite: pinned packs against pinned verdicts (CI)
 zirakzigil.addOwnershipGate(b, .{ .packs = ..., .pins = ... })   `zig build own` in a consumer project
 ```
