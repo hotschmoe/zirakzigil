@@ -8,8 +8,10 @@
 set -eu
 
 [ $# -ge 1 ] || { echo "usage: $0 ZIG_ZV [STOCK_ZIG]" >&2; exit 2; }
-zv=$1
-stock=${2:-}
+absolute() { echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"; }
+zv=$(absolute "$1")
+stock=
+[ $# -lt 2 ] || stock=$(absolute "$2")
 root=$(cd "$(dirname "$0")/.." && { pwd -W 2>/dev/null || pwd; })
 work=$root/compiler/.work/cache
 proj=$work/proj
