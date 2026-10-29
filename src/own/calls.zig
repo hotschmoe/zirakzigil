@@ -1283,12 +1283,15 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
                         if (!opts.pre_ended and !got.flat) try twice(r, st, inst, opts.callee);
                     } else if (!got.flat and !opts.pre_ended and earlierEvent(r, id, inst)) try r.tally("maybe_alias", inst),
                     .heap, .init => {
+                        // The storage of one of the elements of a container: which one is not known.
+                        var ev = event;
+                        if (r.identRec(id).kind == .init and r.places.hasElem(r.identRec(id).a)) ev.soft = true;
                         ended = try ended.with(r.arena, id);
                         if (k.param < ended_by.len) ended_by[k.param] = try ended_by[k.param].with(r.arena, id);
                         if (k.param == 0 and !got.flat) reallocated = try reallocated.with(r.arena, id);
-                        try r.end(st, inst, id, event);
-                        if (kill.on_fail) try fail_ends.append(r.arena, .{ .id = id, .event = event }) else if (st.dead.get(id)) |d| try ok_ends.append(r.arena, .{ .id = id, .event = event, .tomb = try r.tomb(id, d.soft) });
-                        killed = try killed.with(r.arena, try r.tomb(id, event.soft or st.multi.has(id)));
+                        try r.end(st, inst, id, ev);
+                        if (kill.on_fail) try fail_ends.append(r.arena, .{ .id = id, .event = ev }) else if (st.dead.get(id)) |d| try ok_ends.append(r.arena, .{ .id = id, .event = ev, .tomb = try r.tomb(id, d.soft) });
+                        killed = try killed.with(r.arena, try r.tomb(id, ev.soft or st.multi.has(id)));
                     },
                     else => {},
                 };
