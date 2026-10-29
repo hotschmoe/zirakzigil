@@ -58,7 +58,7 @@ Controls: `--zv-air-out DIR` or `ZV_AIR_OUT=DIR`, and `--zv-air-std` or `ZV_AIR_
 | M1 | `zig-zv` builds from the script on Windows and Linux | Hook diff under 50 lines; with the flag off, `zig-zv` and a stock build from the same tag give identical output |
 | M2 | Export `examples/search.zig` | JSON for all six functions; contracts visible; compared against what the zvc spike parses |
 | M3 | Export zmoltcp | Every function exports; JSON round-trips through a reader; `unsupported` count reported and driven to zero for zmoltcp's instruction set; export overhead measured |
-| M4 | Canary | Scheduled CI applies the patch to upstream Zig master and builds; failure opens an issue |
+| M4 | Canary | A CI workflow applies the patch to a chosen upstream tree and builds; failure opens an issue. It runs on demand, since only the pinned release is supported |
 
 The Phase 1 exit gate is M3 plus M4. Phase 2 then ports `zvc` from parsing source to reading this JSON.
 

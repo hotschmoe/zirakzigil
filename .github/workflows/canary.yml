@@ -1,11 +1,10 @@
 name: zig-master canary
 
 # Applies compiler/hook.patch and compiler/src/zv_air to upstream Zig master and builds zig-zv,
-# so a Zig change that breaks the fork shows up before a release does (fork policy, docs/design.md).
+# to try the fork against a newer tree before porting to a new release (fork policy, docs/design.md).
+# On demand only: zirakzigil supports one pinned Zig release at a time.
 
 on:
-  schedule:
-    - cron: "17 6 * * 1"
   workflow_dispatch:
 
 permissions:

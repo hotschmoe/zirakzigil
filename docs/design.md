@@ -325,7 +325,8 @@ Phase 1 commits us to a compiler fork, and Zig changes a great deal between rele
 3. **One adapter file touches compiler internals.** The exporter reads AIR through a single adapter, so a release that renames instructions or moves fields means updating that file and nothing else.
 4. **The compiler's output does not change.** The patched compiler only reads AIR; it never changes analysis or codegen. Binaries built with the stock compiler and the patched one must be identical, and CI checks that.
 5. **All analysis lives outside the compiler.** `zvc` and `zv-own` consume versioned JSON (a schema version plus the Zig version that produced it). They never link compiler code, so they don't move when the compiler does.
-6. **Early warning, then a port budget.** A scheduled CI job applies the patch to upstream Zig master and reports when it stops applying or building, so breakage shows up before a release does. A tagged release gets ported within a week.
+6. **One pinned release at a time.** Zirakzigil supports exactly one Zig release, recorded in `compiler/ZIG_VERSION`, and does not track master or nightlies. When the next release is tagged, we spend the time to port the hook anchors, the adapter and the patches to it, check that the export still covers the same corpus, and cut a release. The canary workflow stays available on demand for trying a newer tree, but it does not run on a schedule.
+   Zirakzigil's version follows the Zig release it targets: `MAJOR.MINOR` is Zig's, and the patch number is ours. Zirakzigil 0.17.x targets Zig 0.17, and the first release for Zig 0.18 will be 0.18.0.
 7. **Exit when upstream allows it.** If Zig gains an official way to dump AIR or a plugin interface, we switch to it and delete the fork. A hook small enough to propose upstream is the best outcome.
 
 **Pilot candidates from our own work.** Two of our Zig codebases fit the stack unusually well:
