@@ -1,8 +1,8 @@
 .{
     .name = .zirakzigil,
-    .version = "0.17.0",
+    .version = "0.17.1",
     .fingerprint = 0x1b490422d9c422ea,
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig.version = "0.17.1",
     .dependencies = .{},
     .paths = .{ "build.zig", "build.zig.zon", "src", "examples", "tests", "LICENSE", "README.md" },
 }
