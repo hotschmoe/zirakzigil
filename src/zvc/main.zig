@@ -3,7 +3,7 @@
 //!   zvc [options] PATH...        PATH is a `.zvp` pack or an index directory
 //!     --src DIR                  where module-relative source paths are found (default `.`)
 //!     --module NAME=DIR          a different directory for the sources of one module
-//!     --only TEXT                only functions whose name contains TEXT (the `.verified` functions they rely on are proved too)
+//!     --only PATH                only functions whose name has PATH as dotted components (`min` selects `a.min`, not `a.minMul`; the `.verified` functions they rely on are proved too)
 //!     --expect FILE              lines `NAME proved|refuted|unproven`; exit 0 iff every verdict matches
 //!     --pins FILE                lines `SHA256 PATH`: the sources the packs were exported from; any difference is an error
 //!     --total                    a loop without `zv.decreases` leaves its function unproven
@@ -45,6 +45,9 @@ const Options = struct {
     pins: ?[]const u8 = null,
     max_trusted: ?usize = null,
     max_assume: ?usize = null,
+    /// Set by the supervisor: this process reports its progress and skips the functions it crashed on.
+    supervised: bool = false,
+    crashed: []const []const u8 = &.{},
 };
 
 const Result = struct {
@@ -65,6 +68,8 @@ const Result = struct {
     assumes: []const []const u8 = &.{},
     /// The `zv.assume` calls the proof takes as premises, as `path:line`: its own and its callees'.
     premises: []const []const u8 = &.{},
+    /// The ceiling that its assumptions exceed: the proof is not accepted.
+    capped: ?[]const u8 = null,
 };
 
 /// A verified function as the driver sees it: the others its proof rests on, by index.
@@ -83,7 +88,9 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout = Io.File.stdout().writer(io, &stdout_buffer);
     const out = &stdout.interface;
-    const opts = parseArgs(arena, try init.minimal.args.toSlice(arena)) orelse return usage();
+    const args = try init.minimal.args.toSlice(arena);
+    const opts = parseArgs(arena, args) orelse return usage();
+    if (!opts.supervised and !opts.list and !opts.survey and !opts.smt) return supervise(io, arena, args);
     const z3 = opts.z3 orelse init.environ_map.get("ZV_Z3") orelse "z3";
 
     if (opts.pins) |path| try checkPins(io, arena, path);
@@ -97,6 +104,8 @@ pub fn main(init: std.process.Init) !void {
     var srcs: sources.Sources = .{ .io = io, .arena = arena, .dirs = opts.dirs };
     var prog = try program.Program.init(gpa, arena, &srcs, packs.items);
     defer prog.deinit();
+    prog.track = opts.supervised;
+    prog.crashed = opts.crashed;
 
     var entries: std.ArrayList(Entry) = .empty;
     var index: std.StringHashMapUnmanaged(usize) = .empty;
@@ -105,7 +114,7 @@ pub fn main(init: std.process.Init) !void {
             const level = (try srcs.levelOf(pack, f)) orelse continue;
             const fqn = pack.str(f.fqn);
             const name = try source.declaredName(arena, fqn);
-            if (opts.only) |only| if (std.mem.indexOf(u8, name, only) == null) continue;
+            if (opts.only) |only| if (!zv_air.names.selects(name, only)) continue;
             if (opts.survey) {
                 try survey(out, pack, f, name, level);
                 continue;
@@ -157,7 +166,7 @@ pub fn main(init: std.process.Init) !void {
         var levels = l.levels.iterator();
         while (levels.next()) |e| {
             if (e.value_ptr.* != .verified) continue;
-            if (opts.only) |only| if (std.mem.indexOf(u8, e.key_ptr.*, only) == null) continue;
+            if (opts.only) |only| if (!zv_air.names.selects(e.key_ptr.*, only)) continue;
             if (seenName(&prog, e.key_ptr.*)) continue;
             try entries.append(arena, .{ .ref = null, .result = .{
                 .name = e.key_ptr.*,
@@ -178,10 +187,21 @@ pub fn main(init: std.process.Init) !void {
     var counts: [3]usize = @splat(0);
     for (0..entries.items.len) |i| try settle(arena, entries.items, i);
     for (entries.items) |e| {
-        counts[@backingInt(e.result.verdict)] += 1;
-        try results.append(arena, e.result);
         for (e.result.assumes) |name| try addUnique(arena, &assumed, name);
         for (e.result.premises) |site| try addUnique(arena, &premises, site);
+    }
+    const over_trusted = if (opts.max_trusted) |limit| assumed.items.len > limit else false;
+    const over_assume = if (opts.max_assume) |limit| premises.items.len > limit else false;
+    for (entries.items) |*e| {
+        const r = &e.result;
+        if (r.verdict != .proved) continue;
+        if (over_trusted and r.assumes.len != 0) r.capped = "--max-trusted";
+        if (over_assume and r.premises.len != 0) r.capped = "--max-assume";
+        if (r.capped != null) r.verdict = .unproven;
+    }
+    for (entries.items) |e| {
+        counts[@backingInt(e.result.verdict)] += 1;
+        try results.append(arena, e.result);
         try report(out, &srcs, e.result);
         if (opts.obligations) if (e.ref) |ref| for ((try prog.run(ref)).vc.obligations.items) |ob| {
             try printWhere(out, &srcs, ref.pack, ob.loc);
@@ -202,16 +222,59 @@ pub fn main(init: std.process.Init) !void {
         for (premises.items, 0..) |site, i| try out.print("{s} {s}", .{ if (i == 0) "" else ",", site });
         try out.writeByte('\n');
     }
-    if (opts.max_assume) |limit| if (premises.items.len > limit) {
-        try out.print("zvc: more zv.assume premises than the {d} allowed\n", .{limit});
+    if (over_assume) {
+        try out.print("zvc: more zv.assume premises than the {d} allowed\n", .{opts.max_assume.?});
         ok = false;
-    };
-    if (opts.max_trusted) |limit| if (assumed.items.len > limit) {
-        try out.print("zvc: more trusted assumptions than the {d} allowed\n", .{limit});
+    }
+    if (over_trusted) {
+        try out.print("zvc: more trusted assumptions than the {d} allowed\n", .{opts.max_trusted.?});
         ok = false;
-    };
+    }
     try out.flush();
     if (!ok) std.process.exit(1);
+}
+
+/// Runs the verification in a child process. A crash of the verifier in one function (a bug in zvc, not a
+/// verdict) is reported, that function is UNPROVEN, and the others get their verdicts from a second run.
+fn supervise(io: Io, arena: Allocator, args: []const [:0]const u8) !void {
+    const exe = try std.process.executablePathAlloc(io, arena);
+    var crashed: std.ArrayList([]const u8) = .empty;
+    while (true) {
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.appendSlice(arena, &.{ exe, "--supervised" });
+        for (crashed.items) |key| try argv.appendSlice(arena, &.{ "--crashed", key });
+        for (args[1..]) |a| try argv.append(arena, a);
+        var child = try std.process.spawn(io, .{ .argv = argv.items, .stderr = .pipe });
+        var buffer: [4096]u8 = undefined;
+        var reader = child.stderr.?.readerStreaming(io, &buffer);
+        const log = reader.interface.allocRemaining(arena, .unlimited) catch |err| fatal("cannot read the verifier's output: {t}", .{err});
+        const term = try child.wait(io);
+
+        var open: std.ArrayList([]const u8) = .empty;
+        var lines = std.mem.splitScalar(u8, log, '\n');
+        while (lines.next()) |line| {
+            const rest = std.mem.trimStart(u8, line, "\r");
+            if (!std.mem.startsWith(u8, rest, program.Program.progress_prefix)) {
+                if (line.len != 0 or lines.peek() != null) std.debug.print("{s}\n", .{line});
+                continue;
+            }
+            var it = std.mem.tokenizeScalar(u8, std.mem.trimEnd(u8, rest[program.Program.progress_prefix.len..], "\r"), ' ');
+            const step = it.next() orelse continue;
+            const key = it.rest();
+            if (std.mem.eql(u8, step, "begin")) {
+                try open.append(arena, key);
+            } else if (open.items.len != 0) _ = open.pop();
+        }
+        const code = switch (term) {
+            .exited => |c| if (c <= 2) c else null,
+            else => null,
+        };
+        if (code) |c| if (c == 0) return else std.process.exit(c);
+        const key = if (open.items.len != 0) open.items[open.items.len - 1] else fatal("the verifier crashed outside any function", .{});
+        for (crashed.items) |k| if (std.mem.eql(u8, k, key)) fatal("the verifier crashed again on {s}", .{key});
+        std.debug.print("zvc: the verifier crashed on {s} (a bug in zvc); the function is reported UNPROVEN\n", .{key});
+        try crashed.append(arena, key);
+    }
 }
 
 fn addUnique(arena: Allocator, list: *std.ArrayList([]const u8), name: []const u8) Allocator.Error!void {
@@ -303,6 +366,7 @@ fn checkPins(io: Io, arena: Allocator, path: []const u8) !void {
 fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
     var o: Options = .{};
     var paths: std.ArrayList([]const u8) = .empty;
+    var crashed: std.ArrayList([]const u8) = .empty;
     var modules: std.ArrayList([2][]const u8) = .empty;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -321,6 +385,8 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
             o.total = true;
         } else if (std.mem.eql(u8, a, "--obligations")) {
             o.obligations = true;
+        } else if (std.mem.eql(u8, a, "--supervised")) {
+            o.supervised = true;
         } else {
             i += 1;
             if (i >= args.len) return null;
@@ -341,6 +407,8 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
                 o.max_assume = std.fmt.parseInt(usize, v, 10) catch return null;
             } else if (std.mem.eql(u8, a, "--timeout")) {
                 o.timeout_ms = std.fmt.parseInt(u32, v, 10) catch return null;
+            } else if (std.mem.eql(u8, a, "--crashed")) {
+                crashed.append(arena, v) catch return null;
             } else if (std.mem.eql(u8, a, "--module")) {
                 const eq = std.mem.indexOfScalar(u8, v, '=') orelse return null;
                 modules.append(arena, .{ v[0..eq], v[eq + 1 ..] }) catch return null;
@@ -350,11 +418,12 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
     if (paths.items.len == 0) return null;
     o.paths = paths.items;
     o.dirs.by_module = modules.items;
+    o.crashed = crashed.items;
     return o;
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: zvc [--src DIR] [--module NAME=DIR] [--only TEXT] [--expect FILE] [--total] [--max-trusted N] [--max-assume N] [--z3 PATH] [--timeout MS] [--smt] [--list] [--survey] PACK|INDEX_DIR...\n", .{});
+    std.debug.print("usage: zvc [--src DIR] [--module NAME=DIR] [--only PATH] [--expect FILE] [--total] [--max-trusted N] [--max-assume N] [--z3 PATH] [--timeout MS] [--smt] [--list] [--survey] PACK|INDEX_DIR...\n", .{});
     std.process.exit(2);
 }
 
@@ -392,6 +461,9 @@ fn verifyOne(
 ) !Result {
     const start = Io.Clock.awake.now(io);
     const r = try prog.run(ref);
+    const key = try prog.keyOf(ref);
+    prog.mark("begin", key);
+    defer prog.mark("end", key);
     var result: Result = .{
         .name = r.name,
         .verdict = .proved,
@@ -440,6 +512,7 @@ fn report(out: *Io.Writer, srcs: *sources.Sources, r: Result) !void {
     }
     try out.writeByte('\n');
     for (r.blocked_by) |name| try out.print("    relies on {s}, which is not proved\n", .{name});
+    if (r.capped) |flag| try out.print("    its assumptions exceed {s}\n", .{flag});
     for (r.failures) |fl| {
         try printWhere(out, srcs, r.pack, fl.ob.loc);
         if (fl.ce) |ce| {
@@ -512,6 +585,17 @@ fn surveyInsts(pack: *const schema.Pack, insts: []const schema.Inst, counts: any
     }
 }
 
+fn expects(text: []const u8, name: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        var it = std.mem.tokenizeAny(u8, line, " \t");
+        if (std.mem.eql(u8, it.next().?, name)) return true;
+    }
+    return false;
+}
+
 fn compareExpected(io: Io, arena: Allocator, out: *Io.Writer, path: []const u8, results: []const Result) !bool {
     const text = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20)) catch |err| fatal("{s}: {t}", .{ path, err });
     var ok = true;
@@ -535,7 +619,7 @@ fn compareExpected(io: Io, arena: Allocator, out: *Io.Writer, path: []const u8, 
         }
     }
     for (results) |r| {
-        if (std.mem.indexOf(u8, text, r.name) == null) {
+        if (!expects(text, r.name)) {
             try out.print("{s} is {t} but has no expectation\n", .{ r.name, r.verdict });
             ok = false;
         }

@@ -4,6 +4,7 @@
 const std = @import("std");
 const Stringify = std.json.Stringify;
 const schema = @import("schema.zig");
+const names = @import("names.zig");
 
 const Pack = schema.Pack;
 
@@ -40,7 +41,7 @@ pub fn write(w: *std.Io.Writer, p: Pack, options: Options) Stringify.Error!void 
     try s.objectField("functions");
     try s.beginArray();
     for (p.t.funcs) |f| {
-        if (options.filter) |needle| if (std.mem.indexOf(u8, p.str(f.fqn), needle) == null) continue;
+        if (options.filter) |needle| if (!names.selectsFqn(p.str(f.fqn), needle)) continue;
         try writeFunc(&s, p, f);
     }
     try s.endArray();

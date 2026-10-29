@@ -1,0 +1,26 @@
+# name verdict. A verdict changing here is reviewed as a soundness or completeness change of zvc.
+soundness3.bitBool proved
+soundness3.bitRoundTrip proved
+soundness3.bitSign refuted
+soundness3.ghostMin unproven
+soundness3.ghostMinMul refuted
+soundness3.incU16 unproven
+soundness3.incU8 unproven
+soundness3.packBit unproven
+soundness3.packBit2 unproven
+soundness3.packFieldM unproven
+soundness3.packOrder refuted
+soundness3.packPtr unproven
+soundness3.packRead proved
+soundness3.packToInt unproven
+soundness3.plus1 unproven
+soundness3.ptrCastSame refuted
+soundness3.ptrNest0 unproven
+soundness3.ptrNest1 unproven
+soundness3.ptrNest4 unproven
+soundness3.ptrSameOk proved
+soundness3.ptrWide unproven
+soundness3.sentinel0 proved
+soundness3.sentinel1 refuted
+soundness3.sentinelCall proved
+soundness3.usePack unproven

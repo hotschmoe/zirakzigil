@@ -30,6 +30,12 @@ pub const Program = struct {
     runs: std.StringHashMapUnmanaged(*Run) = .empty,
     /// Names that two different functions have: a call resolves by name, so it cannot tell which one it means.
     ambiguous: std.StringHashMapUnmanaged(void) = .empty,
+    /// Reports each step on stderr (`progress_prefix`), so a supervisor knows which function a crash was in.
+    track: bool = false,
+    /// Functions the verifier crashed on: their runs are not attempted again.
+    crashed: []const []const u8 = &.{},
+
+    pub const progress_prefix = "zvc-progress ";
 
     pub fn init(gpa: Allocator, arena: Allocator, srcs: *sources.Sources, packs: []const *const schema.Pack) Allocator.Error!Program {
         var p: Program = .{ .gpa = gpa, .arena = arena, .pool = .init(gpa), .sources = srcs };
@@ -46,12 +52,22 @@ pub const Program = struct {
         p.pool.deinit();
     }
 
+    pub fn keyOf(p: *Program, ref: Ref) Allocator.Error![]const u8 {
+        return std.fmt.allocPrint(p.arena, "{s}#{x}", .{ ref.pack.str(ref.func.fqn), ref.func.id });
+    }
+
+    pub fn mark(p: *const Program, step: []const u8, key: []const u8) void {
+        if (p.track) std.debug.print(progress_prefix ++ "{s} {s}\n", .{ step, key });
+    }
+
     /// The function run symbolically. Runs are cached: asking again, or asking as a callee, does not redo it.
     pub fn run(p: *Program, ref: Ref) Allocator.Error!*Run {
         const fqn = ref.pack.str(ref.func.fqn);
-        const key = try std.fmt.allocPrint(p.arena, "{s}#{x}", .{ fqn, ref.func.id });
+        const key = try p.keyOf(ref);
         const gop = try p.runs.getOrPut(p.arena, key);
         if (gop.found_existing) return gop.value_ptr.*;
+        p.mark("begin", key);
+        defer p.mark("end", key);
         const name = try source.declaredName(p.arena, fqn);
         const r = try p.arena.create(Run);
         gop.value_ptr.* = r;
@@ -70,7 +86,12 @@ pub const Program = struct {
                 .field_names = .{ .context = p, .lookup = fieldNameHook },
             }),
         };
-        try r.vc.run();
+        const crashed = for (p.crashed) |k| {
+            if (std.mem.eql(u8, k, key)) break true;
+        } else false;
+        if (crashed) {
+            r.vc.unsupported = .{ .reason = "the verifier crashed on this function (a bug in zvc)", .loc = .none };
+        } else try r.vc.run();
         r.state = .done;
         return r;
     }
@@ -95,16 +116,19 @@ pub const Program = struct {
             .verified, .trusted => {},
             else => return caller.ctx.unsupported("call to {s}, which is .{t}: only .verified and .trusted functions have contracts to rely on", .{ callee, level }),
         }
-        const fqn = ref.pack.str(ref.func.fqn);
-        const key = try std.fmt.allocPrint(p.arena, "{s}#{x}", .{ fqn, ref.func.id });
+        const key = try p.keyOf(ref);
         if (p.runs.get(key)) |existing| if (existing.state == .running)
             return caller.ctx.unsupported("recursive call to {s}", .{callee});
         const r = try p.run(ref);
         if (r.vc.unsupported) |u| return caller.ctx.unsupported("call to {s}, which is outside the supported fragment: {s}", .{ callee, u.reason });
-        if (r.summary == null) r.summary = r.vc.summarize(r.name) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Unsupported => return caller.ctx.unsupported("call to {s}: {s}", .{ callee, r.vc.ctx.reason }),
-        };
+        if (r.summary == null) {
+            p.mark("begin", key);
+            defer p.mark("end", key);
+            r.summary = r.vc.summarize(r.name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Unsupported => return caller.ctx.unsupported("call to {s}: {s}", .{ callee, r.vc.ctx.reason }),
+            };
+        }
         r.summary.?.callee = callee;
         r.summary.?.trusted = level == .trusted;
         return &r.summary.?;

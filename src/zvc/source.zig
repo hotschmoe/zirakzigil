@@ -2,6 +2,7 @@
 //! names, and the text of a line for diagnostics.
 
 const std = @import("std");
+const zv_air = @import("zv_air");
 const Allocator = std.mem.Allocator;
 const Ast = std.zig.Ast;
 
@@ -171,17 +172,4 @@ pub const Source = struct {
 
 /// The declared name of a pack function: type arguments (`Ring(u8).push`) and instance suffixes
 /// (`push__func`, `push__anon`) are not part of what a manifest says.
-pub fn declaredName(arena: Allocator, fqn: []const u8) Allocator.Error![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var depth: usize = 0;
-    for (fqn) |c| {
-        if (c == '(') depth += 1;
-        if (depth == 0) try out.append(arena, c);
-        if (c == ')' and depth > 0) depth -= 1;
-    }
-    var name: []const u8 = out.items;
-    for ([_][]const u8{ "__func", "__anon" }) |suffix| {
-        if (std.mem.endsWith(u8, name, suffix)) name = name[0 .. name.len - suffix.len];
-    }
-    return name;
-}
+pub const declaredName = zv_air.names.declaredName;

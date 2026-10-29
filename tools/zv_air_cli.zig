@@ -1,7 +1,7 @@
 //! zv-air: reads zig-zv AIR packs (schema v2, docs/phase1.md).
 //!   zv-air list PATH                 one line per function: name, id, the compilation's root name
 //!   zv-air stats PATH                counts and sizes of a pack, or of the whole set of an index directory
-//!   zv-air dump PACK [--fn NAME] [--pretty]   the pack as JSON (NAME: only functions containing it)
+//!   zv-air dump PACK [--fn NAME] [--pretty]   the pack as JSON (NAME: only functions whose name has it as dotted components)
 //!   zv-air verify PATH               load and validate every reference
 //!   zv-air slice PACK OUT.zvp        the project's functions and the library functions they reach, tables compacted
 //! PATH is a `.zvp` file or an index directory.

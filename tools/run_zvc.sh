@@ -13,6 +13,11 @@ $zvc --src tests/zvc --expect tests/zvc/cases.expect tests/zvc/cases.zvp
 $zvc --src tests/zvc --expect tests/zvc/features.expect tests/zvc/features.zvp
 $zvc --src tests/zvc --expect tests/zvc/soundness.expect tests/zvc/soundness.zvp
 $zvc --src tests/zvc --expect tests/zvc/soundness2.expect tests/zvc/soundness2.zvp
+$zvc --src tests/zvc --expect tests/zvc/soundness3.expect tests/zvc/soundness3.zvp
+
+# --only names whole dotted components: packBit does not select packBit2.
+$zvc --src tests/zvc --only soundness3.packBit --expect tests/zvc/soundness3.only.expect tests/zvc/soundness3.zvp
+$zvc --src tests/zvc --only packBit --expect tests/zvc/soundness3.only.expect tests/zvc/soundness3.zvp
 
 # A proof is only as good as the callees it relies on, whatever --only selects.
 $zvc --src tests/zvc --only soundness.useInc --expect tests/zvc/soundness.only.expect tests/zvc/soundness.zvp
@@ -50,6 +55,18 @@ case $shown in
         exit 1
         ;;
 esac
+
+# Over the ceiling the verdict itself is not accepted, as with --max-trusted.
+for gate in "$assumed --max-assume 0" "$trusted --max-trusted 0"; do
+    shown=$($gate || true)
+    case $shown in
+        *"UNPROVEN"*"exceed"*) ;;
+        *)
+            echo "run_zvc: a proof over its ceiling is still reported proved: $gate" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # Two different functions under one name cannot be told apart by a call: not proved, not first-wins.
 $zvc --src tests/zvc --only soundness2.useLenBound --expect tests/zvc/soundness2.dup.expect tests/zvc/soundness2.zvp tests/zvc/dup/soundness2.zvp
