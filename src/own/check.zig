@@ -1134,6 +1134,11 @@ const Run = struct {
                 }
             }
         }
+        // A number read out of a stale handle is data, not a use of what the handle names.
+        switch (r.ty.kind(ty)) {
+            .int, .bool, .float, .@"enum", .error_set => return Val.none,
+            else => {},
+        }
         try r.alive(st, inst, out, "read");
         return out;
     }
@@ -1216,7 +1221,7 @@ const Run = struct {
         };
         var derived: Val = .none;
         for (args, arg_tys, 0..) |a, aty, i| {
-            if (freed == null or freed.? != i) try r.alive(st, inst, a, "passed to a call");
+            if ((freed == null or freed.? != i) and effect != .query) try r.alive(st, inst, a, "passed to a call");
             if (r.ty.isPointer(aty)) {
                 if (a.place) |pl| {
                     const content = try r.readPlace(st, pl);
@@ -1240,7 +1245,7 @@ const Run = struct {
         var res = try r.fresh(st, inst, inst.ty, &sub);
         const text = try std.fmt.allocPrint(r.arena, "`{s}`", .{declared});
         switch (effect) {
-            .none, .reads => {},
+            .none, .reads, .query => {},
             .alloc, .realloc, .releases => {
                 if (effect == .realloc) try r.freeAllocations(st, inst, args[1], text);
                 // From an arena: the allocation ends with it, or when it is reset.

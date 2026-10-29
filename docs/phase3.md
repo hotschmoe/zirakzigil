@@ -165,9 +165,10 @@ Corpus (all pinned in `tests/own/*.expect`, run by `tools/run_own.sh`; CI on Lin
 | a project's own invalidation rule | 2 | 1 (with the manifest line) | 0 | 1 (the same type without it) |
 | one-line mutations of a realistic program (`tests/own/realish_bugs.zig`) | 7 | 5 | 0 | 2 (use after free through a hash-map slot; through an element of a list) |
 | a pointer laundered through an integer | 1 | 0 | 1 | 0 |
-| **total** | **92** | **86 (93.5 percent)** | **3** | **3** |
+| zmoltcp-shaped (a stale DNS query handle, a socket kept over local buffers, stored or returned; `own/seeded.zig` in zmoltcp) | 4 | 4 | 0 | 0 |
+| **total** | **96** | **90 (93.8 percent)** | **3** | **3** |
 
-Not silently accepted: 89 of 92 (96.7 percent). The three misses are the documented limits: a rule the checker was not told, and what is stored inside a container or behind a map slot is not followed.
+Not silently accepted: 93 of 96 (96.9 percent). The three misses are the documented limits: a rule the checker was not told, and what is stored inside a container or behind a map slot is not followed.
 
 Correct code, which must stay clean:
 
@@ -176,7 +177,7 @@ Correct code, which must stay clean:
 | `tests/own`: the correct cases (`ok*`) and the idiomatic allocator-heavy program `realish.zig` (lexer, parser, interning, LRU, writer) | about 90 | 0 | 0 |
 | this repository: `src/air`, `src/zvc`, `src/own`, `examples/` | about 650 | 0 | 0 |
 | zmoltcp 0.5.3, production code with its generics instantiated | 1960 | 0 | 0 |
-| zmoltcp 0.5.3 as `zig build test` reaches it, tests and laws included | 5297 | 0 | 0 |
+| zmoltcp 0.5.3 as `zig build test` reaches it, tests and laws included | 5297 | 1 (the law that a stale DNS handle is rejected, which cancels a query twice on purpose: a true positive in test code) | 0 |
 
 During development the same code produced about 40 false positives and 9 unproven functions before the precision decisions above were made; each is recorded there. The final false-positive rate on about 7,000 functions of code written without the checker is 0, with the usual caveat that the checker was shaped by that code; the seeded cases were written before the rules they exercise and none was edited to pass.
 

@@ -25,7 +25,7 @@ Zig gives explicit *mechanics* (allocators, control flow, error handling) but no
 | **A. Contracts** `zv.requires` / `ensures` / `invariant` | Broken pre/postconditions, blamed on the side that broke them | Built |
 | **B. Refinement and brand types** `zv.Ranged`, `zv.Pool(..., struct {})` | Overflow in ranged arithmetic, out-of-range values, cross-pool handle mixups, unsafe narrowing | Built |
 | **C. Runtime ownership backstops** `zv.Linear`, generational handles (`zv.Pool`, and `zv.Slots` over borrowed storage), `zv.PinCheck` | Double consume, use-after-free via stale handle, copied self-referential structs, leaks | Built |
-| **D. Static ownership checker** `zv-own` (over AIR) | The bugs in C, at compile time, plus region escapes, pointer invalidation, pinned copies and aliasing writes | Phase 3 done: 92 seeded mistakes, 86 found and 3 unproven, 0 false positives on about 7,000 functions of real code (`docs/phase3.md`) |
+| **D. Static ownership checker** `zv-own` (over AIR) | The bugs in C, at compile time, plus region escapes, pointer invalidation, pinned copies and aliasing writes | Phase 3 done: 96 seeded mistakes, 90 found and 3 unproven, 0 false positives on about 7,000 functions of real code (`docs/phase3.md`) |
 | **E. Deductive verifier** `zvc` (Verus-style, Z3) | Functional correctness and absence of every safety panic | Phase 2 done: reads AIR packs, bit-precise, Z3 over a pipe; seven zmoltcp functions proved in its build |
 | **F. C backend + CBMC** | Panic-freedom of bounded proof harnesses | C emission tested, checker not wired |
 | **H. Governance** assurance manifest + laws | Silent erosion of guarantees by contributors | Built |
