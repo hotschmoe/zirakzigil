@@ -4,6 +4,7 @@
 const std = @import("std");
 const zv_air = @import("zv_air");
 const schema = zv_air.schema;
+const dom = @import("domain.zig");
 
 pub const Kind = enum {
     /// A linear value consumed a second time.
@@ -54,6 +55,8 @@ pub const Trail = struct {
     prev: ?*const Trail,
     loc: schema.LocId,
     what: enum { then, @"else", case, @"error" },
+    /// What the branch says of a scalar in memory, when it is a test of one.
+    probes: []const dom.Probe = &.{},
 };
 
 pub const Diag = struct {

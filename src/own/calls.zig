@@ -55,8 +55,6 @@ pub fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
             effect = .none;
         } else effect = .container;
     } else if (effect == .none or effect == .reads) summary = body;
-    // A `deinit` whose body gives anything back ends its object, whether or not it says `= undefined`.
-    const derived_ends = !container_call and effect == .none and summary != null and endsObject(declared, summary.?);
 
     // `remap` to nothing is a free; `resize` to nothing too, to anything else it leaves the memory where it is.
     if (effect == .realloc and std.mem.endsWith(u8, declared, "remap") and constantArg(r, ops, 2, 0)) effect = .free;
@@ -108,6 +106,7 @@ pub fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
     var sub: u32 = 0;
     var res = try freshTokens(r, st, inst, &sub);
     const text = try std.fmt.allocPrint(r.arena, "`{s}`", .{declared});
+    if (summary == null) try forgetScalars(r, st, args, arg_tys);
 
     // How much room the container has before and after, and whether this call can still reallocate.
     var room: Room = .{};
@@ -215,13 +214,12 @@ pub fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
         if (spec.removes(declared)) try dropPending(r, st, args[0]);
         if (model.moves and body == null) try moveStorage(r, st, inst, c, &res);
     }
-    if (derived_ends and n > 0) try endObject(r, st, inst, args[0], arg_tys[0], text, false);
     if (summary) |s| try applySummary(r, st, inst, s, args, arg_tys, &res, .{
         .skip_content_kills = container_call and room.proven,
         .soft = container_call and room.soft,
         .library = known != null and isLibrary(known.?),
         .callee = r.callName(inst),
-        .pre_ended = effect == .ends or derived_ends,
+        .pre_ended = effect == .ends,
     });
     if (summary) |s| if (r.ty.hasPointers(inst.ty)) try countLent(r, inst, s, args);
     if (container_call and model.seeds) res.room = room.seed;
@@ -235,6 +233,19 @@ pub fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
         try containerResult(r, st, inst, &res, model, args, arg_tys);
     }
     return finish(r, inst, res);
+}
+
+/// A callee nobody read may write any scalar below the pointers it was given: what was known of them is gone.
+fn forgetScalars(r: *Run, st: *State, args: []const Val, tys: []const schema.TypeId) Allocator.Error!void {
+    for (args, tys) |a, t| {
+        if (!r.ty.isPointer(t)) continue;
+        const pl = a.place orelse continue;
+        st.forget(&r.places, pl);
+        try st.touched.put(r.arena, pl, {});
+        for (st.mem.keys(), st.mem.values()) |key, *v| if (r.places.contains(pl, key)) {
+            v.con = null;
+        };
+    }
 }
 
 /// A pointer to a local handed to a call that returns something with pointers: when the summary of the callee says
@@ -277,15 +288,6 @@ fn swapBlind(r: *Run, inst: *const Inst, res: Val) Error!void {
 
 fn freshTokens(r: *Run, st: *State, inst: *const Inst, sub: *u32) Error!Val {
     return r.freshTokens(st, inst, sub);
-}
-
-/// A function that is named `deinit`, gives something back, and is not already known to end its object.
-fn endsObject(declared: []const u8, s: Summary) bool {
-    const dot = std.mem.lastIndexOfScalar(u8, declared, '.') orelse return false;
-    if (!std.mem.eql(u8, declared[dot + 1 ..], "deinit")) return false;
-    for (s.kills) |k| if (k.param == 0 and k.kind == .object and k.path.len == 0) return false;
-    for (s.kills) |k| if (k.param == 0) return true;
-    return s.frees & 1 != 0;
 }
 
 /// The objects an allocator argument stands for: what a block allocated through it ends with.
@@ -914,8 +916,6 @@ fn staleHandle(r: *Run, val: Val) Allocator.Error!?check.Cancel {
 }
 
 fn endIds(r: *Run, st: *State, inst: *const Inst, val: Val, what: []const u8, deferred: ?*Set, report: bool) Error!void {
-    // One of many (an element read out of an array): the site names them all, and only one was freed.
-    if (val.many) return;
     var first: ?dom.Id = null;
     var soft = false;
     for (val.ids.ids) |o| {
@@ -923,15 +923,18 @@ fn endIds(r: *Run, st: *State, inst: *const Inst, val: Val, what: []const u8, de
         if (rec.kind != .tomb) continue;
         if (rec.b == 1) soft = true else if (first == null) first = o;
     }
+    // One of many (an element read out of an array): the site names them all and only one was freed, so a second free of
+    // an element is no proof of a double free; it is counted.
     if (deferred == null and report) {
-        if (first) |t| {
+        if (first != null and !val.many) {
+            const t = first.?;
             var items: std.ArrayList(diag.Note) = .empty;
             if (st.dead.get(r.identRec(t).a) orelse r.tomb_events.get(t)) |e| try items.append(r.arena, .{ .loc = e.loc, .text = e.text });
             try r.report(st, .double_free, inst.loc, try r.noteList(items.items), "memory is freed twice", .{});
-        } else if (soft) try r.tally("maybe_alias", inst);
+        } else if (soft or first != null) try r.tally("maybe_alias", inst);
     }
     // A value that may be one of several allocations frees one of them, and the checker cannot tell which.
-    const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "first freed here by {s}", .{what}), .trail = st.trail, .soft = val.maybe };
+    const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "first freed here by {s}", .{what}), .trail = st.trail, .soft = val.maybe or val.many };
     for (val.ids.ids) |o| {
         const rec = r.identRec(o);
         switch (rec.kind) {
@@ -979,6 +982,21 @@ fn twice(r: *Run, st: *State, inst: *const Inst, callee: []const u8) Error!void 
     try r.report(st, .double_free, inst.loc, &.{}, "`{s}` ends the same memory through two parameters: one object is passed twice", .{callee});
 }
 
+/// An argument that points into what the call ends through another argument, and that the callee reads through its own
+/// parameter: the callee has two names for one block and frees it under one of them.
+fn overlap(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []const Val, tys: []const schema.TypeId, ended_by: []const Set, callee: []const u8) Error!void {
+    for (ended_by, 0..) |gone, i| {
+        if (gone.isEmpty()) continue;
+        for (args, 0..) |a, j| {
+            if (i == j or r.ty.isAllocator(tys[j]) or !a.ids.meets(gone)) continue;
+            var read = false;
+            for (s.derefs) |d| read = read or d.param == j;
+            if (!read) continue;
+            try r.report(st, .use_after_free, inst.loc, &.{}, "argument {d} of `{s}` points into memory the call ends through argument {d}", .{ j, callee, i });
+        }
+    }
+}
+
 /// An argument that points into the storage the call reallocates is read by the callee after it moved.
 fn readsEnded(r: *Run, st: *State, inst: *const Inst, args: []const Val, tys: []const schema.TypeId, ended: Set, callee: []const u8) Error!void {
     if (ended.isEmpty()) return;
@@ -986,6 +1004,43 @@ fn readsEnded(r: *Run, st: *State, inst: *const Inst, args: []const Val, tys: []
         if (r.ty.isAllocator(t) or !a.ids.meets(ended)) continue;
         try r.report(st, .use_after_free, inst.loc, &.{}, "an argument of `{s}` points into storage that the call reallocates", .{callee});
     }
+}
+
+/// Whether an effect of the callee that holds only where `when` holds can happen here: null when a tag the caller knows
+/// says it cannot. Otherwise the conditions that stay open, in the caller's own parameters.
+fn gateOf(r: *Run, st: *State, when: []const check.Cond, args: []const Val, tys: []const schema.TypeId) Allocator.Error!?[]const check.Cond {
+    var open: std.ArrayList(check.Cond) = .empty;
+    for (when) |c| {
+        const seen = (try scalarIn(r, st, c.slot, args, tys)) orelse continue;
+        if (seen.con) |k| {
+            if ((k == c.value) != c.eq) return null;
+            continue;
+        }
+        const at = seen.at orelse continue;
+        if (!r.entryValued(st, at)) continue;
+        const slot = (try r.condSlot(at)) orelse continue;
+        try open.append(r.arena, .{ .slot = slot, .value = c.value, .eq = c.eq });
+    }
+    return open.items;
+}
+
+/// The scalar a callee's slot is in the caller: what is known of it, and the place it is read from while that is current.
+fn scalarIn(r: *Run, st: *State, slot: Slot, args: []const Val, tys: []const schema.TypeId) Allocator.Error!?struct { con: ?u64, at: ?PlaceId } {
+    if (slot.param >= args.len) return null;
+    const a = args[slot.param];
+    if (r.ty.isPointer(tys[slot.param])) {
+        if (slot.kind != .content) return null;
+        var at = a.place orelse return null;
+        for (slot.path) |step| at = try r.places.child(r.arena, at, step);
+        return .{ .con = (try r.peekFlat(st, at)).con orelse st.facts.get(at), .at = at };
+    }
+    if (slot.kind != .value) return null;
+    var v = a;
+    for (slot.path) |step| {
+        if (v.parts == null) return null;
+        v = v.field(step);
+    }
+    return .{ .con = v.con, .at = if (v.at != null and r.current(v)) v.at else null };
 }
 
 /// What the callee's slot is in the caller: the identities the argument leads into, or the memory below it.
@@ -1049,6 +1104,7 @@ fn resolveDescs(r: *Run, st: *State, inst: *const Inst, ctx: FreshCtx, descs: []
     var out: Val = .none;
     for (descs) |d| {
         const set: Set = switch (d.src) {
+            .con => .empty,
             .fresh => |k| if (k < ctx.ids.len) try Set.single(r.arena, try freshId(r, st, inst, ctx, k)) else .empty,
             .gone => blk: {
                 // What the callee hands back was already freed there.
@@ -1064,13 +1120,17 @@ fn resolveDescs(r: *Run, st: *State, inst: *const Inst, ctx: FreshCtx, descs: []
         };
         if (d.obj and d.src == .from) out.obj = try out.obj.merge(r.arena, set) else out.ids = try out.ids.merge(r.arena, set);
     }
+    // A scalar is a constant when every path that returns made it the same one.
+    for (descs) |d| if (d.src == .con) {
+        out.con = d.src.con;
+    };
     // Either a new block or memory the callee was lent, which the checker does not tell apart (the payloads of a union).
     var fresh = false;
     var lent = false;
     for (descs) |d| switch (d.src) {
         .fresh => fresh = true,
         .from => lent = true,
-        .gone => {},
+        .gone, .con => {},
     };
     out.maybe = out.maybe or (fresh and lent);
     return out;
@@ -1104,12 +1164,30 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
     var ret_place: ?PlaceId = null;
     if (s.ret_place) |slot| ret_place = (try resolve(r, st, slot, args, tys, false)).place;
 
+    // What the callee writes only on the paths that succeed is, on the error path of the caller's `try`, still what it was.
+    var restores: std.ArrayList(check.Restore) = .empty;
+    if (r.ty.kind(inst.ty) == .error_union) for (s.writes) |w| {
+        if (w.on_fail or w.into.kind == .object) continue;
+        const got = try resolve(r, st, w.into, args, tys, false);
+        const pl = got.place orelse continue;
+        try restores.append(r.arena, .{ .place = pl, .val = try r.readLeaf(st, pl, .none, false) });
+    };
+    if (restores.items.len != 0) try r.restores.put(r.arena, inst.id, restores.items) else _ = r.restores.remove(inst.id);
     var killed: Set = .empty;
     var ended: Set = .empty;
     // What the callee reallocates of the object it works on (its first parameter): an argument that points into it is read
     // by the callee after it moved. What it frees of an argument it was given to free is not that.
     var reallocated: Set = .empty;
-    for (s.kills) |k| {
+    const ended_by = try r.arena.alloc(Set, args.len);
+    @memset(ended_by, .empty);
+    var fail_ends: std.ArrayList(check.FailEnd) = .empty;
+    var ok_ends: std.ArrayList(check.FailEnd) = .empty;
+    var group: ?Slot = null;
+    var before_group: Set = .empty;
+    for (s.kills) |kill| {
+        const k = kill.slot;
+        // A kill that depends on a tag the caller knows to be otherwise does not happen here.
+        const gate = try gateOf(r, st, kill.when, args, tys) orelse continue;
         const got = try resolve(r, st, k, args, tys, true);
         if (got.blind) {
             try r.tally("blind", inst);
@@ -1117,11 +1195,16 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
         }
         const where = if (got.place) |pl| r.placeName(pl) else "its argument";
         // Another parameter of the call ended it, not another part of this one.
-        const earlier = ended;
+        // The same slot under another condition is the same kill.
+        if (group == null or !group.?.eql(k)) {
+            group = k;
+            before_group = ended;
+        }
+        const earlier = before_group;
         switch (k.kind) {
             .object => {
                 const many = got.flat or (if (got.place) |pl| r.places.hasElem(pl) else false);
-                const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "`{s}` ends `{s}` here", .{ opts.callee, where }), .trail = st.trail, .soft = many };
+                const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "`{s}` ends `{s}` here", .{ opts.callee, where }), .trail = st.trail, .soft = many, .with = gate };
                 if (got.place) |pl| try r.objectAlive(st, inst, pl);
                 for (got.obj.ids) |o| {
                     const rec = r.identRec(o);
@@ -1129,6 +1212,7 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
                     if (rec.kind != .object) continue;
                     ended = try ended.with(r.arena, o);
                     try r.end(st, inst, o, event);
+                    if (kill.on_fail) try fail_ends.append(r.arena, .{ .id = o, .event = event });
                 }
                 try r.endRegion(st, inst, got.obj, event);
             },
@@ -1137,17 +1221,21 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
                 if (opts.skip_content_kills) continue;
                 if (got.place) |pl| try r.objectAlive(st, inst, pl);
                 const many = got.flat or (if (got.place) |pl| r.places.hasElem(pl) else false);
-                const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "`{s}` invalidates pointers into `{s}` here", .{ opts.callee, where }), .trail = st.trail, .soft = opts.soft or many };
+                const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "`{s}` invalidates pointers into `{s}` here", .{ opts.callee, where }), .trail = st.trail, .soft = opts.soft or many, .with = gate };
                 for (got.ids.ids) |id| if (!r.pointees.contains(id)) switch (r.identRec(id).kind) {
                     .object => {
                         try r.end(st, inst, id, event);
                         try r.endRegion(st, inst, try Set.single(r.arena, id), event);
                     },
-                    .tomb => if (earlier.has(r.identRec(id).a) and !opts.pre_ended and !got.flat) try twice(r, st, inst, opts.callee),
+                    .tomb => if (earlier.has(r.identRec(id).a)) {
+                        if (!opts.pre_ended and !got.flat) try twice(r, st, inst, opts.callee);
+                    } else if (!got.flat and !opts.pre_ended and earlierEvent(r, id, inst)) try r.tally("maybe_alias", inst),
                     .heap, .init => {
                         ended = try ended.with(r.arena, id);
+                        if (k.param < ended_by.len) ended_by[k.param] = try ended_by[k.param].with(r.arena, id);
                         if (k.param == 0 and !got.flat) reallocated = try reallocated.with(r.arena, id);
                         try r.end(st, inst, id, event);
+                        if (kill.on_fail) try fail_ends.append(r.arena, .{ .id = id, .event = event }) else if (st.dead.get(id)) |d| try ok_ends.append(r.arena, .{ .id = id, .event = event, .tomb = try r.tomb(id, d.soft) });
                         killed = try killed.with(r.arena, try r.tomb(id, event.soft or st.multi.has(id)));
                     },
                     else => {},
@@ -1157,8 +1245,21 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
     }
     for (args, 0..) |a, i| {
         if (i >= 64 or s.frees & (@as(u64, 1) << @intCast(i)) == 0) continue;
+        if (i < ended_by.len) ended_by[i] = try ended_by[i].merge(r.arena, a.ids);
         try endIds(r, st, inst, a, r.callName(inst), null, true);
     }
+    if (fail_ends.items.len != 0 and r.ty.kind(inst.ty) == .error_union) try r.fail_ends.put(r.arena, inst.id, fail_ends.items) else _ = r.fail_ends.remove(inst.id);
+    if (ok_ends.items.len != 0 and r.ty.kind(inst.ty) == .error_union) try r.ok_ends.put(r.arena, inst.id, ok_ends.items) else _ = r.ok_ends.remove(inst.id);
+    // Freed on some paths only: the checker cannot tell whether it happened, so the argument is stale only if it did.
+    for (args, 0..) |a, i| {
+        if (i >= 64 or s.maybe_frees & (@as(u64, 1) << @intCast(i)) == 0) continue;
+        const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "`{s}` may free it", .{opts.callee}), .trail = st.trail, .soft = true };
+        for (a.ids.ids) |o| switch (r.identRec(o).kind) {
+            .heap, .init => try r.end(st, inst, o, event),
+            else => {},
+        };
+    }
+    try overlap(r, st, inst, s, args, tys, ended_by, opts.callee);
     try readsEnded(r, st, inst, args, tys, reallocated, opts.callee);
     // What the callee gives back from a block it also ended is, on the paths where it ended it, the new block.
     for (leaves) |*v| {
@@ -1218,6 +1319,7 @@ fn place(r: *Run, base: Val, ty: schema.TypeId, path: []const u32, v: Val, depth
         out.ids = try base.ids.merge(r.arena, v.ids);
         out.obj = try base.obj.merge(r.arena, v.obj);
         out.maybe = base.maybe or v.maybe;
+        out.con = v.con;
         return out;
     }
     if (path[0] == dom.obj_step) {
@@ -1240,4 +1342,9 @@ fn place(r: *Run, base: Val, ty: schema.TypeId, path: []const u32, v: Val, depth
     var out = try Val.aggregate(r.arena, parts);
     out.obj = base.obj;
     return out;
+}
+
+fn earlierEvent(r: *Run, id: dom.Id, inst: *const Inst) bool {
+    const e = r.tomb_events.get(id) orelse return false;
+    return e.loc != inst.loc;
 }

@@ -76,10 +76,43 @@ pub const Slot = struct {
     }
 };
 
-/// Where a value of the result or of a store comes from: a slot of an argument, or the `k`th fresh allocation of the
-/// callee. `obj`: it names the object identities of the value, not the identities its pointers lead into.
+/// The scalar at `slot` is (`eq`) or is not (`!eq`) `value`.
+pub const Cond = struct {
+    slot: Slot,
+    value: u64,
+    eq: bool,
+
+    pub fn eql(a: Cond, b: Cond) bool {
+        return a.value == b.value and a.eq == b.eq and a.slot.eql(b.slot);
+    }
+
+    pub fn eqlAll(a: []const Cond, b: []const Cond) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |x, y| if (!x.eql(y)) return false;
+        return true;
+    }
+};
+
+/// What an end depends on: one of these conjunctions holds. Null: on nothing.
+pub const Alts = ?[]const []const Cond;
+
+/// Ended or invalidated on the paths that return where all of `when` hold.
+pub const Kill = struct {
+    slot: Slot,
+    when: []const Cond = &.{},
+    /// Some path that returns an error ends it too (the others may not).
+    on_fail: bool = false,
+
+    pub fn eql(a: Kill, b: Kill) bool {
+        return a.slot.eql(b.slot) and a.on_fail == b.on_fail and Cond.eqlAll(a.when, b.when);
+    }
+};
+
+/// Where a value of the result or of a store comes from: a slot of an argument, the `k`th fresh allocation of the
+/// callee, or a constant (a scalar). `obj`: it names the object identities of the value, not the identities its
+/// pointers lead into.
 pub const Desc = struct {
-    src: union(enum) { from: Slot, fresh: u32, gone },
+    src: union(enum) { from: Slot, fresh: u32, gone, con: u64 },
     obj: bool = false,
 
     pub fn eql(a: Desc, b: Desc) bool {
@@ -88,6 +121,7 @@ pub const Desc = struct {
             .from => |x| b.src == .from and x.eql(b.src.from),
             .fresh => |x| b.src == .fresh and x == b.src.fresh,
             .gone => b.src == .gone,
+            .con => |x| b.src == .con and x == b.src.con,
         };
     }
 };
@@ -96,7 +130,8 @@ pub const Desc = struct {
 pub const Leaf = struct { path: []const u32, descs: []const Desc };
 
 /// Memory below a pointer parameter holds `descs` when the callee returns. `must`: on every path that returns.
-pub const Write = struct { into: Slot, descs: []const Desc, must: bool };
+/// `on_fail`: some path that returns an error writes it too.
+pub const Write = struct { into: Slot, descs: []const Desc, must: bool, on_fail: bool = false };
 
 /// A fresh allocation of the callee ends with the objects `regions` (an arena it allocated from).
 pub const Fresh = struct { regions: []const Slot, many: bool = false };
@@ -113,9 +148,11 @@ pub const Summary = struct {
     /// The result is the pointer passed as this parameter, at `path` below it, on every path that returns.
     ret_place: ?Slot = null,
     /// Ended or invalidated on some path that returns.
-    kills: []const Slot = &.{},
+    kills: []const Kill = &.{},
     /// Bit i: the allocation or handle behind parameter i is freed on every path that returns.
     frees: u64 = 0,
+    /// Bit i: it is freed on some path that returns (and not on all).
+    maybe_frees: u64 = 0,
     /// What the memory below the pointer parameters holds afterwards.
     writes: []const Write = &.{},
     fresh: []const Fresh = &.{},
@@ -128,12 +165,12 @@ pub const Summary = struct {
     moves: u64 = 0,
 
     pub fn eql(a: Summary, b: Summary) bool {
-        if (a.complete != b.complete or a.frees != b.frees or a.token_stores != b.token_stores or a.moves != b.moves) return false;
+        if (a.complete != b.complete or a.frees != b.frees or a.maybe_frees != b.maybe_frees or a.token_stores != b.token_stores or a.moves != b.moves) return false;
         if (a.ret.len != b.ret.len or a.kills.len != b.kills.len or a.writes.len != b.writes.len or a.fresh.len != b.fresh.len or a.derefs.len != b.derefs.len) return false;
         for (a.derefs, b.derefs) |x, y| if (!x.eql(y)) return false;
         for (a.ret, b.ret) |x, y| if (!std.mem.eql(u32, x.path, y.path) or !eqlDescs(x.descs, y.descs)) return false;
         for (a.kills, b.kills) |x, y| if (!x.eql(y)) return false;
-        for (a.writes, b.writes) |x, y| if (!x.into.eql(y.into) or x.must != y.must or !eqlDescs(x.descs, y.descs)) return false;
+        for (a.writes, b.writes) |x, y| if (!x.into.eql(y.into) or x.must != y.must or x.on_fail != y.on_fail or !eqlDescs(x.descs, y.descs)) return false;
         if ((a.ret_place == null) != (b.ret_place == null)) return false;
         if (a.ret_place) |p| if (!p.eql(b.ret_place.?)) return false;
         return true;
@@ -346,7 +383,9 @@ pub const Kind = enum(u8) {
 pub const Ident = struct { kind: Kind, a: u32, b: u32 };
 
 /// `exact`: the end is of the one block a place holds, whichever of the names that stand for several it carries.
-pub const Event = struct { loc: schema.LocId, text: []const u8, trail: ?*const diag.Trail, soft: bool = false, exact: bool = false };
+/// `with`: the end is also subject to these conditions on the caller's own parameters (a callee's guard, translated).
+/// `when`: what the end depends on, set when it is recorded.
+pub const Event = struct { loc: schema.LocId, text: []const u8, trail: ?*const diag.Trail, soft: bool = false, exact: bool = false, with: []const Cond = &.{}, when: Alts = null };
 
 pub const Pending = struct { loc: schema.LocId, ident: dom.Id, site: u32 };
 
@@ -355,13 +394,33 @@ pub const Pending = struct { loc: schema.LocId, ident: dom.Id, site: u32 };
 /// A second free of a handle that may only be an ignored error: reported where the error is propagated.
 pub const Cancel = struct { tomb: dom.Id };
 
+pub const Restore = struct { place: PlaceId, val: Val };
+
+/// An end that a path of the callee that fails also makes.
+pub const FailEnd = struct { id: dom.Id, event: Event, tomb: dom.Id = 0 };
+
 pub const Over = struct { val: Val, stamp: u32 };
 
 pub const Cap = struct { cap_lb: u64 = 0, len_ub: ?u64 = null, sym: bool = false };
 
-pub const Pred = struct { subject: Val, ptr: bool, present_if_true: bool, ty: schema.TypeId };
+pub const Pred = struct { subject: Val, ptr: bool, present_if_true: bool, ty: schema.TypeId, call: ?u32 = null };
 
 pub const Trail = diag.Trail;
+
+/// The end happens if either `a` or `b` says so. More than a few alternatives are as good as none.
+fn unite(arena: Allocator, a: Alts, b: Alts) Allocator.Error!Alts {
+    const x = a orelse return null;
+    const y = b orelse return null;
+    var out: std.ArrayList([]const Cond) = .empty;
+    for ([_][]const []const Cond{ x, y }) |alts| for (alts) |alt| {
+        var dup = false;
+        for (out.items) |o| dup = dup or Cond.eqlAll(o, alt);
+        if (!dup) try out.append(arena, alt);
+    };
+    if (out.items.len > 4) return null;
+    for (out.items) |alt| if (alt.len == 0) return null;
+    return out.items;
+}
 
 pub const State = struct {
     alive: bool = true,
@@ -385,6 +444,10 @@ pub const State = struct {
     /// The values computed so far that an end or a rename changed on this path (by instruction; the stamp says which
     /// definition of the instruction it belongs to).
     over: std.AutoArrayHashMapUnmanaged(u32, Over) = .empty,
+    /// Scalars a test showed to be a constant on this path, until something writes them.
+    facts: std.AutoArrayHashMapUnmanaged(PlaceId, u64) = .empty,
+    /// Places something may have written in this run: a test of one says nothing of what the caller passed.
+    touched: std.AutoArrayHashMapUnmanaged(PlaceId, void) = .empty,
     trail: ?*const Trail = null,
 
     pub fn clone(s: State, arena: Allocator) Allocator.Error!State {
@@ -394,7 +457,17 @@ pub const State = struct {
         c.pending = try s.pending.clone(arena);
         c.caps = try s.caps.clone(arena);
         c.over = try s.over.clone(arena);
+        c.facts = try s.facts.clone(arena);
+        c.touched = try s.touched.clone(arena);
         return c;
+    }
+
+    /// Writing the places at and below `pl` forgets what a test showed of them.
+    pub fn forget(s: *State, places: *const Places, pl: PlaceId) void {
+        var k: usize = 0;
+        while (k < s.facts.count()) {
+            if (places.contains(pl, s.facts.keys()[k])) s.facts.swapRemoveAt(k) else k += 1;
+        }
     }
 
     /// The state after either of two paths. `entry` is the trail where they split.
@@ -407,6 +480,7 @@ pub const State = struct {
         out.freed = try a.freed.minus(arena, try a.freed.minus(arena, b.freed));
         out.ended = try a.ended.merge(arena, b.ended);
         out.alloced = try a.alloced.merge(arena, b.alloced);
+        for (b.touched.keys()) |k| try out.touched.put(arena, k, {});
         out.multi = try a.multi.merge(arena, b.multi);
         var pending_it = b.pending.iterator();
         while (pending_it.next()) |e| {
@@ -418,7 +492,13 @@ pub const State = struct {
             const gop = try out.dead.getOrPut(arena, e.key_ptr.*);
             if (!gop.found_existing) {
                 gop.value_ptr.* = e.value_ptr.*;
-            } else if (gop.value_ptr.soft and !e.value_ptr.soft) gop.value_ptr.* = e.value_ptr.*;
+            } else if (gop.value_ptr.soft and !e.value_ptr.soft) {
+                gop.value_ptr.* = e.value_ptr.*;
+            } else gop.value_ptr.when = try unite(arena, gop.value_ptr.when, e.value_ptr.when);
+        }
+        var f: usize = 0;
+        while (f < out.facts.count()) {
+            if (b.facts.get(out.facts.keys()[f]) == out.facts.values()[f]) f += 1 else out.facts.swapRemoveAt(f);
         }
         var k: usize = 0;
         while (k < out.caps.count()) {
@@ -432,10 +512,15 @@ pub const State = struct {
             if (mine.len_ub == null or other.len_ub == null or mine.len_ub.? != other.len_ub.?) mine.len_ub = null;
             k += 1;
         }
+        // A place that only one path wrote holds a constant on that path only.
+        for (out.mem.keys(), out.mem.values()) |key, *v| if (!b.mem.contains(key)) {
+            v.con = null;
+        };
         var it = b.mem.iterator();
         while (it.next()) |e| {
             const gop = try out.mem.getOrPut(arena, e.key_ptr.*);
             gop.value_ptr.* = if (gop.found_existing) try gop.value_ptr.join(arena, e.value_ptr.*) else e.value_ptr.*;
+            if (!gop.found_existing) gop.value_ptr.con = null;
         }
         var over_it = b.over.iterator();
         while (over_it.next()) |e| {
@@ -458,6 +543,10 @@ pub const State = struct {
             const other = b.caps.get(e.key_ptr.*) orelse return false;
             if (e.value_ptr.cap_lb != other.cap_lb or e.value_ptr.len_ub != other.len_ub) return false;
         }
+        if (a.touched.count() != b.touched.count()) return false;
+        for (a.touched.keys()) |k| if (!b.touched.contains(k)) return false;
+        if (a.facts.count() != b.facts.count()) return false;
+        for (a.facts.keys(), a.facts.values()) |k, v| if (b.facts.get(k) != v) return false;
         if (a.pending.count() != b.pending.count()) return false;
         for (a.pending.keys()) |k| if (!b.pending.contains(k)) return false;
         if (a.dead.count() != b.dead.count()) return false;
@@ -489,7 +578,7 @@ const LoopCtx = struct { back: std.ArrayList(State) = .empty };
 /// What one `ret` instruction showed about the function, kept until the run ends: the last execution of the
 /// instruction is the one with the settled facts.
 const Snap = struct {
-    kills: []const Slot,
+    kills: []const Kill,
     frees: u64,
     moves: u64,
     ret: []const Leaf,
@@ -537,6 +626,11 @@ pub const Run = struct {
     /// The parameter place a fresh block was last stored into: a store through a pointer into it lands below that place.
     holder_of: std.AutoHashMapUnmanaged(dom.Id, PlaceId) = .empty,
     cancels: std.AutoHashMapUnmanaged(u32, Cancel) = .empty,
+    /// What a call wrote only on the paths that succeed, as it was before: the error path of its `try` still has it.
+    restores: std.AutoHashMapUnmanaged(u32, []const Restore) = .empty,
+    fail_ends: std.AutoHashMapUnmanaged(u32, []const FailEnd) = .empty,
+    /// What a call ends only on the paths that succeed: on its error path the block is still there.
+    ok_ends: std.AutoHashMapUnmanaged(u32, []const FailEnd) = .empty,
     /// The pointer to a field that a pointer to its parent (`@fieldParentPtr`) was made from, by that parent.
     up_of: std.AutoHashMapUnmanaged(PlaceId, PlaceId) = .empty,
     /// The instructions whose value has ever held an identity: the only ones an end or a rename can change.
@@ -571,6 +665,8 @@ pub const Run = struct {
     quiet: u32 = 0,
     next_arg: u32 = 0,
     cur_loc: schema.LocId = .none,
+    /// Counts the instructions that may write memory: a scalar read in an earlier epoch may be stale.
+    epoch: u32 = 1,
 
     fn init(prog: *Program, arena: Allocator, ref: Ref) Allocator.Error!Run {
         var max_id: u32 = 0;
@@ -783,12 +879,16 @@ pub const Run = struct {
         const soft = event.soft or (st.multi.has(id) and !event.exact);
         var e = event;
         e.soft = soft;
+        e.when = try r.guardOf(st, event.with);
         const t = try r.tomb(id, soft);
         const gop = try r.tomb_events.getOrPut(r.arena, t);
         if (!gop.found_existing) gop.value_ptr.* = e;
         const marked = try st.dead.getOrPut(r.arena, id);
         // Already gone at least as surely: every value holds its tombstone already.
-        if (marked.found_existing and (!marked.value_ptr.soft or soft)) return;
+        if (marked.found_existing and (!marked.value_ptr.soft or soft)) {
+            if (!marked.value_ptr.soft and !soft) marked.value_ptr.when = try unite(r.arena, marked.value_ptr.when, e.when);
+            return;
+        }
         marked.value_ptr.* = e;
         if (!soft) st.alloced = try st.alloced.without(r.arena, id);
         try r.swapAll(st, id, t, soft, false);
@@ -796,6 +896,52 @@ pub const Run = struct {
 
     pub fn identRec(r: *Run, id: dom.Id) Ident {
         return r.idents.items[id];
+    }
+
+    /// The slot of the caller's world a scalar at `pl` stands for, when `pl` is below a parameter and not below an element.
+    pub fn condSlot(r: *Run, pl: PlaceId) Allocator.Error!?Slot {
+        const n = r.paramOf(pl) orelse return null;
+        const path = try r.places.path(r.arena, pl);
+        for (path) |s| if (s >= dom.index_step) return null;
+        const params = r.pack.t.params[r.func.params.off..][0..r.func.params.len];
+        return .{ .param = n, .path = path, .kind = if (r.ty.isPointer(params[n].ty)) .content else .value };
+    }
+
+    /// Below the pointee of a pointer parameter: the memory is the caller's.
+    fn pointerRooted(r: *Run, pl: PlaceId) bool {
+        const n = r.paramOf(pl) orelse return false;
+        return r.ty.isPointer(r.pack.t.params[r.func.params.off + n].ty);
+    }
+
+    /// What a test of the scalar at `pl` says of the value the caller passed: nothing in this run wrote it yet.
+    pub fn entryValued(r: *Run, st: *const State, pl: PlaceId) bool {
+        if (r.paramOf(pl) != null and !r.pointerRooted(pl)) return true;
+        for (st.touched.keys()) |k| if (r.places.overlaps(k, pl)) return false;
+        return true;
+    }
+
+    /// The branches taken so far, as a condition on the parameters, with `with` added to it.
+    fn guardOf(r: *Run, st: *const State, with: []const Cond) Allocator.Error!Alts {
+        var conj: std.ArrayList(Cond) = .empty;
+        try conj.appendSlice(r.arena, with);
+        var at = st.trail;
+        while (at) |t| : (at = t.prev) for (t.probes) |p| if (try r.condSlot(p.at)) |slot| {
+            try conj.append(r.arena, .{ .slot = slot, .value = p.value, .eq = p.eq });
+        };
+        if (conj.items.len == 0) return null;
+        std.mem.sort(Cond, conj.items, {}, lessCond);
+        var n: usize = 1;
+        for (conj.items[1..]) |c| if (!c.eql(conj.items[n - 1])) {
+            conj.items[n] = c;
+            n += 1;
+        };
+        // Two tests of one value that cannot both hold: this path does not exist.
+        for (conj.items[0..n], 0..) |x, i| for (conj.items[i + 1 .. n]) |y| {
+            if (x.slot.eql(y.slot) and (x.eq and y.eq and x.value != y.value or x.value == y.value and x.eq != y.eq)) return &.{};
+        };
+        const alts = try r.arena.alloc([]const Cond, 1);
+        alts[0] = conj.items[0..n];
+        return alts;
     }
 
     /// The parameter a place hangs below, when it is rooted at one.
@@ -857,6 +1003,7 @@ pub const Run = struct {
             };
             if (!dup) try out.append(r.arena, d);
         };
+        if (v.con) |c| try out.append(r.arena, .{ .src = .{ .con = c } });
         return out.items;
     }
 
@@ -885,6 +1032,7 @@ pub const Run = struct {
             .constant => blk: {
                 // The address of a global: memory of its own that nothing ends.
                 const k = r.v.constant(o);
+                if (r.scalarConst(k)) |c| break :blk .{ .con = c, .ep = dom.fixed_epoch };
                 if (k.kind == .undef or k.kind == .null or !r.ty.isPointer(k.ty)) break :blk .none;
                 const pl = r.places.root(r.arena, .other, o.value) catch break :blk .none;
                 break :blk .{ .place = pl, .off = 0 };
@@ -910,12 +1058,37 @@ pub const Run = struct {
         };
     }
 
+    /// The constant a number, bool or enum value is, by the hash of the name for an enum.
+    fn scalarConst(r: *Run, k: schema.ConstRec) ?u64 {
+        if (!isScalar(r.ty.kind(k.ty))) return null;
+        return switch (k.kind) {
+            .int, .bool => k.a,
+            .enum_tag, .enum_literal => std.hash.Wyhash.hash(0, r.pack.str(@enumFromInt(k.a))),
+            else => null,
+        };
+    }
+
+    pub fn isScalar(kind: schema.TypeKind) bool {
+        return kind == .int or kind == .bool or kind == .@"enum";
+    }
+
+    /// Something wrote memory: what was read before no longer says what is there.
+    pub fn bump(r: *Run) void {
+        r.epoch +%= 1;
+    }
+
+    /// The scalar `v` was read from `v.at`, and nothing was written since.
+    pub fn current(r: *const Run, v: Val) bool {
+        return v.ep == r.epoch or v.ep == dom.fixed_epoch;
+    }
+
     pub fn set(r: *Run, inst: *const Inst, val: Val) void {
         r.defs += 1;
         r.stamps[inst.id] = r.defs;
         // A number points nowhere and holds nothing, whatever it was computed from.
         r.vals[inst.id] = switch (r.ty.kind(inst.ty)) {
-            .int, .bool, .float, .@"enum", .error_set, .comptime_int, .comptime_float, .void, .noreturn, .enum_literal => Val.none,
+            .int, .bool, .@"enum" => .{ .con = val.con, .at = val.at, .probe = val.probe, .imp = val.imp, .ep = val.ep },
+            .float, .error_set, .comptime_int, .comptime_float, .void, .noreturn, .enum_literal => Val.none,
             else => val,
         };
         const v = r.vals[inst.id];
@@ -1018,7 +1191,24 @@ pub const Run = struct {
         return true;
     }
 
+    /// What is stored at `pl`. Elements of an array are places of their own for constant indices and one place for the
+    /// others: a store through a variable index may have written any constant one, and the other way round.
     pub fn readLeaf(r: *Run, st: *State, pl: PlaceId, ty: schema.TypeId, lazy: bool) Allocator.Error!Val {
+        var out = try r.readPlace(st, pl, ty, lazy);
+        const rec = r.places.rec(pl);
+        if (rec.parent == dom.no_place or rec.step < dom.index_step or rec.step >= dom.len_step) return out;
+        if (rec.step == dom.elem_step) {
+            for (st.mem.keys(), st.mem.values()) |key, v| {
+                const k = r.places.rec(key);
+                if (k.parent == rec.parent and k.step >= dom.index_step and k.step < dom.len_step) out = try out.join(r.arena, v.flat());
+            }
+        } else if (r.places.find(rec.parent, dom.elem_step)) |all| {
+            if (st.mem.get(all)) |v| out = try out.join(r.arena, v.flat());
+        }
+        return out;
+    }
+
+    fn readPlace(r: *Run, st: *State, pl: PlaceId, ty: schema.TypeId, lazy: bool) Allocator.Error!Val {
         // The elements of an array stored inline are part of the value; those of a slice are not part of the slice.
         const elems = ty != .none and r.ty.kind(ty) != .pointer;
         if (st.mem.get(pl)) |v| {
@@ -1086,7 +1276,7 @@ pub const Run = struct {
             if (r.strongAt(pl)) _ = st.mem.swapRemove(pl);
             for (fields, 0..) |f, k| {
                 // A number holds nothing, whatever the value it was cut out of held.
-                var part: Val = if (r.ty.hasTokens(f.ty) or r.ty.hasPointers(f.ty)) val.field(k) else .none;
+                var part: Val = if (r.ty.hasTokens(f.ty) or r.ty.hasPointers(f.ty)) val.field(k) else if (isScalar(r.ty.kind(f.ty))) val.field(k).scalarKept() else .none;
                 const at = try r.places.child(r.arena, pl, @intCast(k));
                 if (val.parts == null) part.ids = try r.notSiblings(part.ids, pl, at);
                 try r.writeDepth(st, at, part, f.ty, depth + 1);
@@ -1141,8 +1331,19 @@ pub const Run = struct {
         }
         var stored = val;
         stored.obj = .empty;
+        // A scalar that is a field of a parameter passed by value stays that field wherever it is copied to.
+        const kept = val.at != null and val.ep == dom.fixed_epoch;
+        stored.at = if (kept) val.at else null;
+        stored.probe = null;
+        stored.ep = if (kept) dom.fixed_epoch else 0;
+        // Elements and lengths may be the same memory as other places: no constant is followed there.
+        if (r.indexed(pl)) stored.con = null;
+        st.forget(&r.places, pl);
+        try st.touched.put(r.arena, pl, {});
         if (r.paramOf(pl) != null) for (val.ids.ids) |id| if (r.identRec(id).kind == .heap) try r.holder_of.put(r.arena, id, pl);
         const gop = try st.mem.getOrPut(r.arena, pl);
+        // A place that was never written holds something unknown: a weak write does not make it a constant.
+        if (!strong and !gop.found_existing) stored.con = null;
         gop.value_ptr.* = if (strong or !gop.found_existing) stored else try gop.value_ptr.join(r.arena, stored);
     }
 
@@ -1194,12 +1395,20 @@ pub const Run = struct {
     }
 
     /// A read or a write through `val`: the caller must have what it leads into.
+    fn sliceParam(r: *Run, pl: PlaceId) bool {
+        const n = r.paramOf(pl) orelse return false;
+        const ty = r.pack.t.params[r.func.params.off + n].ty;
+        return r.ty.kind(ty) == .pointer and r.ty.rec(ty).flags.size != .one;
+    }
+
     fn noteDeref(r: *Run, val: Val, what: []const u8) Allocator.Error!void {
         const deref = std.mem.eql(u8, what, "read") or std.mem.eql(u8, what, "write") or std.mem.eql(u8, what, "read and written") or std.mem.eql(u8, what, "written") or std.mem.eql(u8, what, "read by a callee");
         if (!deref) return;
         for (val.ids.ids) |id| {
             const rec = r.identRec(id);
-            if (rec.kind != .init or (rec.b == 0 and r.places.rec(rec.a).parent == dom.no_place)) continue;
+            if (rec.kind != .init) continue;
+            // A slice passed by value is the block itself: reading through it reads the block the caller gave.
+            if (rec.b == 0 and r.places.rec(rec.a).parent == dom.no_place and !r.sliceParam(rec.a)) continue;
             const slot = (try r.slotOf(id)) orelse continue;
             if (slot.kind == .view) continue;
             var have = false;
@@ -1316,6 +1525,7 @@ pub const Run = struct {
     fn paramVal(r: *Run, st: *State, ty: schema.TypeId, pl: PlaceId, depth: u32) Allocator.Error!Val {
         const holder = r.ty.kind(r.ty.payload(ty)) == .@"struct" and !r.ty.isAllocator(ty);
         // A struct without pointers can still be a handle: freeing it frees what the caller gave.
+        if (isScalar(r.ty.kind(ty))) return .{ .at = pl, .ep = dom.fixed_epoch };
         if (!r.ty.hasPointers(ty)) return if (r.ty.kind(ty) == .@"struct") .{ .ids = try Set.single(r.arena, try r.ident(.init, pl, 0)) } else .none;
         if (depth < 5 and holder) if (r.ty.structFields(ty)) |fields| {
             const parts = try r.arena.alloc(Val, fields.len);
@@ -1428,10 +1638,46 @@ pub const Run = struct {
         }
         if (ptr.many or (ptr.place != null and r.places.hasElem(ptr.place.?))) out.many = true;
         // A number read out of a stale handle is data, not a use of what the handle names.
-        switch (r.ty.kind(ty)) {
-            .int, .bool, .float, .@"enum", .error_set => return Val.none,
+        const kind = r.ty.kind(ty);
+        if (isScalar(kind)) {
+            const pl = ptr.place orelse return Val.none;
+            if (out.many or r.indexed(pl)) return .{ .ep = r.epoch };
+            const copy = out.at != null and out.ep == dom.fixed_epoch;
+            const source = if (copy) out.at.? else pl;
+            return .{ .con = out.con orelse st.facts.get(source), .at = source, .ep = if (copy) dom.fixed_epoch else r.epoch };
+        }
+        switch (kind) {
+            .float, .error_set => return Val.none,
             else => {},
         }
+        if (ptr.place) |pl| return r.annotate(st, out, ty, pl, 0);
+        return out;
+    }
+
+    /// The scalar fields of a struct read from `pl`: where each was read from, and what a test showed of it.
+    fn annotate(r: *Run, st: *const State, v: Val, ty: schema.TypeId, pl: PlaceId, depth: u32) Allocator.Error!Val {
+        const fields = (if (depth < 4) r.ty.structFields(ty) else null) orelse return v;
+        const parts = v.parts orelse return v;
+        if (parts.len != fields.len) return v;
+        const copy = try r.arena.alloc(Val, parts.len);
+        var any = false;
+        for (copy, parts, fields, 0..) |*out, part, f, k| {
+            const at = try r.places.child(r.arena, pl, @intCast(k));
+            out.* = part;
+            if (isScalar(r.ty.kind(f.ty))) {
+                if (r.indexed(at)) continue;
+                const kept = part.at != null and part.ep == dom.fixed_epoch;
+                const source = if (kept) part.at.? else at;
+                out.* = .{ .con = part.con orelse st.facts.get(source), .at = source, .ep = if (kept) dom.fixed_epoch else r.epoch };
+                any = true;
+            } else if (r.ty.structFields(f.ty) != null) {
+                out.* = try r.annotate(st, part, f.ty, at, depth + 1);
+                any = true;
+            }
+        }
+        if (!any) return v;
+        var out = v;
+        out.parts = copy;
         return out;
     }
 
@@ -1522,7 +1768,9 @@ pub const Run = struct {
     /// Ends `id`; one that stands for several allocations stays, and the end is counted.
     pub fn end(r: *Run, st: *State, inst: *const Inst, id: dom.Id, event: Event) Allocator.Error!void {
         try r.tally("ends", inst);
-        if (st.multi.has(id) and !event.exact) try r.tally("summarized", inst);
+        // An end that may not have happened to this block (it stands for several, or is one of many, or depends on room)
+        // is not decided.
+        if (event.soft or (st.multi.has(id) and !event.exact)) try r.tally("summarized", inst);
         try r.kill(st, id, event);
     }
 
@@ -1546,8 +1794,25 @@ pub const Run = struct {
         }
     }
 
+    /// The call `call` returned an error: what it wrote only when it succeeded is as it was, and what its failing paths end
+    /// is ended.
+    fn onError(r: *Run, st: *State, call_id: u32) Allocator.Error!void {
+        if (r.ok_ends.get(call_id)) |list| for (list) |e| {
+            _ = st.dead.swapRemove(e.id);
+            st.alloced = try st.alloced.with(r.arena, e.id);
+            try r.swapAll(st, e.tomb, e.id, false, false);
+        };
+        if (r.restores.get(call_id)) |list| for (list) |back| try r.writeLeafAs(st, back.place, back.val, true);
+        if (r.fail_ends.get(call_id)) |list| for (list) |e| {
+            // The restored places hold the block again; ending it once more replaces it there too.
+            _ = st.dead.swapRemove(e.id);
+            try r.kill(st, e.id, e.event);
+        };
+    }
+
     /// On this path the optional or error union of `p` holds no payload, so its tokens and pointers do not exist.
     fn absent(r: *Run, st: *State, p: Pred) Error!void {
+        if (p.call) |c| try r.onError(st, c);
         var subject = p.subject;
         var at: ?PlaceId = subject.from;
         if (p.ptr) {
@@ -1555,7 +1820,7 @@ pub const Run = struct {
             subject = if (subject.place) |pl| try r.readVal(st, pl, p.ty) else .none;
         }
         st.live = try st.live.minus(r.arena, subject.toks);
-        if (at) |pl| if (r.strongAt(pl)) try r.writeVal(st, pl, .none, p.ty);
+        if (at) |pl| if (r.strongAt(pl)) try r.writeVal(st, pl, try (try r.readVal(st, pl, p.ty)).onlyCons(r.arena), p.ty);
     }
 
     // The summary.
@@ -1565,24 +1830,32 @@ pub const Run = struct {
         var out: Summary = .{};
         const snaps = r.snaps.values();
         if (snaps.len == 0) return out;
-        var kills: std.ArrayList(Slot) = .empty;
+        var kills: std.ArrayList(Kill) = .empty;
         var writes: std.ArrayList(Write) = .empty;
         var counts: std.ArrayList(usize) = .empty;
         var goes_counts: std.ArrayList(usize) = .empty;
         var leaves: std.ArrayList(Leaf) = .empty;
         var frees: u64 = ~@as(u64, 0);
+        var some_frees: u64 = 0;
         var moves: u64 = ~@as(u64, 0);
         var place: ?Slot = null;
         var place_ok = true;
         for (snaps, 0..) |s, n| {
             frees &= s.frees;
+            some_frees |= s.frees;
             moves &= s.moves;
             for (s.kills) |k| {
-                var have = false;
-                for (kills.items) |x| if (x.eql(k)) {
-                    have = true;
+                var at: ?usize = null;
+                for (kills.items, 0..) |x, i| if (x.slot.eql(k.slot) and Cond.eqlAll(x.when, k.when)) {
+                    at = i;
                 };
-                if (!have) try kills.append(arena, try dupeSlot(arena, k));
+                if (at) |i| {
+                    kills.items[i].on_fail = kills.items[i].on_fail or s.failed;
+                } else {
+                    var added = try dupeKill(arena, k);
+                    added.on_fail = s.failed;
+                    try kills.append(arena, added);
+                }
             }
             for (s.ret) |l| {
                 var at: ?usize = null;
@@ -1620,8 +1893,12 @@ pub const Run = struct {
         for (writes.items, counts.items, goes_counts.items) |*w, c, g| {
             var makes = false;
             for (w.descs) |d| makes = makes or d.src == .fresh;
-            w.must = if (makes or going == 0) c == snaps.len else g == going;
+            w.on_fail = c != g;
+            // A caller that tries the call has the old block back on the paths that fail, when none of them wrote it.
+            w.must = if (going == 0 or (makes and w.on_fail)) c == snaps.len else g == going;
         }
+        for (leaves.items) |*l| l.descs = try withCon(arena, l.descs, agreedCon(snaps, going, .{ .leaf = l.path }));
+        for (writes.items) |*w| w.descs = try withCon(arena, w.descs, if (w.must) agreedCon(snaps, going, .{ .write = w.into }) else null);
         out.kills = kills.items;
         out.writes = writes.items;
         out.ret = leaves.items;
@@ -1651,6 +1928,7 @@ pub const Run = struct {
         for (out.ret) |l| std.mem.sort(Desc, @constCast(l.descs), {}, lessDesc);
         for (out.writes) |w| std.mem.sort(Desc, @constCast(w.descs), {}, lessDesc);
         out.frees = frees;
+        out.maybe_frees = some_frees & ~frees;
         out.moves = moves;
         const derefs = try arena.alloc(Slot, r.derefs.items.len);
         for (derefs, r.derefs.items) |*d, x| d.* = try dupeSlot(arena, x);
@@ -1658,26 +1936,20 @@ pub const Run = struct {
         out.derefs = derefs;
         out.ret_place = if (place_ok) if (place) |p| try dupeSlot(arena, p) else null else null;
         out.fresh = fresh_list;
-        // Two pointer parameters of one type are taken not to overlap; say so when something is done through them.
-        if (kills.items.len + writes.items.len != 0) {
-            const params = r.pack.t.params[r.func.params.off..][0..r.func.params.len];
-            for (params, 0..) |a, i| {
-                const pa = r.ty.pointee(a.ty) orelse continue;
-                if (r.ty.rec(a.ty).flags.is_const) continue;
-                for (params[i + 1 ..]) |b| {
-                    const pb = r.ty.pointee(b.ty) orelse continue;
-                    if (!r.ty.rec(b.ty).flags.is_const and r.ty.kind(pa) == .@"struct" and std.mem.eql(u8, r.ty.name(pa), r.ty.name(pb))) {
-                        r.stats.alias_params = 1;
-                    }
-                }
+        // Pointer parameters (slices too) are taken not to overlap; say so when something is ended or changed through them.
+        if (kills.items.len + writes.items.len != 0 or frees != 0) {
+            var pointers: usize = 0;
+            for (r.pack.t.params[r.func.params.off..][0..r.func.params.len]) |a| {
+                if (r.ty.isPointer(a.ty) and !r.ty.isAllocator(r.ty.payload(a.ty))) pointers += 1;
             }
+            if (pointers >= 2) r.stats.alias_params = 1;
         }
         return out;
     }
 
     /// The kills, writes and results of a summary in one order, so that two runs that found the same thing compare equal.
     fn canonicalOrder(out: *Summary) void {
-        std.mem.sort(Slot, @constCast(out.kills), {}, lessSlot);
+        std.mem.sort(Kill, @constCast(out.kills), {}, lessKill);
         std.mem.sort(Write, @constCast(out.writes), {}, lessWrite);
         std.mem.sort(Leaf, @constCast(out.ret), {}, lessLeaf);
         for (out.ret) |l| std.mem.sort(Desc, @constCast(l.descs), {}, lessDesc);
@@ -1725,6 +1997,19 @@ pub const Run = struct {
         return lessSlot({}, a.into, b.into);
     }
 
+    fn lessCond(_: void, a: Cond, b: Cond) bool {
+        if (!a.slot.eql(b.slot)) return lessSlot({}, a.slot, b.slot);
+        if (a.value != b.value) return a.value < b.value;
+        return !a.eq and b.eq;
+    }
+
+    fn lessKill(_: void, a: Kill, b: Kill) bool {
+        if (!a.slot.eql(b.slot)) return lessSlot({}, a.slot, b.slot);
+        if (a.when.len != b.when.len) return a.when.len < b.when.len;
+        for (a.when, b.when) |x, y| if (!x.eql(y)) return lessCond({}, x, y);
+        return !a.on_fail and b.on_fail;
+    }
+
     fn lessLeaf(_: void, a: Leaf, b: Leaf) bool {
         return std.mem.order(u32, a.path, b.path) == .lt;
     }
@@ -1738,11 +2023,18 @@ pub const Run = struct {
             .from => |x| lessSlot({}, x, b.src.from),
             .fresh => |x| x < b.src.fresh,
             .gone => false,
+            .con => |x| x < b.src.con,
         };
     }
 
     fn dupeSlot(arena: Allocator, s: Slot) Allocator.Error!Slot {
         return .{ .param = s.param, .path = try arena.dupe(u32, s.path), .kind = s.kind };
+    }
+
+    fn dupeKill(arena: Allocator, k: Kill) Allocator.Error!Kill {
+        const when = try arena.alloc(Cond, k.when.len);
+        for (when, k.when) |*c, x| c.* = .{ .slot = try dupeSlot(arena, x.slot), .value = x.value, .eq = x.eq };
+        return .{ .slot = try dupeSlot(arena, k.slot), .when = when };
     }
 
     fn dupeDescs(arena: Allocator, ds: []const Desc) Allocator.Error![]const Desc {
@@ -1751,8 +2043,49 @@ pub const Run = struct {
             .from => |s| .{ .from = try dupeSlot(arena, s) },
             .fresh => |k| .{ .fresh = k },
             .gone => .gone,
+            .con => |c| .{ .con = c },
         }, .obj = d.obj };
         return out;
+    }
+
+    const ConKey = union(enum) { leaf: []const u32, write: Slot };
+
+    /// The constant a result leaf or a write holds on every path that goes on, when it is one and the same.
+    fn agreedCon(snaps: []const Snap, going: usize, key: ConKey) ?u64 {
+        var agreed: ?u64 = null;
+        for (snaps) |s| {
+            if (s.failed and going != 0) continue;
+            var found: ?u64 = null;
+            switch (key) {
+                .leaf => |path| for (s.ret) |l| if (std.mem.eql(u32, l.path, path)) {
+                    found = conOf(l.descs);
+                },
+                .write => |slot| for (s.writes) |w| if (w.into.eql(slot)) {
+                    found = conOf(w.descs);
+                },
+            }
+            const c = found orelse return null;
+            if (agreed != null and agreed.? != c) return null;
+            agreed = c;
+        }
+        return agreed;
+    }
+
+    fn conOf(descs: []const Desc) ?u64 {
+        var found: ?u64 = null;
+        for (descs) |d| if (d.src == .con) {
+            if (found != null and found.? != d.src.con) return null;
+            found = d.src.con;
+        };
+        return found;
+    }
+
+    /// `descs` without constants, and with `c` when it is known.
+    fn withCon(arena: Allocator, descs: []const Desc, c: ?u64) Allocator.Error![]const Desc {
+        var out: std.ArrayList(Desc) = .empty;
+        for (descs) |d| if (d.src != .con) try out.append(arena, d);
+        if (c) |x| try out.append(arena, .{ .src = .{ .con = x } });
+        return out.items;
     }
 
     fn mergeDescs(arena: Allocator, a: []const Desc, b: []const Desc) Allocator.Error![]const Desc {
@@ -1805,7 +2138,7 @@ pub const Run = struct {
     /// Records what this `ret` shows of the function: what it ended, what the memory below its parameters holds, and
     /// where the result comes from.
     fn snapshot(r: *Run, inst: *const Inst, st: *State, val: Val) Allocator.Error!void {
-        var kills: std.ArrayList(Slot) = .empty;
+        var kills: std.ArrayList(Kill) = .empty;
         var it = st.dead.iterator();
         while (it.next()) |e| {
             // The caller's names for blocks that stand for several are not the callee's to end.
@@ -1814,7 +2147,10 @@ pub const Run = struct {
             const rec = r.identRec(id);
             // The parameter's own value is a free when it is one on every path (below).
             if (rec.kind == .init and rec.b == 0 and r.places.rec(rec.a).parent == dom.no_place) continue;
-            if (try r.slotOf(id)) |s| try kills.append(r.arena, s);
+            if (try r.slotOf(id)) |s| {
+                const alts: []const []const Cond = e.value_ptr.when orelse &.{&.{}};
+                for (alts) |when| try kills.append(r.arena, .{ .slot = s, .when = when });
+            }
         }
         var frees: u64 = 0;
         for (st.freed.ids) |id| {
@@ -1851,6 +2187,13 @@ pub const Run = struct {
             if (v.ids.ids.len == 1 and v.ids.ids[0] == try r.ident(.init, key, 1) and v.toks.isEmpty() and v.parts == null) continue;
             const into = (try r.slotOfPlace(key, .content)) orelse continue;
             try writes.append(r.arena, .{ .into = into, .descs = try r.descsOf(v) });
+        }
+        // A test that the function went on past tells what the memory holds, written or not.
+        for (st.facts.keys(), st.facts.values()) |key, value| {
+            if (!r.pointerRooted(key) or st.mem.contains(key)) continue;
+            const into = (try r.slotOfPlace(key, .content)) orelse continue;
+            const descs = try r.arena.dupe(Desc, &.{.{ .src = .{ .con = value } }});
+            try writes.append(r.arena, .{ .into = into, .descs = descs });
         }
         for (r.elem_stores.keys(), r.elem_stores.values()) |key, v| {
             const into = (try r.slotOfPlace(key, .content)) orelse continue;
@@ -1889,7 +2232,11 @@ pub const Run = struct {
         if (ops.len == 0) return false;
         return switch (ops[0].kind) {
             .inst => if (r.by_id[ops[0].value]) |def| def.tag == .wrap_errunion_err else false,
-            .constant => r.v.constant(ops[0]).kind == .@"error",
+            .constant => blk: {
+                const k = r.v.constant(ops[0]);
+                // An error union that holds an error is printed as `error.Name`.
+                break :blk k.kind == .@"error" or (k.kind == .text and r.ty.kind(k.ty) == .error_union and std.mem.startsWith(u8, r.pack.str(@enumFromInt(k.a)), "error."));
+            },
             .none => false,
         };
     }
@@ -1927,6 +2274,7 @@ pub const Run = struct {
         defer r.cur = outer;
         r.stats.insts += 1;
         if (inst.loc != .none) r.cur_loc = inst.loc;
+        defer if (writesMemory(inst.tag)) r.bump();
         if (inst.ty == .none) return r.unsupported(inst, "instruction {t} is not decoded by the exporter", .{inst.tag});
         switch (inst.tag) {
             .dbg_stmt, .dbg_empty_stmt, .save_err_return_trace_index, .set_err_return_trace => {},
@@ -2060,7 +2408,14 @@ pub const Run = struct {
             .union_init => {
                 const v = r.arg(inst, 0);
                 if (!v.toks.isEmpty()) return r.unsupported(inst, "a union ({s}) holds a linear value", .{r.ty.name(inst.ty)});
-                r.set(inst, v);
+                // One place per variant: the others hold nothing.
+                const field = r.v.attr(inst, .field) orelse return r.unsupported(inst, "union_init without a field", .{});
+                const variants = r.ty.structFields(inst.ty) orelse return r.set(inst, v);
+                if (field >= variants.len) return r.set(inst, v);
+                const parts = try r.arena.alloc(Val, variants.len);
+                @memset(parts, .none);
+                parts[field] = v;
+                r.set(inst, try Val.aggregate(r.arena, parts));
             },
             .array_elem_val, .slice_elem_val, .ptr_elem_val => {
                 const base = r.arg(inst, 0);
@@ -2092,7 +2447,7 @@ pub const Run = struct {
                 };
                 if (ptr) try r.alive(st, inst, r.arg(inst, 0), "read");
                 const subject_ty = r.operandType(r.v.ops(inst)[0]);
-                try r.preds.put(r.arena, inst.id, .{ .subject = r.arg(inst, 0), .ptr = ptr, .present_if_true = present_if_true, .ty = if (ptr) r.pointeeOf(subject_ty) else subject_ty });
+                try r.preds.put(r.arena, inst.id, .{ .subject = r.arg(inst, 0), .ptr = ptr, .present_if_true = present_if_true, .ty = if (ptr) r.pointeeOf(subject_ty) else subject_ty, .call = if (r.v.ops(inst)[0].kind == .inst) r.v.ops(inst)[0].value else null });
                 r.set(inst, .none);
             },
             .not => {
@@ -2102,7 +2457,31 @@ pub const Run = struct {
                     negated.present_if_true = !p.present_if_true;
                     try r.preds.put(r.arena, inst.id, negated);
                 };
-                r.set(inst, .none);
+                const v = r.arg(inst, 0);
+                var out: Val = .none;
+                if (r.ty.kind(inst.ty) == .bool) {
+                    if (v.con) |k| {
+                        out = .{ .con = k ^ 1, .ep = dom.fixed_epoch };
+                    } else {
+                        if (r.probeOf(v)) |p| out = .{ .probe = .{ .at = p.at, .value = p.value, .eq = !p.eq }, .ep = v.ep };
+                        if (v.imp) |i| out.imp = try r.implied(i.no, i.yes);
+                    }
+                }
+                r.set(inst, out);
+            },
+            .cmp_eq, .cmp_neq => {
+                const a = r.arg(inst, 0);
+                const b = r.arg(inst, 1);
+                const eq = inst.tag == .cmp_eq;
+                var out: Val = .none;
+                if (a.con != null and b.con != null) {
+                    out = .{ .con = @intFromBool((a.con.? == b.con.?) == eq), .ep = dom.fixed_epoch };
+                } else if (a.at != null and b.con != null and r.current(a)) {
+                    out = .{ .probe = .{ .at = a.at.?, .value = b.con.?, .eq = eq }, .ep = a.ep };
+                } else if (b.at != null and a.con != null and r.current(b)) {
+                    out = .{ .probe = .{ .at = b.at.?, .value = a.con.?, .eq = eq }, .ep = b.ep };
+                }
+                r.set(inst, out);
             },
 
             .block, .dbg_inline_block => try r.block(inst, st),
@@ -2211,6 +2590,13 @@ pub const Run = struct {
         }
     }
 
+    fn writesMemory(tag: schema.Tag) bool {
+        return switch (tag) {
+            .store, .store_safe, .memcpy, .memmove, .memset, .memset_safe, .atomic_store_unordered, .atomic_store_monotonic, .atomic_store_release, .atomic_store_seq_cst, .atomic_rmw, .cmpxchg_weak, .cmpxchg_strong, .set_union_tag, .optional_payload_ptr_set, .errunion_payload_ptr_set, .call, .call_always_tail, .call_never_tail, .call_never_inline => true,
+            else => false,
+        };
+    }
+
     /// Instructions that take a pointer or a slice and look at the address or the length only.
     fn addressOnly(r: *Run, tag: schema.Tag) bool {
         _ = r;
@@ -2237,15 +2623,55 @@ pub const Run = struct {
         if (st.alive) try ctx.incoming.append(r.arena, .{ .state = st.*, .val = .none });
         var out: ?State = null;
         var val: Val = .none;
+        // A scalar keeps what every path that reaches the end agrees on.
+        var scalar: ?Val = null;
         for (ctx.incoming.items) |inc| {
             out = if (out) |o| try o.join(r.arena, inc.state, entry) else inc.state;
             val = try val.join(r.arena, inc.val);
+            scalar = if (scalar) |v| try v.join(r.arena, inc.val) else inc.val;
         }
         _ = r.blocks.remove(inst.id);
         if (out) |o| {
             st.* = o;
-            r.set(inst, val);
+            var result = if (isScalar(r.ty.kind(inst.ty))) scalar.? else val;
+            if (r.ty.kind(inst.ty) == .bool and ctx.incoming.items.len > 1) result.imp = try r.impliedBy(entry, ctx.incoming.items);
+            r.set(inst, result);
         } else st.alive = false;
+    }
+
+    fn implied(r: *Run, yes: []const dom.Probe, no: []const dom.Probe) Allocator.Error!?*const dom.Implied {
+        if (yes.len == 0 and no.len == 0) return null;
+        const out = try r.arena.create(dom.Implied);
+        out.* = .{ .yes = yes, .no = no };
+        return out;
+    }
+
+    /// What a bool made by `and` or `or` says when it is true and when it is false: what every path that can end in that
+    /// value has tested on the way.
+    fn impliedBy(r: *Run, entry: ?*const Trail, incoming: []const Incoming) Allocator.Error!?*const dom.Implied {
+        var sides: [2]?[]const dom.Probe = .{ null, null };
+        for (incoming) |inc| {
+            var path: std.ArrayList(dom.Probe) = .empty;
+            var at = inc.state.trail;
+            while (at != null and at != entry) : (at = at.?.prev) try path.appendSlice(r.arena, at.?.probes);
+            const known = r.probeOf(inc.val);
+            for ([_]bool{ true, false }, 0..) |truth, k| {
+                // The value cannot be this on this path.
+                if (inc.val.con) |c| if ((c != 0) != truth) continue;
+                var here = try path.clone(r.arena);
+                if (known) |p| try here.append(r.arena, .{ .at = p.at, .value = p.value, .eq = p.eq == truth });
+                if (inc.val.imp) |i| try here.appendSlice(r.arena, if (truth) i.yes else i.no);
+                if (sides[k]) |have| {
+                    var common: std.ArrayList(dom.Probe) = .empty;
+                    for (have) |x| for (here.items) |y| if (std.meta.eql(x, y)) {
+                        try common.append(r.arena, x);
+                        break;
+                    };
+                    sides[k] = common.items;
+                } else sides[k] = here.items;
+            }
+        }
+        return r.implied(sides[0] orelse &.{}, sides[1] orelse &.{});
     }
 
     fn loop(r: *Run, inst: *const Inst, st: *State) Error!void {
@@ -2271,6 +2697,7 @@ pub const Run = struct {
             ctx.back.clearRetainingCapacity();
             for (saved.items) |s| r.blocks.get(s.id).?.incoming.shrinkRetainingCapacity(s.len);
             var run = try head.clone(r.arena);
+            r.bump();
             try r.exec(r.v.insts(bodies[0]), &run);
             var next = head;
             next = try next.join(r.arena, entry, entry.trail);
@@ -2284,8 +2711,10 @@ pub const Run = struct {
         ctx.back.clearRetainingCapacity();
         for (saved.items) |s| r.blocks.get(s.id).?.incoming.shrinkRetainingCapacity(s.len);
         var run = try head.clone(r.arena);
+        r.bump();
         try r.exec(r.v.insts(bodies[0]), &run);
         _ = r.loops.remove(inst.id);
+        r.bump();
         st.alive = false;
     }
 
@@ -2294,31 +2723,66 @@ pub const Run = struct {
         const bodies = r.v.bodies(inst);
         if (bodies.len != 2) return r.unsupported(inst, "a branch with {d} bodies", .{bodies.len});
         const c = r.v.ops(inst)[0];
+        const cond = r.arg(inst, 0);
         var take_then = true;
         var take_else = true;
-        if (c.kind == .constant) {
-            const k = r.v.constant(c);
-            if (k.kind == .bool) {
-                take_then = k.a != 0;
-                take_else = !take_then;
-            }
+        if (cond.con) |k| {
+            take_then = k != 0;
+            take_else = !take_then;
+        }
+        const probe = r.probeOf(cond);
+        var yes: std.ArrayList(dom.Probe) = .empty;
+        var no: std.ArrayList(dom.Probe) = .empty;
+        if (probe) |p| if (r.entryValued(st, p.at)) {
+            try yes.append(r.arena, p);
+            try no.append(r.arena, .{ .at = p.at, .value = p.value, .eq = !p.eq });
+        };
+        if (cond.imp) |i| {
+            for (i.yes) |p| if (r.entryValued(st, p.at)) try yes.append(r.arena, p);
+            for (i.no) |p| if (r.entryValued(st, p.at)) try no.append(r.arena, p);
         }
         const pred: ?Pred = if (c.kind == .inst) r.preds.get(c.value) else null;
         const decision = !(r.endsInUnreachable(bodies[0]) or r.endsInUnreachable(bodies[1]));
         // The failing side of a safety check never returns: nothing it does reaches the rest of the function.
         if (take_then and !r.endsInUnreachable(bodies[0])) {
             var s = try st.clone(r.arena);
-            if (decision) s.trail = try r.push(st.trail, inst.loc, .then);
+            if (decision) s.trail = try r.pushProbes(st.trail, inst.loc, .then, yes.items);
+            if (probe) |p| try r.refine(&s, p);
             if (pred) |p| if (p.present_if_true) try r.present(&s, p) else try r.absent(&s, p);
             try r.exec(r.v.insts(bodies[0]), &s);
         }
         if (take_else and !r.endsInUnreachable(bodies[1])) {
             var s = st.*;
-            if (decision) s.trail = try r.push(st.trail, inst.loc, .@"else");
+            const other: ?dom.Probe = if (probe) |p| .{ .at = p.at, .value = p.value, .eq = !p.eq } else null;
+            if (decision) s.trail = try r.pushProbes(st.trail, inst.loc, .@"else", no.items);
+            if (other) |p| try r.refine(&s, p);
             if (pred) |p| if (p.present_if_true) try r.absent(&s, p) else try r.present(&s, p);
             try r.exec(r.v.insts(bodies[1]), &s);
         }
         st.alive = false;
+    }
+
+    /// What a bool says of a scalar in memory: a test of it, or the scalar itself when it is a bool.
+    fn probeOf(r: *Run, v: Val) ?dom.Probe {
+        if (!r.current(v)) return null;
+        if (v.probe) |p| return p;
+        if (v.at) |at| return .{ .at = at, .value = 1, .eq = true };
+        return null;
+    }
+
+    /// The place holds `p.value` from here on, if the test says so and the place is one the run can follow.
+    fn refine(r: *Run, st: *State, p: dom.Probe) Allocator.Error!void {
+        if (!p.eq or r.indexed(p.at)) return;
+        try st.facts.put(r.arena, p.at, p.value);
+    }
+
+    /// Below an element of an array, an index, a length or an object: places that other places may be the same memory as.
+    pub fn indexed(r: *Run, pl: PlaceId) bool {
+        var at = pl;
+        while (r.places.rec(at).parent != dom.no_place) : (at = r.places.rec(at).parent) {
+            if (r.places.rec(at).step >= dom.index_step) return true;
+        }
+        return false;
     }
 
     /// A body that ends in `unreachable` is the failing side of a safety check.
@@ -2328,17 +2792,51 @@ pub const Run = struct {
     }
 
     fn switchBr(r: *Run, inst: *const Inst, st: *State) Error!void {
-        for (r.v.bodies(inst)) |b| {
+        const subject = r.arg(inst, 0);
+        const bodies = r.v.bodies(inst);
+        const at: ?PlaceId = if (r.current(subject)) subject.at else null;
+        const entry = if (at) |pl| r.entryValued(st, pl) else false;
+        // The constants the cases name, when all of them are constants (no ranges): then a known subject picks its case.
+        var exact = true;
+        for (bodies) |b| {
+            if (b.ranges.len != 0) exact = false;
+            for (r.pack.t.operands[b.items.off..][0..b.items.len]) |item| exact = exact and r.operand(item).con != null;
+        }
+        var matched = false;
+        if (exact) if (subject.con) |k| for (bodies) |b| for (r.pack.t.operands[b.items.off..][0..b.items.len]) |item| {
+            matched = matched or r.operand(item).con.? == k;
+        };
+        for (bodies) |b| {
+            const items = r.pack.t.operands[b.items.off..][0..b.items.len];
+            if (exact) if (subject.con) |k| {
+                var hit = b.label != .case and !matched;
+                for (items) |item| hit = hit or r.operand(item).con.? == k;
+                if (!hit) continue;
+            };
+            var probes: std.ArrayList(dom.Probe) = .empty;
+            if (at != null and exact) {
+                if (b.label != .case) {
+                    for (bodies) |other| for (r.pack.t.operands[other.items.off..][0..other.items.len]) |item| {
+                        try probes.append(r.arena, .{ .at = at.?, .value = r.operand(item).con.?, .eq = false });
+                    };
+                } else if (items.len == 1) try probes.append(r.arena, .{ .at = at.?, .value = r.operand(items[0]).con.?, .eq = true });
+            }
             var s = try st.clone(r.arena);
-            s.trail = try r.push(st.trail, inst.loc, .case);
+            s.trail = try r.pushProbes(st.trail, inst.loc, .case, if (entry) probes.items else &.{});
+            for (probes.items) |p| try r.refine(&s, p);
             try r.exec(r.v.insts(b), &s);
         }
         st.alive = false;
     }
 
-    fn push(r: *Run, prev: ?*const Trail, loc: schema.LocId, what: @FieldType(Trail, "what")) Allocator.Error!*const Trail {
+    fn push(r: *Run, prev: ?*const Trail, loc: schema.LocId, what: @FieldType(Trail, "what"), probe: ?dom.Probe) Allocator.Error!*const Trail {
+        const one: []const dom.Probe = if (probe) |p| try r.arena.dupe(dom.Probe, &.{p}) else &.{};
+        return r.pushProbes(prev, loc, what, one);
+    }
+
+    fn pushProbes(r: *Run, prev: ?*const Trail, loc: schema.LocId, what: @FieldType(Trail, "what"), probes: []const dom.Probe) Allocator.Error!*const Trail {
         const node = try r.arena.create(Trail);
-        node.* = .{ .prev = prev, .loc = loc, .what = what };
+        node.* = .{ .prev = prev, .loc = loc, .what = what, .probes = probes };
         return node;
     }
 
@@ -2366,7 +2864,8 @@ pub const Run = struct {
             for (saved.items) |s| r.blocks.get(s.id).?.incoming.shrinkRetainingCapacity(s.len);
             for (bodies) |b| {
                 var run = try head.clone(r.arena);
-                run.trail = try r.push(head.trail, inst.loc, .case);
+                run.trail = try r.push(head.trail, inst.loc, .case, null);
+                r.bump();
                 try r.exec(r.v.insts(b), &run);
             }
             var next = head;
@@ -2381,10 +2880,12 @@ pub const Run = struct {
         for (saved.items) |s| r.blocks.get(s.id).?.incoming.shrinkRetainingCapacity(s.len);
         for (bodies) |b| {
             var run = try head.clone(r.arena);
-            run.trail = try r.push(head.trail, inst.loc, .case);
+            run.trail = try r.push(head.trail, inst.loc, .case, null);
+            r.bump();
             try r.exec(r.v.insts(b), &run);
         }
         _ = r.loops.remove(inst.id);
+        r.bump();
         st.alive = false;
     }
 
@@ -2395,7 +2896,8 @@ pub const Run = struct {
         // A container operation that ran out of memory left the container as it was.
         const before = if (r.v.ops(inst)[0].kind == .inst) r.pre_state.get(r.v.ops(inst)[0].value) else null;
         var failed = if (before) |b| try b.clone(r.arena) else try st.clone(r.arena);
-        failed.trail = try r.push(st.trail, inst.loc, .@"error");
+        failed.trail = try r.push(st.trail, inst.loc, .@"error", null);
+        if (before == null and r.v.ops(inst)[0].kind == .inst) try r.onError(&failed, r.v.ops(inst)[0].value);
         var subject = eu;
         if (inst.tag == .try_ptr or inst.tag == .try_ptr_cold) subject = if (eu.place) |pl| try r.readVal(st, pl, r.pointeeOf(r.operandType(r.v.ops(inst)[0]))) else .none;
         failed.live = try failed.live.minus(r.arena, subject.toks);

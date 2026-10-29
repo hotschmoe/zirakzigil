@@ -159,7 +159,7 @@ pub fn main(init: std.process.Init) !void {
     if (total.unmodelled + total.blind + total.dynamic_len + total.lent != 0)
         try out.print("zv-own: also assumed: {d} container methods with no model (taken to invalidate), {d} operations on memory it cannot name, {d} resizes by a length it cannot show to be non-zero, {d} pointers to locals handed to calls that return a new block or that the summary does not trace (what the result keeps of them is not followed)\n", .{ total.unmodelled, total.blind, total.dynamic_len, total.lent });
     if (total.maybe_alias + total.maybe_stale + total.summarized + total.alias_params != 0)
-        try out.print("zv-own: undecided, counted and not reported: {d} uses of a pointer that may lead into freed memory, {d} pointers stale only if a container had no room, {d} ends of a site that stands for several allocations, {d} functions that assume two pointer parameters of one type do not overlap\n", .{ total.maybe_alias, total.maybe_stale, total.summarized, total.alias_params });
+        try out.print("zv-own: undecided, counted and not reported: {d} uses of a pointer that may lead into freed memory, {d} pointers stale only if a container had no room, {d} ends that may not have happened to the block (a site that stands for several allocations, one of many, a value that may be one of several, a growth that depends on room), {d} functions that end or change memory through two or more pointer parameters, assumed not to overlap\n", .{ total.maybe_alias, total.maybe_stale, total.summarized, total.alias_params });
     if (total.ends + total.uses != 0) {
         const open_ends = @min(total.summarized, total.ends);
         const open_uses = @min(total.maybe_alias + total.maybe_stale, total.uses);
@@ -232,7 +232,11 @@ fn printEffects(out: *Io.Writer, row: Row) !void {
     try out.print("      effects: complete={} frees={x} moves={x} token_stores={x}\n", .{ s.complete, s.frees, s.moves, s.token_stores });
     const st = row.result.stats;
     if (st.blind + st.unknown_calls + st.unmodelled + st.dynamic_len + st.maybe_alias + st.maybe_stale != 0) try out.print("      assumed: {d} unknown calls, {d} unmodelled, {d} blind, {d} dynamic lengths, {d} may-alias, {d} may-stale\n", .{ st.unknown_calls, st.unmodelled, st.blind, st.dynamic_len, st.maybe_alias, st.maybe_stale });
-    for (s.kills) |k| try out.print("      kills param {d} {t} path {any}\n", .{ k.param, k.kind, k.path });
+    for (s.kills) |k| {
+        try out.print("      kills param {d} {t} path {any}", .{ k.slot.param, k.slot.kind, k.slot.path });
+        for (k.when, 0..) |c, i| try out.print("{s} param {d} path {any} {s} {d}", .{ if (i == 0) " when" else " and", c.slot.param, c.slot.path, if (c.eq) "==" else "!=", c.value });
+        try out.writeByte(10);
+    }
     for (s.ret) |q| {
         try out.print("      returns path {any} from", .{q.path});
         for (q.descs) |d| try printDesc(out, d);
@@ -255,6 +259,7 @@ fn printDesc(out: *Io.Writer, d: check.Desc) !void {
         .from => |x| try out.print(" [param {d} {t} {any}{s}]", .{ x.param, x.kind, x.path, tag }),
         .fresh => |k| try out.print(" [fresh {d}{s}]", .{ k, tag }),
         .gone => try out.print(" [gone{s}]", .{tag}),
+        .con => |c| try out.print(" [constant {d}]", .{c}),
     }
 }
 
