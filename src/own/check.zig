@@ -261,7 +261,9 @@ const Run = struct {
     field_names: std.AutoHashMapUnmanaged(PlaceId, []const u8) = .empty,
     /// For the summary: what the function does to what its parameters point into.
     kills: std.ArrayList(Kill) = .empty,
-    frees: u64 = 0,
+    /// Parameters freed on every path that returns (a conditional free is not one the caller can rely on).
+    frees_all: u64 = ~@as(u64, 0),
+    any_ret: bool = false,
     stores: std.ArrayList(Store) = .empty,
     ret_refs: std.ArrayList(RetRef) = .empty,
     ret_alloc: bool = false,
@@ -330,7 +332,7 @@ const Run = struct {
             .name = try arena.dupe(u8, r.name),
             .diags = diags,
             .stats = r.stats,
-            .summary = .{ .complete = complete, .ret = try r.persistRefs(arena), .ret_alloc = r.ret_alloc, .kills = kills, .frees = r.frees, .stores = try r.persistStores(arena) },
+            .summary = .{ .complete = complete, .ret = try r.persistRefs(arena), .ret_alloc = r.ret_alloc, .kills = kills, .frees = if (r.any_ret) r.frees_all else 0, .stores = try r.persistStores(arena) },
         };
     }
 
@@ -891,7 +893,8 @@ const Run = struct {
             val.place = try r.places.root(r.arena, .param, i);
             val.off = 0;
             val.owners = try val.owners.with(r.arena, param_owner);
-        } else if (r.ty.hasPointers(inst.ty)) {
+        } else if (r.ty.hasPointers(inst.ty) or r.ty.kind(inst.ty) == .@"struct") {
+            // A struct without pointers can still be a handle: freeing it frees what the caller gave.
             val.owners = try val.owners.with(r.arena, param_owner);
         }
         r.set(inst, val);
@@ -1151,6 +1154,13 @@ const Run = struct {
     }
 
     fn ret(r: *Run, inst: *const Inst, st: *State, val: Val) Error!void {
+        var freed_here: u64 = 0;
+        for (st.dead.keys()) |o| {
+            const rec = r.owners.items[o];
+            if (rec.kind == .param and rec.n < 64) freed_here |= @as(u64, 1) << @intCast(rec.n);
+        }
+        r.frees_all &= freed_here;
+        r.any_ret = true;
         try r.use(st, inst, val, "returned");
         for (val.owners.ids) |o| {
             const rec = r.owners.items[o];
@@ -1276,7 +1286,9 @@ const Run = struct {
         }
         if (effect == .none or effect == .reads) {
             if (summary) |s| try r.applySummary(st, inst, s, args);
-            if (r.ty.hasPointers(inst.ty)) {
+            // A handle holds no pointer but names an allocation: a callee that returns one hands out a new owner.
+            const hands_out = if (summary) |s| s.ret_alloc else false;
+            if (r.ty.hasPointers(inst.ty) or hands_out) {
                 var owners: Set = .empty;
                 var allocates = false;
                 if (summary) |s| {
@@ -1485,7 +1497,6 @@ const Run = struct {
                     try st.die(r.arena, o, .{ .loc = inst.loc, .text = text, .trail = st.trail });
                 },
                 .param => if (r.isParamItself(val, rec.n)) {
-                    if (rec.n < 64) r.frees |= @as(u64, 1) << @intCast(rec.n);
                     const text = try std.fmt.allocPrint(r.arena, "freed here by {s}", .{what});
                     try st.die(r.arena, o, .{ .loc = inst.loc, .text = text, .trail = st.trail });
                 },

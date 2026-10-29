@@ -188,6 +188,7 @@ Cost: `zv-own` checks the 1960 production functions of zmoltcp in 0.3 s and the 
 
 - Calls to functions outside the packs with no entry in the table neither invalidate nor keep their arguments. zmoltcp: 879 such calls, almost all into std's formatting, math and memory functions.
 - Distinct pointer parameters do not overlap.
+- A callee is assumed to have freed a parameter only if it frees it on every path that returns; a conditional free (a handle consumed when the query completed) is not one a caller can rely on.
 - Joins are path-insensitive (two branches on one condition are not correlated); a carried linear value that the join merged is unproven, not guessed.
 - What is stored inside a container or behind a map slot is not followed.
 - An allocation is one owner per allocation site: a pointer freed once on each iteration of a loop is a double free to the checker.
