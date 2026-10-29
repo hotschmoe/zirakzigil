@@ -221,7 +221,7 @@ A normal build applies the comptime layer and erases contracts in ReleaseFast. T
 Verus needs `Ghost<T>` and `Tracked<T>` wrappers that the compiler erases. Zig can express erasure directly through comptime type selection: a ghost type is the real type in a verification build and `void` otherwise, so ghost parameters and fields occupy zero bytes in production.
 
 ```zig
-// Target design; Tracked and PointsTo are not in the prototype yet.
+// Target design. M1 of Phase 4 built `zv.PointsTo` over byte ranges with the rules `zvc` applies to it; the typed form (this sketch) is M3, see phase4.md.
 pub fn Tracked(comptime T: type) type {
     return if (zv.ghost) T else void;     // zero-size outside -Dghost builds
 }
@@ -311,7 +311,7 @@ Phase 0 needs nothing but the prototype and can start on a real codebase now; th
 | 1. AIR exporter ([plan](phase1.md)) | One small compiler patch: per-function AIR as a versioned binary pack (JSON on request) | Every function in a pilot codebase exports and round-trips |
 | 2. `zvc` on AIR | Port the spike: modular calls, structs, termination, ghost `Int` and `Seq` | Spike results reproduce from AIR, plus one real kernel verified |
 | 3. `zv-own` | Linearity, allocator regions, pointer invalidation, pinned types | Catches seeded ownership bugs at a false-positive rate the team accepts |
-| 4. Verified core | `PointsTo` permission tokens, a verified allocator, proof agents in CI | The core is `.verified` and the `.trusted` count is falling |
+| 4. Verified core | `PointsTo` permission tokens, a verified allocator, proof agents in CI ([plan](phase4.md)) | The core is `.verified` and the `.trusted` count is falling |
 | Parallel track F | C backend plus CBMC proof harnesses | Needs no fork, so it can start any time |
 
 Phases are ordered by dependency, not dated: each gate is the evidence that the next phase is worth building.

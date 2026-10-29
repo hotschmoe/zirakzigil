@@ -10,6 +10,7 @@ const Examples = struct {
     pub const ledger = @import("ledger.zig");
     pub const regress = @import("regress.zig");
     pub const queries = @import("queries.zig");
+    pub const bump = @import("bump.zig");
 };
 
 pub fn main(init: std.process.Init) !void {

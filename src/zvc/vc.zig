@@ -64,6 +64,8 @@ const State = struct {
     names: ?*const NameNode,
     /// The path went through a loop abstracted by its invariant.
     cut: bool = false,
+    /// The tokens that some operation or call on the path consumed, and when.
+    dead: []const Dead = &.{},
 
     fn clone(s: State, arena: Allocator) Allocator.Error!State {
         var c = s;
@@ -71,6 +73,8 @@ const State = struct {
         return c;
     }
 };
+
+const Dead = struct { token: u32, cond: Term };
 
 const Incoming = struct { state: State, value: Value };
 
@@ -86,6 +90,9 @@ const Collected = struct { id: u32, kind: enum { invariant, decreases }, term: T
 
 const LoopCtx = struct {
     head: []const Collected,
+    /// The tokens that existed when the body started, and the ones already consumed: an iteration may not consume more.
+    token_base: u32 = 0,
+    dead: []const Dead = &.{},
 };
 
 /// What a caller may use of a function: its precondition on the parameters, and a postcondition on the
@@ -151,6 +158,7 @@ pub const Vc = struct {
     assumed: std.ArrayList(schema.LocId) = .empty,
     unsupported: ?Unsupported = null,
     loc: schema.LocId = .none,
+    has_token: std.AutoHashMapUnmanaged(schema.TypeId, bool) = .empty,
 
     pure: bool = false,
     pure_seen: bool = false,
@@ -382,6 +390,7 @@ pub const Vc = struct {
                     .cells = cells,
                     .names = if (a.state.names == inc.state.names) a.state.names else commonNames(a.state.names, inc.state.names),
                     .cut = a.state.cut or inc.state.cut,
+                    .dead = try unionDead(v.arena(), a.state.dead, inc.state.dead),
                 },
                 .value = try v.ctx.merge(cond, a.value, inc.value),
             };
@@ -491,7 +500,10 @@ pub const Vc = struct {
             .load => {
                 const p = try v.arg(inst, 0);
                 switch (p) {
-                    .place => |pl| v.setResult(inst, try v.read(st.cells[pl.cell], pl.path, inst.ty)),
+                    .place => |pl| {
+                        try v.livePath(st, st.cells[pl.cell], pl.path);
+                        v.setResult(inst, try v.read(st.cells[pl.cell], pl.path, inst.ty));
+                    },
                     .elem_ptr => |e| v.setScalar(inst, try pool.select(e.mem, e.off)),
                     else => return v.ctx.unsupported("load through {t}", .{std.meta.activeTag(p)}),
                 }
@@ -510,7 +522,19 @@ pub const Vc = struct {
                     .struct_field_ptr_index_3 => 3,
                     else => v.attrInt(inst, .field) orelse return v.ctx.unsupported("field pointer without an index", .{}),
                 };
-                v.setResult(inst, .{ .place = .{ .cell = p.place.cell, .path = try append(v.arena(), p.place.path, .{ .field = index }) } });
+                const owner = v.ctx.typeRec(v.operandType(v.ops(inst)[0])).child;
+                v.setResult(inst, .{ .place = .{ .cell = p.place.cell, .path = try append(v.arena(), p.place.path, .{ .field = .{ .index = index, .owner = owner } }) } });
+            },
+            .optional_payload_ptr, .optional_payload_ptr_set => {
+                const p = try v.arg(inst, 0);
+                if (p != .place) return v.ctx.unsupported("optional payload pointer of {t}", .{std.meta.activeTag(p)});
+                if (inst.tag == .optional_payload_ptr_set) {
+                    const cur = peek(st.cells[p.place.cell], p.place.path);
+                    const payload: Value = if (cur == .opt) cur.opt.payload else .none;
+                    const set: Value = .{ .opt = try v.ctx.create(value.Opt, .{ .has = try pool.tru(), .payload = payload }) };
+                    st.cells[p.place.cell] = try v.update(st.cells[p.place.cell], p.place.path, set);
+                }
+                v.setResult(inst, .{ .place = .{ .cell = p.place.cell, .path = try append(v.arena(), p.place.path, .payload) } });
             },
             .ptr_slice_len_ptr, .ptr_slice_ptr_ptr => {
                 const p = try v.arg(inst, 0);
@@ -522,7 +546,10 @@ pub const Vc = struct {
                 const o = try v.arg(inst, 0);
                 const index = v.attrInt(inst, .field) orelse return v.ctx.unsupported("field read without an index", .{});
                 switch (o) {
-                    .obj => |ob| v.setResult(inst, try v.ctx.field(ob, index, inst.ty)),
+                    .obj => |ob| {
+                        try v.live(st, ob);
+                        v.setResult(inst, try v.ctx.field(ob, index, inst.ty));
+                    },
                     else => return v.ctx.unsupported("field {d} of {t}", .{ index, std.meta.activeTag(o) }),
                 }
             },
@@ -672,9 +699,11 @@ pub const Vc = struct {
             .aggregate_init => {
                 const t = v.ctx.typeRec(inst.ty);
                 if (t.kind != .@"struct") return v.ctx.unsupported("aggregate of kind {t}", .{t.kind});
+                const token = v.ctx.isToken(inst.ty);
+                if (token and !v.insideTokenOp()) return v.ctx.unsupported("a token built outside the operations of zv.PointsTo", .{});
                 const fields = try v.arena().alloc(value.Field, v.ops(inst).len);
                 for (fields, v.ops(inst), 0..) |*f, o, i| f.* = .{ .index = @intCast(i), .value = try v.operand(o) };
-                v.setResult(inst, .{ .obj = try v.ctx.create(value.Obj, .{ .base = null, .fields = fields, .ty = inst.ty }) });
+                v.setResult(inst, .{ .obj = try v.ctx.create(value.Obj, .{ .base = null, .fields = fields, .ty = inst.ty, .token = if (token) v.ctx.newToken() else 0 }) });
             },
 
             .block => try v.block(inst, st, v.pack.bodiesOf(inst.*)[0]),
@@ -691,6 +720,7 @@ pub const Vc = struct {
             .repeat => try v.repeat(inst, st),
             .ret, .ret_safe => {
                 const val = try v.arg(inst, 0);
+                try v.useTokens(st, val, v.func.ret, false);
                 const site = v.siteOf(v.ops(inst)[0], val);
                 try v.returns.append(v.arena(), .{ .state = try st.clone(v.arena()), .value = val, .site = site });
                 try v.kill(st);
@@ -757,18 +787,161 @@ pub const Vc = struct {
         return out;
     }
 
+    // Tokens (`zv.PointsTo`). A token is a linear value: it has an identity (`Obj.token`), it is consumed by the
+    // operations of `zv.PointsTo` that say so and by being passed to a call, and a consumed token may not be used
+    // again. Its fields are written only inside those operations, so no token is built, changed or copied out of
+    // thin air: that is what lets a proof treat two tokens as disjoint memory.
+
+    const token_op_prefix = value.token_type ++ ".";
+
+    const TokenOp = enum { own, split, join, discard };
+
+    fn tokenOpOf(callee: []const u8) ?TokenOp {
+        if (!std.mem.startsWith(u8, callee, token_op_prefix)) return null;
+        return std.meta.stringToEnum(TokenOp, callee[token_op_prefix.len..]);
+    }
+
+    /// Whether the code being run is the body of an operation of `zv.PointsTo`, the only code that may build a token.
+    fn insideTokenOp(v: *const Vc) bool {
+        for (v.inline_names.items) |name| if (std.mem.startsWith(u8, name, token_op_prefix)) return true;
+        return false;
+    }
+
+    fn unionDead(arena_alloc: Allocator, a: []const Dead, b: []const Dead) Allocator.Error![]const Dead {
+        if (b.len == 0) return a;
+        var out: std.ArrayList(Dead) = .empty;
+        try out.appendSlice(arena_alloc, a);
+        for (b) |d| {
+            if (for (a) |e| {
+                if (e.token == d.token and e.cond == d.cond) break true;
+            } else false) continue;
+            try out.append(arena_alloc, d);
+        }
+        return out.items;
+    }
+
+    /// When the token was consumed: the path condition at that point, or'ed over the paths that joined.
+    fn consumedWhen(v: *Vc, st: *const State, token: u32) Allocator.Error!Term {
+        var cond = try v.pool.fls();
+        for (st.dead) |d| if (d.token == token) {
+            cond = try v.pool.@"or"(cond, d.cond);
+        };
+        return cond;
+    }
+
+    fn markDead(v: *Vc, st: *State, token: u32) Allocator.Error!void {
+        const d: Dead = .{ .token = token, .cond = st.pc };
+        st.dead = try unionDead(v.arena(), st.dead, &.{d});
+    }
+
+    /// Obliges `o`, if it is a token, to be unconsumed on this path.
+    fn live(v: *Vc, st: *State, o: *const value.Obj) StepError!void {
+        if (o.token == 0) return;
+        const gone = try v.consumedWhen(st, o.token);
+        try v.oblige(st, null, .other, "a token is used after it was consumed", .{}, try v.pool.not(gone));
+    }
+
+    /// Whether a value of type `ty` is or holds a token by value.
+    fn hasToken(v: *Vc, ty: schema.TypeId) Allocator.Error!bool {
+        if (ty == .none) return false;
+        if (v.has_token.get(ty)) |known| return known;
+        try v.has_token.put(v.arena(), ty, false);
+        const t = v.ctx.typeRec(ty);
+        const found = switch (t.kind) {
+            .@"struct" => blk: {
+                if (v.ctx.isToken(ty)) break :blk true;
+                for (v.pack.fieldsOf(ty) orelse &.{}) |f| if (try v.hasToken(f.ty)) break :blk true;
+                break :blk false;
+            },
+            .optional, .error_union => try v.hasToken(t.child),
+            else => false,
+        };
+        try v.has_token.put(v.arena(), ty, found);
+        return found;
+    }
+
+    /// The tokens held by `val`, which has type `ty`; fields nothing read yet are made, so a token inside a
+    /// parameter is found even if the function never touched it.
+    fn tokensOf(v: *Vc, val: Value, ty: schema.TypeId, out: *std.ArrayList(*const value.Obj)) Error!void {
+        if (!try v.hasToken(ty)) return;
+        const t = v.ctx.typeRec(ty);
+        switch (t.kind) {
+            .@"struct" => {
+                const o = switch (val) {
+                    .obj => |o| o,
+                    else => return,
+                };
+                if (v.ctx.isToken(ty)) return out.append(v.arena(), o);
+                for (v.pack.fieldsOf(ty) orelse &.{}) |f| {
+                    if (!try v.hasToken(f.ty)) continue;
+                    try v.tokensOf(try v.ctx.field(o, f.index, f.ty), f.ty, out);
+                }
+            },
+            .optional => if (val == .opt) try v.tokensOf(val.opt.payload, t.child, out),
+            .error_union => if (val == .eu) try v.tokensOf(val.eu.payload, t.child, out),
+            else => {},
+        }
+    }
+
+    /// Obliges every token in `val` to be unconsumed; `consume` ends them.
+    fn useTokens(v: *Vc, st: *State, val: Value, ty: schema.TypeId, consume: bool) StepError!void {
+        var found: std.ArrayList(*const value.Obj) = .empty;
+        try v.tokensOf(val, ty, &found);
+        for (found.items) |o| {
+            try v.live(st, o);
+            if (consume) try v.markDead(st, o.token);
+        }
+    }
+
+    fn tokenOpEnter(v: *Vc, inst: *const Inst, st: *State, op: TokenOp, args: []const schema.Operand) StepError!void {
+        for (args) |a| try v.useTokens(st, try v.operand(a), v.operandType(a), false);
+        if (op == .own and !v.pure and v.alive(st)) try v.assumed.append(v.arena(), if (inst.loc != .none) inst.loc else v.loc);
+    }
+
+    /// Obliges every token on the way down `path` into `cell` to be unconsumed: reading a field of a consumed
+    /// token is a use of it.
+    fn livePath(v: *Vc, st: *State, cell: Value, path: []const value.Step) StepError!void {
+        var cur = cell;
+        for (path) |walk| switch (walk) {
+            .payload => cur = if (cur == .opt) cur.opt.payload else return,
+            .field => |fs| {
+                const o = switch (cur) {
+                    .obj => |o| o,
+                    else => return,
+                };
+                try v.live(st, o);
+                cur = for (o.fields) |f| {
+                    if (f.index == fs.index) break f.value;
+                } else blk: {
+                    const declared = v.pack.fieldsOf(fs.owner) orelse return;
+                    const rec = for (declared) |d| {
+                        if (d.index == fs.index) break d;
+                    } else return;
+                    if (!try v.hasToken(rec.ty)) return;
+                    break :blk try v.ctx.field(o, fs.index, rec.ty);
+                };
+            },
+            else => return,
+        };
+    }
+
     // Memory.
 
     fn read(v: *Vc, cell: Value, path: []const value.Step, ty: schema.TypeId) Error!Value {
         if (path.len == 0) return cell;
         switch (path[0]) {
-            .field => |i| {
+            .field => |fstep| {
+                const i = fstep.index;
                 const o = switch (cell) {
                     .obj => |ob| ob,
                     else => return v.ctx.unsupported("field {d} of {t} in memory", .{ i, std.meta.activeTag(cell) }),
                 };
-                const f = try v.ctx.field(o, i, if (path.len == 1) ty else null);
+                const f = try v.ctx.field(o, i, if (path.len == 1) ty else v.fieldType(fstep));
                 return v.read(f, path[1..], ty);
+            },
+            .payload => {
+                if (cell != .opt) return v.ctx.unsupported("optional payload of {t} in memory", .{std.meta.activeTag(cell)});
+                return v.read(cell.opt.payload, path[1..], ty);
             },
             .slice_len => {
                 if (cell != .slice) return v.ctx.unsupported("slice length of {t} in memory", .{std.meta.activeTag(cell)});
@@ -781,19 +954,57 @@ pub const Vc = struct {
         }
     }
 
+    /// What a place holds so far, `.none` where nothing was stored yet.
+    fn peek(cell: Value, path: []const value.Step) Value {
+        var cur = cell;
+        for (path) |walk| switch (walk) {
+            .payload => cur = if (cur == .opt) cur.opt.payload else return .none,
+            .field => |fs| {
+                const o = switch (cur) {
+                    .obj => |o| o,
+                    else => return .none,
+                };
+                cur = for (o.fields) |f| {
+                    if (f.index == fs.index) break f.value;
+                } else return .none;
+            },
+            else => return .none,
+        };
+        return cur;
+    }
+
+    /// The declared type of the field a step names, when the pack knows the struct.
+    fn fieldType(v: *const Vc, fs: value.FieldStep) ?schema.TypeId {
+        for (v.pack.fieldsOf(fs.owner) orelse return null) |d| if (d.index == fs.index) return d.ty;
+        return null;
+    }
+
     fn update(v: *Vc, cell: Value, path: []const value.Step, new: Value) Error!Value {
         if (path.len == 0) return new;
         switch (path[0]) {
-            .field => |i| {
+            .field => |fstep| {
+                const i = fstep.index;
                 const o: *const value.Obj = switch (cell) {
                     .obj => |ob| ob,
-                    .none => try v.ctx.create(value.Obj, .{ .base = null, .fields = &.{} }),
+                    .none => if (v.ctx.isToken(fstep.owner)) blk: {
+                        if (!v.insideTokenOp()) return v.ctx.unsupported("a token built outside the operations of zv.PointsTo", .{});
+                        break :blk try v.ctx.create(value.Obj, .{ .base = null, .fields = &.{}, .ty = fstep.owner, .token = v.ctx.newToken() });
+                    } else try v.ctx.create(value.Obj, .{ .base = null, .fields = &.{} }),
                     else => return v.ctx.unsupported("field store into {t}", .{std.meta.activeTag(cell)}),
                 };
+                if (o.token != 0 and !v.insideTokenOp()) return v.ctx.unsupported("a token changed outside the operations of zv.PointsTo", .{});
                 const inner: Value = for (o.fields) |f| {
                     if (f.index == i) break f.value;
                 } else .none;
                 return v.ctx.withField(o, i, try v.update(inner, path[1..], new));
+            },
+            .payload => {
+                const o: *const value.Opt = switch (cell) {
+                    .opt => |o| o,
+                    .none => try v.ctx.create(value.Opt, .{ .has = try v.pool.tru(), .payload = .none }),
+                    else => return v.ctx.unsupported("optional payload store into {t}", .{std.meta.activeTag(cell)}),
+                };
+                return .{ .opt = try v.ctx.create(value.Opt, .{ .has = o.has, .payload = try v.update(o.payload, path[1..], new) }) };
             },
             .slice_len => {
                 if (cell != .slice or path.len != 1) return v.ctx.unsupported("store to a slice length", .{});
@@ -1092,6 +1303,7 @@ pub const Vc = struct {
         if (std.mem.indexOfScalar(*const Summary, v.relied.items, summary) == null) try v.relied.append(v.arena(), summary);
         const operands = v.ops(inst)[1..];
         if (operands.len != summary.params.len) return v.ctx.unsupported("call to {s} with {d} arguments, expected {d}", .{ callee, operands.len, summary.params.len });
+        for (operands) |o| try v.useTokens(st, try v.operand(o), v.operandType(o), true);
         var sub: term.Subst = .{ .pool = pool, .alloc = v.arena() };
         for (summary.params, operands) |param, o| try v.bind(&sub, param, try v.operand(o), summary.lazy);
         const result = try v.ctx.havoc("$ret", summary.result);
@@ -1202,9 +1414,16 @@ pub const Vc = struct {
         const n = v.inlineArgs(body, &args);
         const contract = contractOf(callee) orelse {
             if (try v.ghostCall(inst, st, callee, args[0..n])) return;
+            const token_op = tokenOpOf(callee);
+            if (token_op) |op| try v.tokenOpEnter(inst, st, op, args[0..n]);
             try v.inline_names.append(v.arena(), callee);
             defer _ = v.inline_names.pop();
-            return v.block(inst, st, body);
+            try v.block(inst, st, body);
+            if (token_op) |op| switch (op) {
+                .split, .join, .discard => for (args[0..n]) |a| try v.useTokens(st, try v.operand(a), v.operandType(a), true),
+                .own => {},
+            };
+            return;
         };
         if (v.pure and contract != .invariant and contract != .decreases) return;
         const nested = v.inline_names.items.len != 0;
@@ -1511,7 +1730,7 @@ pub const Vc = struct {
             const name = v.cell_names.items[cell] orelse try std.fmt.allocPrint(v.arena(), "cell{d}", .{cell});
             head.cells[cell] = try v.ctx.havoc(name, head.cells[cell]);
         }
-        var ctx: LoopCtx = .{ .head = &.{} };
+        var ctx: LoopCtx = .{ .head = &.{}, .token_base = v.ctx.tokens, .dead = head.dead };
         if (has_head) {
             ctx.head = try v.headAt(body, &head);
             var measures: usize = 0;
@@ -1535,6 +1754,10 @@ pub const Vc = struct {
         const target = v.attrInt(inst, .target) orelse return v.ctx.unsupported("repeat without a target", .{});
         const ctx = v.loops.get(target) orelse return v.ctx.unsupported("repeat outside its loop", .{});
         const loop_inst = v.by_id[target].?;
+        for (st.dead) |d| if (d.token <= ctx.token_base and for (ctx.dead) |e| {
+            if (e.token == d.token) break false;
+        } else true)
+            return v.ctx.unsupported("a loop consumes a token it did not build in the iteration", .{});
         if (ctx.head.len != 0) {
             const now = try v.headAt(v.pack.bodiesOf(loop_inst.*)[0], st);
             // Lexicographic decrease: `smaller` accumulates "some earlier measure is equal" prefixes.
@@ -1612,6 +1835,17 @@ pub const Vc = struct {
             .obj => |o| {
                 var acc = try pool.tru();
                 for (o.fields) |f| acc = try pool.@"and"(acc, try v.agrees(try v.ctx.fieldShaped(result.obj, f.index, f.value), f.value));
+                // A value that is a parameter or a call result has the fields something read so far, as variables.
+                const base = o.base orelse return acc;
+                const seen = v.ctx.lazy.items.len;
+                for (0..seen) |i| {
+                    const l = v.ctx.lazy.items[i];
+                    if (!std.mem.eql(u8, l.base, base)) continue;
+                    if (for (o.fields) |f| {
+                        if (f.index == l.index) break true;
+                    } else false) continue;
+                    acc = try pool.@"and"(acc, try v.agrees(try v.ctx.fieldShaped(result.obj, l.index, l.value), l.value));
+                }
                 return acc;
             },
             .slice, .array, .elem_ptr, .place => return v.ctx.unsupported("a returned slice, array or pointer", .{}),
