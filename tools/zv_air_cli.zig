@@ -39,7 +39,9 @@ pub fn main(init: std.process.Init) !void {
     defer set.deinit(gpa);
     const loaded = start.untilNow(io, .awake);
     switch (command) {
-        .list => for (set.loaded) |l| try out.print("{d} functions  {d} bytes  {s}\n", .{ l.pack.t.funcs.len, l.bytes.len, l.pack.str(l.pack.meta.root) }),
+        .list => for (set.loaded) |l| for (l.pack.t.funcs) |f| {
+            try out.print("{s}\t{x:0>16}\t{s}\n", .{ l.pack.str(f.fqn), f.id, l.pack.str(l.pack.meta.root) });
+        },
         .verify => {
             for (set.loaded) |l| l.pack.validate() catch return fail("{s}: invalid pack", .{l.pack.str(l.pack.meta.root)});
             try out.print("ok {d} packs\n", .{set.loaded.len});

@@ -112,11 +112,11 @@ check "a hit with the index present leaves the same set" same_functions "$out" "
 sed -i.bak 's/x +% 1/x +% 3/' "$proj/a.zig"
 build edit "$zv" "$out"
 functions "$out" >"$work/edit.functions"
-sed -n '/^b_/p' "$work/edit.functions" >"$work/edit.b"
-sed -n '/^b_/p' "$work/cold.functions" >"$work/cold.b"
+sed -n '/b_/p' "$work/edit.functions" >"$work/edit.b"
+sed -n '/b_/p' "$work/cold.functions" >"$work/cold.b"
 check "after editing a.zig, with the old index kept, it names exactly the current packs" exact "$out"
 check "after editing a.zig only a's functions changed" cmp -s "$work/edit.b" "$work/cold.b"
-a_one_replaced() { [ "$(grep -c '^a_one' "$1")" = 1 ] && [ "$(sed -n '/^a_one/p' "$1")" != "$(sed -n '/^a_one/p' "$2")" ]; }
+a_one_replaced() { [ "$(grep -c 'a_one' "$1")" = 1 ] && [ "$(sed -n '/a_one/p' "$1")" != "$(sed -n '/a_one/p' "$2")" ]; }
 check "after editing a.zig a_one changed and its old version is gone" a_one_replaced "$work/edit.functions" "$work/cold.functions"
 
 build edit_hit "$zv" "$out"
@@ -140,7 +140,7 @@ sed -i.bak 's/x +% 3/x +% 5/' "$proj/a.zig"
 changed() { exact "$out" && ! same_functions "$out" "$work/watch0.functions"; }
 check "--watch, edit a.zig: the index names exactly the current packs (no union with the old a)" waitfor 120 changed
 functions "$out" >"$work/watch1.functions"
-b_untouched() { [ "$(sed -n '/^b_/p' "$work/watch1.functions")" = "$(sed -n '/^b_/p' "$work/watch0.functions")" ]; }
+b_untouched() { [ "$(sed -n '/b_/p' "$work/watch1.functions")" = "$(sed -n '/b_/p' "$work/watch0.functions")" ]; }
 check "--watch, edit a.zig: b is untouched" b_untouched
 check "--watch, edit a.zig: a_one changed and its old version is gone" a_one_replaced "$work/watch1.functions" "$work/watch0.functions"
 rm -rf "$out"

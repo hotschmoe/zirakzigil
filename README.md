@@ -147,7 +147,7 @@ Each phase ships value before the next one starts. Phases are ordered by depende
 | Phase | Scope | Exit gate |
 | --- | --- | --- |
 | **0. Adopt the comptime and runtime layers** (no fork) | `zv` contracts, `Ranged`, `Pool`, `Linear`; manifests; laws and fuzzing in CI | Every module has a manifest at floor `.tested` or higher, where `.tested` is measured: a law or scenario executes the function. **Met on the pilot** (zmoltcp 0.5.0: 549 of 549 classified functions evidenced; 185 had no evidence before); see [`docs/phase0-report.md`](docs/phase0-report.md) |
-| **1. AIR exporter** | One small compiler patch: per-function AIR as versioned JSON in ghost builds | Every function in a pilot codebase exports and round-trips |
+| **1. AIR exporter** | One small compiler patch: per-function AIR as a versioned binary pack (JSON on request) | Every function in a pilot codebase exports and round-trips |
 | **2. `zvc` on AIR** | Port the spike: modular calls, structs, termination, ghost `Int` and `Seq` | Spike results reproduce from AIR, plus one real kernel verified |
 | **3. `zv-own`** | Linearity, allocator regions, pointer invalidation, pinned types | Catches seeded ownership bugs at a false-positive rate the team accepts |
 | **4. Verified core** | `PointsTo` permission tokens, a verified allocator, proof agents in CI | The core is `.verified` and the `.trusted` count is falling |
