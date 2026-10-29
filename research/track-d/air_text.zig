@@ -194,6 +194,7 @@ const Stats = struct {
     decl_unresolved: u32 = 0,
     kind_unknown: u32 = 0,
     failed: u32 = 0,
+    loc_suspect: u32 = 0,
 };
 
 // ---------------------------------------------------------------- text scanning
@@ -402,12 +403,17 @@ const SourceIndex = struct {
     const Decl = struct { line: u32, kind: []const u8 };
     /// Full fqn (module prefix included) to the declaration.
     decls: std.StringHashMapUnmanaged(Decl) = .empty,
+    /// Function declarations by their last name segment, for inline callees that never get a body of their own.
+    fns_by_name: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty,
     modules: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// Source text by file path, to check that a `dbg_stmt` position lands on code.
+    sources: std.StringHashMapUnmanaged([]const u8) = .empty,
 
     fn addModule(index: *SourceIndex, arena: Allocator, io: Io, module: []const u8, path: []const u8) !void {
         const bytes = try Io.Dir.cwd().readFileAllocOptions(io, path, arena, .limited(16 << 20), .of(u8), 0);
         const tree = try Ast.parse(arena, bytes, .{ .mode = .zig });
         try index.modules.put(arena, module, std.fs.path.basename(path));
+        try index.sources.put(arena, std.fs.path.basename(path), bytes);
         try index.walk(arena, &tree, tree.rootDecls(), module);
     }
 
@@ -420,6 +426,9 @@ const SourceIndex = struct {
                 const name = tree.tokenSlice(full.name_token orelse continue);
                 const key = try std.fmt.allocPrint(arena, "{s}.{s}", .{ prefix, name });
                 try index.decls.put(arena, key, .{ .line = lineOf(tree, node), .kind = "fn" });
+                const list = try index.fns_by_name.getOrPut(arena, name);
+                if (!list.found_existing) list.value_ptr.* = .empty;
+                try list.value_ptr.append(arena, key);
             },
             .test_decl => {
                 const name_token = tree.nodeData(node).opt_token_and_node[0].unwrap() orelse continue;
@@ -447,6 +456,19 @@ const SourceIndex = struct {
             },
             else => {},
         };
+    }
+
+    /// True if `line:col` (1-based) is inside the file and on a non-blank byte.
+    fn onCode(index: *const SourceIndex, path: []const u8, line: u32, col: u32) bool {
+        const bytes = index.sources.get(path) orelse return true;
+        var it = std.mem.splitScalar(u8, bytes, '\n');
+        var n: u32 = 0;
+        while (it.next()) |text| {
+            n += 1;
+            if (n != line) continue;
+            return col >= 1 and col <= text.len and !std.ascii.isWhitespace(text[col - 1]);
+        }
+        return false;
     }
 
     fn lineOf(tree: *const Ast, node: Ast.Node.Index) u32 {
@@ -795,7 +817,9 @@ const Parser = struct {
                 inst.ty = "noreturn";
             },
             .cond_br => {
-                if (t.len < 1 or segs.len != 2) return error.BadLine;
+                if (t.len < 1 or t.len > 2 or segs.len != 2) return error.BadLine;
+                if (t.len == 2) try checkHints(t[1]);
+                try checkHints(segs[1].head);
                 inst.operands = try p.operands(t[0..1]);
                 inst.bodies = try p.bodies(&.{ .{ .label = "then", .insts = segs[0].insts }, .{ .label = "else", .insts = segs[1].insts } });
                 inst.ty = "noreturn";
@@ -883,6 +907,15 @@ const Parser = struct {
             .asm_, .unsupported => {},
         }
         return inst;
+    }
+
+    /// Branch hints are a closed set; a new word means the format moved.
+    fn checkHints(text: []const u8) Error!void {
+        var it = std.mem.tokenizeScalar(u8, text, ' ');
+        while (it.next()) |word| {
+            const known = [_][]const u8{ "none", "likely", "unlikely", "cold", "unpredictable", "poi" };
+            for (known) |k| if (std.mem.eql(u8, k, word)) break else {} else return error.BadLine;
+        }
     }
 
     fn buildSwitch(p: *Parser, inst: *RawInst, segs: []const Segment) Error!void {
@@ -1005,7 +1038,9 @@ const Conv = struct {
     by_last: *const std.StringHashMapUnmanaged(std.ArrayList([]const u8)),
     stats: *Stats,
     fqn: []const u8,
+    /// The compiler's name for the root module (the text lacks it); the other modules keep their --module name.
     module_name: []const u8,
+    root_module: []const u8,
     file: u32 = 0,
     base_line: u32 = 0,
     loc: ?Loc = null,
@@ -1059,9 +1094,9 @@ const Conv = struct {
         return "unknown";
     }
 
-    fn fileId(c: *Conv, path: []const u8) Error!u32 {
+    fn fileId(c: *Conv, module: []const u8, path: []const u8) Error!u32 {
         for (c.files.items, 0..) |f, i| if (std.mem.eql(u8, f.path, path)) return @intCast(i);
-        try c.files.append(c.arena, .{ .module = c.module_name, .path = path });
+        try c.files.append(c.arena, .{ .module = module, .path = path });
         return @intCast(c.files.items.len - 1);
     }
 
@@ -1071,22 +1106,32 @@ const Conv = struct {
     fn declOf(c: *Conv, fqn: []const u8) Error!?Decl {
         const module = c.index.moduleOf(fqn) orelse return null;
         const decl = c.index.lookup(fqn) orelse return null;
-        return .{ .file = try c.fileId(c.index.modules.get(module).?), .base = decl.line - 1 };
+        const compiler_name = if (std.mem.eql(u8, module, c.root_module)) c.module_name else module;
+        return .{ .file = try c.fileId(compiler_name, c.index.modules.get(module).?), .base = decl.line - 1 };
     }
 
     /// Calls print only `(function 'short')`. The full name comes from the other functions in the
-    /// dump, or from the caller's own container in the source.
+    /// dump, or from the sources (the caller's own container first, then any unique declaration).
     fn resolveCallee(c: *Conv, short: []const u8) []const u8 {
-        const candidates = if (c.by_last.get(short)) |list| list.items else &[_][]const u8{};
-        if (candidates.len == 1) return candidates[0];
-        const parent = parentOf(c.fqn);
-        if (candidates.len > 1) {
+        var found: ?[]const u8 = null;
+        var count: usize = 0;
+        if (c.by_last.get(short)) |list| for (list.items) |cand| {
+            if (std.mem.eql(u8, cand, c.fqn) or std.mem.indexOf(u8, cand, ".test.") != null) continue;
+            if (found == null or std.mem.eql(u8, parentOf(cand), parentOf(c.fqn))) found = cand;
+            count += 1;
+        };
+        if (count == 1) return found.?;
+        if (count > 1) {
             c.stats.callee_ambiguous += 1;
-            for (candidates) |cand| if (std.mem.eql(u8, parentOf(cand), parent)) return cand;
-            return candidates[0];
+            return found.?;
         }
-        const guess = std.fmt.allocPrint(c.arena, "{s}.{s}", .{ parent, short }) catch return short;
-        if (c.index.decls.contains(stripInstance(guess))) return guess;
+        const guess = std.fmt.allocPrint(c.arena, "{s}.{s}", .{ parentOf(c.fqn), short }) catch return short;
+        if (c.index.decls.contains(guess)) return guess;
+        if (c.index.fns_by_name.get(stripInstance(short))) |list| {
+            if (list.items.len == 1) return list.items[0];
+            c.stats.callee_ambiguous += 1;
+            return list.items[0];
+        }
         c.stats.callee_unresolved += 1;
         return short;
     }
@@ -1131,6 +1176,7 @@ const Conv = struct {
         if (raw.shape == .dbg_stmt) {
             const rel: u32 = @intCast(raw.attrs[0].value.int);
             c.loc = .{ .file = c.file, .line = c.base_line + rel, .col = @intCast(raw.attrs[1].value.int) };
+            if (!c.index.onCode(c.files.items[c.file].path, c.loc.?.line, c.loc.?.col)) c.stats.loc_suspect += 1;
             try attrs.append(c.arena, .{ .key = "line", .value = .{ .int = c.loc.?.line } });
             try attrs.append(c.arena, .{ .key = "col", .value = .{ .int = c.loc.?.col } });
         } else try attrs.appendSlice(c.arena, raw.attrs);
@@ -1310,6 +1356,7 @@ pub fn main(init: std.process.Init) !void {
     var legacy_tags = false;
     var all = false;
     var index: SourceIndex = .{};
+    var root_module: []const u8 = "";
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -1329,6 +1376,7 @@ pub fn main(init: std.process.Init) !void {
         } else if (i + 1 < args.len and std.mem.eql(u8, arg, "--module")) {
             i += 1;
             const eq = std.mem.indexOfScalar(u8, args[i], '=') orelse fatal("--module wants NAME=FILE");
+            if (root_module.len == 0) root_module = args[i][0..eq];
             try index.addModule(arena, io, args[i][0..eq], args[i][eq + 1 ..]);
         } else if (dump_path == null and !std.mem.startsWith(u8, arg, "--")) {
             dump_path = arg;
@@ -1363,13 +1411,13 @@ pub fn main(init: std.process.Init) !void {
             continue;
         };
 
-        var c: Conv = .{ .arena = arena, .index = &index, .by_last = &by_last, .stats = &stats, .fqn = f.fqn, .module_name = file_module };
+        var c: Conv = .{ .arena = arena, .index = &index, .by_last = &by_last, .stats = &stats, .fqn = f.fqn, .module_name = file_module, .root_module = root_module };
         var line: u32 = 0;
         if (try c.declOf(f.fqn)) |d| {
             c.file, c.base_line, line = .{ d.file, d.base, d.base + 1 };
         } else {
             stats.decl_unresolved += 1;
-            c.file = try c.fileId("");
+            c.file = try c.fileId(file_module, "");
         }
         var params: std.ArrayList(Out.Param) = .empty;
         for (raw) |r| {
