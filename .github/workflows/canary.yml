@@ -1,0 +1,48 @@
+name: zig-master canary
+
+# Applies compiler/hook.patch and compiler/src/zv_air to upstream Zig master and builds zig-zv,
+# so a Zig change that breaks the fork shows up before a release does (fork policy, docs/design.md).
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: master
+      - name: Build zig-zv against upstream master
+        id: build
+        run: |
+          set -o pipefail
+          ZV_ZIG_REF=master tools/build_zig_zv.sh 2>&1 | tee canary.log
+      - name: Open an issue on failure
+        if: failure() && steps.build.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Canary: zig-zv no longer builds against Zig master"
+          if gh issue list --state open --search "in:title \"$title\"" --json number -q '.[].number' | grep -q .; then
+            echo "an open canary issue already exists"
+            exit 0
+          fi
+          {
+            echo "The weekly canary failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "Last lines of the build log:"
+            echo
+            echo '```'
+            tail -n 40 canary.log
+            echo '```'
+          } > body.md
+          gh issue create --title "$title" --body-file body.md

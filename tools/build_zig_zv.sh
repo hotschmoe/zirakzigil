@@ -4,6 +4,8 @@
 #   ZV_STOCK=1 tools/build_zig_zv.sh   unpatched, same build flags -> compiler/.work/zig-stock/zig-out/bin/zig-stock
 # ZV_ZIG_UPSTREAM overrides the clone source (a URL or a local path); ZIG selects the host zig;
 # ZV_WORK moves the working directory (default compiler/.work; use a native filesystem under WSL).
+# ZV_ZIG_REF builds another upstream ref instead of the pin (the canary uses master); the commit and
+# version checks are skipped for it.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -12,6 +14,7 @@ upstream=${ZV_ZIG_UPSTREAM:-https://codeberg.org/ziglang/zig.git}
 host_zig=${ZIG:-zig}
 tag=$(awk '$1 == "tag" { print $2 }' "$compiler/ZIG_VERSION")
 commit=$(awk '$1 == "commit" { print $2 }' "$compiler/ZIG_VERSION")
+ref=${ZV_ZIG_REF:-$tag}
 
 if [ "${ZV_STOCK:-0}" = 1 ]; then
     name=zig-stock
@@ -30,10 +33,15 @@ esac
 
 if [ ! -d "$tree/.git" ]; then
     mkdir -p "$work"
-    git clone --quiet -c core.autocrlf=false -c advice.detachedHead=false --depth 1 --branch "$tag" "$upstream" "$tree"
+    git clone --quiet -c core.autocrlf=false -c advice.detachedHead=false --depth 1 --branch "$ref" "$upstream" "$tree"
 fi
 cd "$tree"
-[ "$(git rev-parse HEAD)" = "$commit" ] || { echo "error: $tree is not at $commit" >&2; exit 1; }
+if [ "$ref" = "$tag" ]; then
+    [ "$(git rev-parse HEAD)" = "$commit" ] || { echo "error: $tree is not at $commit" >&2; exit 1; }
+else
+    commit=$(git rev-parse HEAD)
+    echo "building $ref at $commit"
+fi
 git reset --quiet --hard "$commit"
 git clean --quiet -fd -e zig-out -e .zig-cache
 
@@ -64,7 +72,9 @@ exe=
 bin=zig-out/bin/$out$exe
 [ -f "zig-out/bin/zig$exe" ] || { echo "error: no compiler was installed" >&2; exit 1; }
 cp "zig-out/bin/zig$exe" "$bin"
-[ "$("$bin" version)" = "$tag" ] || { echo "error: $bin does not report version $tag" >&2; exit 1; }
+if [ "$ref" = "$tag" ]; then
+    [ "$("$bin" version)" = "$tag" ] || { echo "error: $bin does not report version $tag" >&2; exit 1; }
+fi
 
 if [ "$name" = zig-src ]; then
     # Smoke test: the patched compiler must export one function for a trivial program.
