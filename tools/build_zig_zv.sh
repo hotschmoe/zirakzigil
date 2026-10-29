@@ -4,7 +4,7 @@
 #   ZV_STOCK=1 tools/build_zig_zv.sh   unpatched, same build flags -> compiler/.work/zig-stock/zig-out/bin/zig-stock
 # ZV_ZIG_UPSTREAM overrides the clone source (a URL or a local path); ZIG selects the host zig;
 # ZV_WORK moves the working directory (default compiler/.work; use a native filesystem under WSL).
-# ZV_ZIG_REF builds another upstream ref instead of the pin (the canary uses master); the commit and
+# ZV_ZIG_REF builds another upstream ref (branch, tag or commit hash) instead of the pin; the commit and
 # version checks are skipped for it.
 set -eu
 
@@ -33,7 +33,11 @@ esac
 
 if [ ! -d "$tree/.git" ]; then
     mkdir -p "$work"
-    git clone --quiet -c core.autocrlf=false -c advice.detachedHead=false --depth 1 --branch "$ref" "$upstream" "$tree"
+    case $ref in
+        *[!0-9a-f]*) git clone --quiet -c core.autocrlf=false -c advice.detachedHead=false --depth 1 --branch "$ref" "$upstream" "$tree" ;;
+        *) git clone --quiet -c core.autocrlf=false -c advice.detachedHead=false --filter=blob:none "$upstream" "$tree"
+           git -C "$tree" checkout --quiet "$ref" ;;
+    esac
 fi
 cd "$tree"
 if [ "$ref" = "$tag" ]; then

@@ -21,11 +21,12 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: master
+      # The tree must match the host nightly: upstream build.zig needs the host std of the same commit.
       - name: Build zig-zv against upstream master
         id: build
         run: |
           set -o pipefail
-          ZV_ZIG_REF=master sh tools/build_zig_zv.sh 2>&1 | tee canary.log
+          ZV_ZIG_REF=$(zig version | sed 's/.*+//') sh tools/build_zig_zv.sh 2>&1 | tee canary.log
       - name: Open an issue on failure
         if: failure() && steps.build.outcome == 'failure'
         env:
