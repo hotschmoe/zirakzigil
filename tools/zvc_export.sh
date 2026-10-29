@@ -24,7 +24,7 @@ file=$2
 shift 2
 items=
 deps=
-dep_modules=
+dep_list=
 while [ $# -gt 0 ]; do
     [ $# -ge 2 ] || { echo "usage: $0 OUT_DIR FILE.zig [--only PATH]... [--dep NAME=FILE.zig]..." >&2; exit 2; }
     case $1 in
@@ -33,11 +33,19 @@ while [ $# -gt 0 ]; do
             name=${2%%=*}
             path=${2#*=}
             deps="$deps --dep $name"
-            dep_modules="$dep_modules --dep zv -M$name=$path"
+            dep_list="$dep_list $name=$path"
             ;;
         *) echo "usage: $0 OUT_DIR FILE.zig [--only PATH]... [--dep NAME=FILE.zig]..." >&2; exit 2 ;;
     esac
     shift 2
+done
+# Every extra module sees zv and every other extra module.
+dep_modules=
+for entry in $dep_list; do
+    name=${entry%%=*}
+    others=
+    for other in $dep_list; do [ "${other%%=*}" = "$name" ] || others="$others --dep ${other%%=*}"; done
+    dep_modules="$dep_modules --dep zv$others -M$entry"
 done
 mkdir -p "$out"
 out=$(cd "$out" && { pwd -W 2>/dev/null || pwd; })

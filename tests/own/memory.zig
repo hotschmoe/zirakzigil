@@ -495,7 +495,13 @@ pub fn advFreeParamThenUse(gpa: Allocator, buf: []u8) u8 {
     return buf[0];
 }
 
-pub fn advThroughMemcpy(gpa: Allocator, dst: []u8) !void {
+pub fn advMemcpyFromFreed(gpa: Allocator, dst: []u8) !void {
+    const buf = try gpa.alloc(u8, 4);
+    gpa.free(buf);
+    @memcpy(dst[0..4], buf);
+}
+
+pub fn okMemcpyThenFree(gpa: Allocator, dst: []u8) !void {
     const buf = try gpa.alloc(u8, 4);
     defer gpa.free(buf);
     @memcpy(dst[0..4], buf);
@@ -505,10 +511,94 @@ pub fn advIndirectCall(f: *const fn () void) void {
     f();
 }
 
-pub fn advUnrelatedFreeKeepsPointer(gpa: Allocator) !u8 {
+pub fn okUnrelatedFreeKeepsPointer(gpa: Allocator) !u8 {
     const a = try gpa.alloc(u8, 4);
     defer gpa.free(a);
     const b = try gpa.alloc(u8, 4);
     gpa.free(b);
     return a[0];
+}
+
+// More adversarial cases. A mistake the checker cannot see must still not come out clean when it passes through
+// something it does not model: advPointerThroughInt is unproven, not clean.
+
+const Node = struct { value: u32, next: ?*Node = null };
+
+const Holder = struct { buf: []u8 };
+
+pub fn advFieldPointerAfterDestroy(gpa: Allocator) !u32 {
+    const node = try gpa.create(Node);
+    node.* = .{ .value = 3 };
+    const field = &node.value;
+    gpa.destroy(node);
+    return field.*;
+}
+
+pub fn advDoubleFreeThroughField(gpa: Allocator) !void {
+    var h: Holder = .{ .buf = try gpa.alloc(u8, 4) };
+    gpa.free(h.buf);
+    gpa.free(h.buf);
+    h.buf = &.{};
+}
+
+pub fn okFreeFieldThenReplace(gpa: Allocator) !void {
+    var h: Holder = .{ .buf = try gpa.alloc(u8, 4) };
+    gpa.free(h.buf);
+    h.buf = try gpa.alloc(u8, 8);
+    gpa.free(h.buf);
+}
+
+pub fn advReturnStructWithLocalPointer() Holder {
+    var buf: [4]u8 = undefined;
+    return .{ .buf = buf[0..] };
+}
+
+pub fn advPointerThroughOptionalList(gpa: Allocator) !u8 {
+    var list: List = .empty;
+    defer list.deinit(gpa);
+    try list.append(gpa, 1);
+    const maybe: ?*u8 = &list.items[0];
+    try list.append(gpa, 2);
+    return maybe.?.*;
+}
+
+pub fn okErrdeferFree(gpa: Allocator, fail: bool) ![]u8 {
+    const buf = try gpa.alloc(u8, 4);
+    errdefer gpa.free(buf);
+    if (fail) return error.OutOfMemory;
+    return buf;
+}
+
+pub fn badErrdeferFreeThenReturnOnSuccess(gpa: Allocator, fail: bool) ![]u8 {
+    const buf = try gpa.alloc(u8, 4);
+    defer if (!fail) gpa.free(buf);
+    return buf;
+}
+
+pub fn badLoopStalePointer(gpa: Allocator, n: u32) !u8 {
+    var list: List = .empty;
+    defer list.deinit(gpa);
+    try list.append(gpa, 0);
+    var p: *u8 = &list.items[0];
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        try list.append(gpa, 1);
+        if (i == 0) p = &list.items[0];
+    }
+    return p.*;
+}
+
+pub fn advPointerThroughInt(gpa: Allocator) !u8 {
+    const buf = try gpa.alloc(u8, 4);
+    const addr = @intFromPtr(buf.ptr);
+    gpa.free(buf);
+    const again: [*]u8 = @ptrFromInt(addr);
+    return again[0];
+}
+
+var stash_global: ?*u8 = null;
+
+pub fn advGlobalStash() void {
+    var x: u8 = 1;
+    stash_global = &x;
 }

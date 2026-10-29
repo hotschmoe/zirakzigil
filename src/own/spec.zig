@@ -122,6 +122,7 @@ fn container(method: []const u8) Effect {
     if (std.mem.startsWith(u8, method, "toOwned")) return .releases;
     // Room was made beforehand: what is there does not move.
     if (std.mem.endsWith(u8, method, "AssumeCapacity") and startsAny(method, &.{ "append", "put", "add" })) return .reads;
+    if (std.mem.startsWith(u8, method, "getOrPut")) return .invalidates;
     const reads = [_][]const u8{
         "get",     "contains", "count",    "iterator", "keyIterator", "valueIterator", "slice",   "at",
         "last",    "first",    "is",       "capacity", "clone",       "items",         "format",  "hash",

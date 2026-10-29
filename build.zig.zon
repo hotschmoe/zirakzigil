@@ -1,6 +1,6 @@
 .{
     .name = .zirakzigil,
-    .version = "0.17.9",
+    .version = "0.17.10",
     .fingerprint = 0x1b490422d9c422ea,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},

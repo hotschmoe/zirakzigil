@@ -111,6 +111,9 @@ pub const RootKind = enum(u8) {
 /// One step down from a place: field `n`, or an element of an array or slice (all elements are one place).
 pub const elem_step: u32 = std.math.maxInt(u32);
 
+/// A step to the allocator whose memory a container holds: what `list.append(gpa, x)` learns about `list`.
+pub const backing_step: u32 = std.math.maxInt(u32) - 1;
+
 /// Places form a tree, interned so that equal places have equal ids.
 pub const Places = struct {
     recs: std.ArrayList(Rec) = .empty,
@@ -134,6 +137,12 @@ pub const Places = struct {
             try p.recs.append(arena, rec_);
         }
         return gop.value_ptr.*;
+    }
+
+    /// The child of `parent` at `step` if some code already made it.
+    pub fn find(p: *const Places, parent: PlaceId, step: u32) ?PlaceId {
+        const r = p.recs.items[parent];
+        return p.map.get(.{ .kind = r.kind, .n = r.n, .parent = parent, .step = step });
     }
 
     pub fn rec(p: *const Places, id: PlaceId) Rec {

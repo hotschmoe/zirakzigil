@@ -472,6 +472,7 @@ pub const manifest = @import("manifest.zig");
 pub const Level = manifest.Level;
 pub const Counts = manifest.Counts;
 pub const requireAssurance = manifest.requireAssurance;
+pub const requireOwnership = @import("ownership.zig").requireOwnership;
 pub const governed = manifest.governed;
 pub const assuranceCounts = manifest.assuranceCounts;
 
