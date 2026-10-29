@@ -211,10 +211,10 @@ A normal build applies the comptime layer and erases contracts in ReleaseFast. T
 
 | Level | Meaning | What CI requires | Who may assign it |
 | --- | --- | --- | --- |
-| `.verified` | Contracts proved by `zvc` | `zvc` succeeds on every change | Anyone; it can only be lowered by a code owner |
+| `.verified` | Contracts proved by `zvc`, and no panic under the precondition; a proof that uses another function's contract holds only if that function is proved too | `zvc` succeeds on every change, the `.verified` functions a proof relies on included, whatever it was asked to check | Anyone; it can only be lowered by a code owner |
 | `.checked` | Contracts present, executed in safe builds | Tests and fuzzing pass with contracts on | Anyone |
 | `.tested` | Executed by a law or scenario in the evidence suites (unit tests do not count) | The assurance gate: `zig build assurance` fails on any claim no suite executed | Anyone, above the module floor |
-| `.trusted` | Reviewed by a person, no machine check | CODEOWNERS approval; counted and ratcheted | Code owners only |
+| `.trusted` | Reviewed by a person, no machine check. A `.verified` caller takes its contract, and that it does not panic when the precondition holds, on faith | CODEOWNERS approval; counted and ratcheted: `zvc` lists every trusted function a proof assumes and `--max-trusted N` fails the run above N | Code owners only |
 
 ### Ghost and permission types, without new syntax
 

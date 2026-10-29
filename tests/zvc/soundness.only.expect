@@ -1,0 +1,3 @@
+# name verdict. A verdict changing here is reviewed as a soundness or completeness change of zvc.
+soundness.useInc unproven
+soundness.inc refuted

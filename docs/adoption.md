@@ -148,7 +148,7 @@ _ = zirakzigil.addVerifyGate(b, .{
 });
 ```
 
-`zig build verify` builds `zvc` from this package, finds Z3 (`-Dz3=PATH`, `ZV_Z3` or `PATH`; `tools/install_z3.sh DEST` installs the pinned release) and fails when a `.verified` function is refuted, unproven, or missing from the pack, or when a pinned source changed since the export: a claim cannot outlive the code it was proved of, and a pack is cheap to regenerate but never trusted stale. Stock Zig runs the gate; only exporting needs the patched compiler.
+`zig build verify` builds `zvc` from this package, finds Z3 (`-Dz3=PATH`, `ZV_Z3` or `PATH`; `tools/install_z3.sh DEST` installs the pinned release) and fails when a `.verified` function is refuted, unproven, or missing from the pack, or when a pinned source changed since the export: a claim cannot outlive the code it was proved of, and a pack is cheap to regenerate but never trusted stale. A proof that uses another function's contract is only as good as that function: a `.verified` callee that fails fails the caller, and a `.trusted` one is listed in the run as an assumption (`max_trusted` in the gate options fails the run when there are more than N). Stock Zig runs the gate; only exporting needs the patched compiler.
 
 ## Borrowed slots: `zv.Slots`
 

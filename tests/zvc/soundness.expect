@@ -1,0 +1,26 @@
+# name verdict. A verdict changing here is reviewed as a soundness or completeness change of zvc.
+soundness.bigNeg refuted
+soundness.bigNegIs proved
+soundness.bigPos refuted
+soundness.bigPosIs proved
+soundness.bigU128 refuted
+soundness.bigWide refuted
+soundness.cmpSign refuted
+soundness.div128 refuted
+soundness.divMin128 refuted
+soundness.divSign refuted
+soundness.errCollide refuted
+soundness.errSame proved
+soundness.ghostAdd proved
+soundness.ghostMul proved
+soundness.ghostMulWide refuted
+soundness.ghostNeg proved
+soundness.inc refuted
+soundness.safeInc proved
+soundness.seqFull proved
+soundness.seqOverfull refuted
+soundness.useBadAdd proved
+soundness.useInc unproven
+soundness.useSafeInc proved
+soundness.useUseInc unproven
+soundness.boolInt refuted

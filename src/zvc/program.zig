@@ -100,6 +100,8 @@ pub const Program = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.Unsupported => return caller.ctx.unsupported("call to {s}: {s}", .{ callee, r.vc.ctx.reason }),
         };
+        r.summary.?.callee = callee;
+        r.summary.?.trusted = level == .trusted;
         return &r.summary.?;
     }
 };
