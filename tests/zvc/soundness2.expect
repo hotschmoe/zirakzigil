@@ -1,0 +1,22 @@
+# name verdict. A verdict changing here is reviewed as a soundness or completeness change of zvc.
+soundness2.assumeCheat proved
+soundness2.ghostDivOk proved
+soundness2.ghostDivOv refuted
+soundness2.ghostModOv proved
+soundness2.lenBound refuted
+soundness2.lenPlus refuted
+soundness2.lenTriple refuted
+soundness2.lenWrapEns refuted
+soundness2.ptrCastLoad unproven
+soundness2.seqSubMax refuted
+soundness2.seqSubOk proved
+soundness2.seqSubWrap refuted
+soundness2.shiftI128 proved
+soundness2.shiftI65 refuted
+soundness2.shiftOff refuted
+soundness2.shiftU24 refuted
+soundness2.shiftU8 refuted
+soundness2.shiftU96 refuted
+soundness2.useAssume proved
+soundness2.useLenBound unproven
+soundness2.wrapOff unproven

@@ -32,19 +32,23 @@ One function is run symbolically (`src/zvc/vc.zig`):
 | `cond_br` | both branches run under `pc and c` and `pc and not c`; a branch whose condition folds to false is skipped |
 | `call` to a `noreturn` function | obligation `pc => false`, with the panic named (`index out of bounds`, `division by zero`, a `@panic` message) |
 | arithmetic, casts, shifts | bit-vector terms, exact; overflow is `extend(a op b) == extend(a op b truncated)` in a wider vector |
-| `zv.requires(p)`, `zv.assume(p)` | `pc := pc and p`; `requires` must open the function body |
+| `zv.requires(p)`, `zv.assume(p)` | `pc := pc and p`; `requires` must open the function body; an `assume` is named in the verdict and counted (below) |
 | `zv.ensures(v, p)` | obligation `pc => p`; the block's value is `v` |
 | `loop` with `zv.invariant(p)` | obligation that `p` holds on entry; every cell the body stores to is havoced; `p` is assumed; one iteration runs; at `repeat`, obligation that `p` holds again; exits leave with the havoced state, `p` and the exit condition |
 
 Each obligation is `pc => goal` and is then assumed (assert, then assume), so one failure is reported once and not again in everything after it. Loops with no invariant are cut with the trivial one; a counterexample that passes through a cut loop is marked, because the loop abstraction may have made it unreal. Termination is checked where a loop states a measure (below).
 
-Terms are hash-consed with constant folding (`src/zvc/term.zig`). Integers up to 128 bits are bit-vectors, booleans are Bool, slices are arrays from 64-bit indexes (a slice parameter is assumed to fit the address space), and a struct, optional or error union is kept apart field by field.
+Terms are hash-consed with constant folding (`src/zvc/term.zig`). Integers up to 128 bits are bit-vectors, booleans are Bool, slices are arrays from 64-bit indexes (a slice parameter has any 64-bit length: nothing is assumed of it), and a struct, optional or error union is kept apart field by field.
 
 ## Beyond one function (M2)
 
 **Calls.** A call to a `.verified` (or `.trusted`) function does not run its body. Each function is run once and leaves a summary: its `zv.requires` conditions, and, over its `zv.ensures` calls, the disjunction of "the returned value is what that path computed and its condition holds". A return no `ensures` covers promises nothing, except one that returns a literal (an error code, `null`, a constant), which promises exactly that. At a call, the arguments replace the parameters in the summary, a callee slice is read at the caller's slice offset, the callee's internal variables are renamed per call, the precondition becomes an obligation (`precondition of X may not hold`) and the postcondition becomes an assumption. A callee that is `.checked`, absent, outside the fragment or recursive makes the caller UNPROVEN, with that as the reason. Loops inside a callee contribute through their invariants only.
 
 A summary says nothing about whether the callee panics, so a caller's proof stands on the callee's own: `zvc` proves every `.verified` function a proof relies on, transitively, even under `--only` (it is listed as `(relied on)`), and a caller whose callee is refuted or unproven is UNPROVEN (`relies on X, which is not proved`). A `.trusted` callee is not run through the solver: its contract and its not panicking when the precondition holds are assumed. Each verdict names the trusted functions it assumes (`proved ..., assuming trusted: X`), the run ends with the list, and `--max-trusted N` (`max_trusted` of the gate) fails the run when there are more than N, so the count can only go down.
+
+**Premises.** A `zv.assume` is a premise the proof takes without proving it, and Debug still checks it, so a verdict that used one says so (`proved ..., assuming zv.assume at file:line`), including through the `.verified` callees it relies on. The run ends with the list, and `--max-assume N` (`max_assume` of the gate) fails the run above N distinct sites.
+
+**Unchecked operations.** With `@setRuntimeSafety(false)` the compiler emits `+`, `-` and `*` without an overflow check, and an overflow there is undefined, neither a panic nor a wrap. `zvc` keeps the obligation and reports its failure as UNPROVEN (never REFUTED, since the binary does not panic). A shift amount is always obliged to be below the width, whether or not the AIR carries the compiler's own check. A pointer cast between integer widths is outside the fragment. Two different functions with one name in the packs are an error.
 
 **Inlined contracts.** A `zv.requires` inside an inlined callee (`inline fn`, or a call the compiler inlined) is an obligation of the caller, its `zv.ensures` is re-proved there and assumed after.
 

@@ -8,6 +8,7 @@
 //!     --pins FILE                lines `SHA256 PATH`: the sources the packs were exported from; any difference is an error
 //!     --total                    a loop without `zv.decreases` leaves its function unproven
 //!     --max-trusted N            fail when the proofs assume more than N distinct `.trusted` functions
+//!     --max-assume N             fail when the proofs rest on more than N distinct `zv.assume` calls
 //!     --z3 PATH                  the solver (default: $ZV_Z3, else `z3` on PATH)
 //!     --timeout MS               per obligation (default 10000)
 //!     --obligations              list every obligation of each function, proved or not
@@ -43,6 +44,7 @@ const Options = struct {
     obligations: bool = false,
     pins: ?[]const u8 = null,
     max_trusted: ?usize = null,
+    max_assume: ?usize = null,
 };
 
 const Result = struct {
@@ -61,6 +63,8 @@ const Result = struct {
     blocked_by: []const []const u8 = &.{},
     /// The `.trusted` functions the proof takes on faith: their contracts, and that they do not panic.
     assumes: []const []const u8 = &.{},
+    /// The `zv.assume` calls the proof takes as premises, as `path:line`: its own and its callees'.
+    premises: []const []const u8 = &.{},
 };
 
 /// A verified function as the driver sees it: the others its proof rests on, by index.
@@ -170,12 +174,14 @@ pub fn main(init: std.process.Init) !void {
 
     var results: std.ArrayList(Result) = .empty;
     var assumed: std.ArrayList([]const u8) = .empty;
+    var premises: std.ArrayList([]const u8) = .empty;
     var counts: [3]usize = @splat(0);
     for (0..entries.items.len) |i| try settle(arena, entries.items, i);
     for (entries.items) |e| {
         counts[@backingInt(e.result.verdict)] += 1;
         try results.append(arena, e.result);
         for (e.result.assumes) |name| try addUnique(arena, &assumed, name);
+        for (e.result.premises) |site| try addUnique(arena, &premises, site);
         try report(out, &srcs, e.result);
         if (opts.obligations) if (e.ref) |ref| for ((try prog.run(ref)).vc.obligations.items) |ob| {
             try printWhere(out, &srcs, ref.pack, ob.loc);
@@ -191,6 +197,15 @@ pub fn main(init: std.process.Init) !void {
         for (assumed.items, 0..) |name, i| try out.print("{s} {s}", .{ if (i == 0) "" else ",", name });
         try out.writeByte('\n');
     }
+    if (premises.items.len != 0) {
+        try out.print("zvc: {d} zv.assume premise(s), not proved:", .{premises.items.len});
+        for (premises.items, 0..) |site, i| try out.print("{s} {s}", .{ if (i == 0) "" else ",", site });
+        try out.writeByte('\n');
+    }
+    if (opts.max_assume) |limit| if (premises.items.len > limit) {
+        try out.print("zvc: more zv.assume premises than the {d} allowed\n", .{limit});
+        ok = false;
+    };
     if (opts.max_trusted) |limit| if (assumed.items.len > limit) {
         try out.print("zvc: more trusted assumptions than the {d} allowed\n", .{limit});
         ok = false;
@@ -212,14 +227,18 @@ fn settle(arena: Allocator, entries: []Entry, i: usize) Allocator.Error!void {
     e.settled = true;
     var blocked: std.ArrayList([]const u8) = .empty;
     var assumes: std.ArrayList([]const u8) = .empty;
+    var premises: std.ArrayList([]const u8) = .empty;
     for (e.trusted) |name| try addUnique(arena, &assumes, name);
+    for (e.result.premises) |site| try addUnique(arena, &premises, site);
     for (e.deps) |d| {
         try settle(arena, entries, d);
         const callee = entries[d].result;
         if (callee.verdict != .proved) try addUnique(arena, &blocked, callee.name);
         for (callee.assumes) |name| try addUnique(arena, &assumes, name);
+        for (callee.premises) |site| try addUnique(arena, &premises, site);
     }
     e.result.assumes = assumes.items;
+    e.result.premises = premises.items;
     e.result.blocked_by = blocked.items;
     if (blocked.items.len != 0 and e.result.verdict == .proved) e.result.verdict = .unproven;
 }
@@ -318,6 +337,8 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
                 o.z3 = v;
             } else if (std.mem.eql(u8, a, "--max-trusted")) {
                 o.max_trusted = std.fmt.parseInt(usize, v, 10) catch return null;
+            } else if (std.mem.eql(u8, a, "--max-assume")) {
+                o.max_assume = std.fmt.parseInt(usize, v, 10) catch return null;
             } else if (std.mem.eql(u8, a, "--timeout")) {
                 o.timeout_ms = std.fmt.parseInt(u32, v, 10) catch return null;
             } else if (std.mem.eql(u8, a, "--module")) {
@@ -333,7 +354,7 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: zvc [--src DIR] [--module NAME=DIR] [--only TEXT] [--expect FILE] [--total] [--max-trusted N] [--z3 PATH] [--timeout MS] [--smt] [--list] [--survey] PACK|INDEX_DIR...\n", .{});
+    std.debug.print("usage: zvc [--src DIR] [--module NAME=DIR] [--only TEXT] [--expect FILE] [--total] [--max-trusted N] [--max-assume N] [--z3 PATH] [--timeout MS] [--smt] [--list] [--survey] PACK|INDEX_DIR...\n", .{});
     std.process.exit(2);
 }
 
@@ -388,8 +409,14 @@ fn verifyOne(
     result.obligations = outcome.obligations;
     result.failures = outcome.failures;
     var refuted = false;
-    for (outcome.failures) |fl| refuted = refuted or fl.ce != null;
+    var premises: std.ArrayList([]const u8) = .empty;
+    for (outcome.failures) |fl| refuted = refuted or (fl.ce != null and fl.ob.kind != .unchecked);
     result.unbounded = r.vc.unbounded_loops.items;
+    for (r.vc.assumed.items) |loc| {
+        const site = if (prog.sources.where(ref.pack, loc)) |w| try std.fmt.allocPrint(arena, "{s}:{d}", .{ w.path, w.line }) else "(no position)";
+        try addUnique(arena, &premises, site);
+    }
+    result.premises = premises.items;
     const unproven = outcome.failures.len != 0 or r.vc.unsupported != null or (opts.total and result.unbounded.len != 0);
     result.verdict = if (refuted) .refuted else if (unproven) .unproven else .proved;
     result.ms = @intCast(@divTrunc(start.untilNow(io, .awake).toNanoseconds(), std.time.ns_per_ms));
@@ -406,6 +433,10 @@ fn report(out: *Io.Writer, srcs: *sources.Sources, r: Result) !void {
     if (r.assumes.len != 0) {
         try out.writeAll(", assuming trusted:");
         for (r.assumes, 0..) |name, i| try out.print("{s} {s}", .{ if (i == 0) "" else ",", name });
+    }
+    if (r.premises.len != 0) {
+        try out.writeAll(", assuming zv.assume at");
+        for (r.premises, 0..) |site, i| try out.print("{s} {s}", .{ if (i == 0) "" else ",", site });
     }
     try out.writeByte('\n');
     for (r.blocked_by) |name| try out.print("    relies on {s}, which is not proved\n", .{name});

@@ -12,6 +12,7 @@ $zvc --src examples --expect tests/zvc/search.expect tests/zvc/search.zvp
 $zvc --src tests/zvc --expect tests/zvc/cases.expect tests/zvc/cases.zvp
 $zvc --src tests/zvc --expect tests/zvc/features.expect tests/zvc/features.zvp
 $zvc --src tests/zvc --expect tests/zvc/soundness.expect tests/zvc/soundness.zvp
+$zvc --src tests/zvc --expect tests/zvc/soundness2.expect tests/zvc/soundness2.zvp
 
 # A proof is only as good as the callees it relies on, whatever --only selects.
 $zvc --src tests/zvc --only soundness.useInc --expect tests/zvc/soundness.only.expect tests/zvc/soundness.zvp
@@ -33,3 +34,22 @@ case $shown in
         exit 1
         ;;
 esac
+
+# A zv.assume is a premise: named in the verdict, passed on to its callers, counted against the ratchet.
+assumed="$zvc --src tests/zvc --only soundness2.useAssume --expect tests/zvc/soundness2.assume.expect tests/zvc/soundness2.zvp"
+$assumed --max-assume 1
+if $assumed --max-assume 0; then
+    echo "run_zvc: --max-assume 0 passed a proof that rests on a zv.assume" >&2
+    exit 1
+fi
+shown=$($assumed)
+case $shown in
+    *"assuming zv.assume at"*) ;;
+    *)
+        echo "run_zvc: the verdict of soundness2.useAssume does not name its zv.assume" >&2
+        exit 1
+        ;;
+esac
+
+# Two different functions under one name cannot be told apart by a call: not proved, not first-wins.
+$zvc --src tests/zvc --only soundness2.useLenBound --expect tests/zvc/soundness2.dup.expect tests/zvc/soundness2.zvp tests/zvc/dup/soundness2.zvp
