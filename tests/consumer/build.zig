@@ -40,6 +40,9 @@ pub fn build(b: *std.Build) void {
         .laws = &.{ "seq.zig", "laws.zig" },
     });
 
+    // The ownership gate: zv-own checks the exported AIR of own/handoff.zig.
+    _ = zirakzigil.addOwnershipGate(b, .{ .packs = &.{"own/handoff.zvp"}, .pins = "own/SOURCES", .src = "own" });
+
     // One line for every optimize mode, ghost on and off, plus freestanding checks.
     _ = zirakzigil.addTestMatrix(b, .{
         .root_source_file = b.path("src/root.zig"),

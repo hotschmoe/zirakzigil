@@ -110,6 +110,43 @@ pub fn addVerifyGate(b: *std.Build, options: VerifyGateOptions) *std.Build.Step 
     return step;
 }
 
+pub const OwnershipGateOptions = struct {
+    /// Checked-in AIR packs (`tools/zvc_export.sh`), relative to the project root.
+    packs: []const []const u8,
+    /// The sources the packs were exported from, one `SHA256  PATH` line each, relative to the project root.
+    pins: []const u8,
+    /// Where the packs' module-relative source paths resolve, relative to the project root.
+    src: []const u8 = "src",
+    /// Check only functions declared in files whose module-relative path starts with one of these. Empty: every
+    /// function the packs hold except `zv` itself.
+    files: []const []const u8 = &.{},
+    /// Pinned verdicts, one `NAME clean|error|unproven` per line. Without it every checked function must be clean.
+    expect: ?[]const u8 = null,
+    /// Fail when more than this many functions are unproven (outside the checker's supported fragment). The count
+    /// is listed in every run; setting it ratchets it.
+    max_unproven: ?u32 = null,
+};
+
+/// Adds the `own` step: `zv-own` checks the functions of the checked-in AIR packs for ownership mistakes
+/// (linear values consumed twice or not at all, memory used after it was freed or invalidated, pointers that
+/// outlive what they point into) and fails when one has a finding, when `max_unproven` is exceeded, or when a
+/// pinned source changed since the packs were exported. See `docs/phase3.md`.
+pub fn addOwnershipGate(b: *std.Build, options: OwnershipGateOptions) *std.Build.Step {
+    const dep = b.dependencyFromBuildZig(@This(), .{ .ghost = false });
+    const own = b.addExecutable(.{ .name = "zv-own", .root_module = ownModule(b, dep.path("src"), dep.module("zv_air"), b.graph.host, .ReleaseSafe) });
+    const run = b.addRunArtifact(own);
+    run.setCwd(b.path("."));
+    run.has_side_effects = true;
+    run.addArgs(&.{ "--pins", options.pins, "--src", options.src });
+    for (options.files) |prefix| run.addArgs(&.{ "--files", prefix });
+    if (options.expect) |path| run.addArgs(&.{ "--expect", path });
+    if (options.max_unproven) |limit| run.addArgs(&.{ "--max-unproven", b.fmt("{d}", .{limit}) });
+    run.addArgs(options.packs);
+    const step = b.step("own", "Check the ownership of the functions in the checked-in AIR packs");
+    step.dependOn(&run.step);
+    return step;
+}
+
 fn gate(b: *std.Build, options: AssuranceGateOptions, zv: *std.Build.Module, instrument_source: std.Build.LazyPath) *std.Build.Step {
     const instrument = b.addExecutable(.{ .name = "zv-instrument", .root_module = b.createModule(.{
         .root_source_file = instrument_source,
@@ -324,7 +361,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&gate_fail.step);
 
     // Downstream-consumer check: a separate project that depends on this one by path.
-    const consumer = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test", "assurance", b.fmt("-Dghost={}", .{ghost}), b.fmt("-Doptimize={t}", .{optimize}) });
+    const consumer = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test", "assurance", "own", b.fmt("-Dghost={}", .{ghost}), b.fmt("-Doptimize={t}", .{optimize}) });
     consumer.setCwd(b.path("tests/consumer"));
     consumer.has_side_effects = true;
     const consumer_step = b.step("consumer", "Build and test tests/consumer against this package");
@@ -364,4 +401,25 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "zv_air", .module = air }},
     }) });
     b.step("zvc", "Install the verifier").dependOn(&b.addInstallArtifact(zvc, .{}).step);
+
+    // The ownership checker: the same packs, no solver.
+    const own = b.addExecutable(.{ .name = "zv-own", .root_module = ownModule(b, b.path("src"), air, target, optimize) });
+    b.step("zv-own", "Install the ownership checker").dependOn(&b.addInstallArtifact(own, .{}).step);
+}
+
+/// The module `zv-own` is built from; consumers build it from this package's sources with `addOwnershipGate`.
+fn ownModule(b: *std.Build, src: std.Build.LazyPath, air: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const sources = b.createModule(.{
+        .root_source_file = src.path(b, "zvc/sources.zig"),
+        .imports = &.{.{ .name = "zv_air", .module = air }},
+    });
+    return b.createModule(.{
+        .root_source_file = src.path(b, "own/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zv_air", .module = air },
+            .{ .name = "zv_sources", .module = sources },
+        },
+    });
 }

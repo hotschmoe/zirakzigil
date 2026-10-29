@@ -1,0 +1,4 @@
+double_consume.main error
+ledger.deposit clean
+ledger.open clean
+ledger.withdraw clean

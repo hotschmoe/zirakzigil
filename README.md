@@ -25,7 +25,7 @@ Zig gives explicit *mechanics* (allocators, control flow, error handling) but no
 | **A. Contracts** `zv.requires` / `ensures` / `invariant` | Broken pre/postconditions, blamed on the side that broke them | Built |
 | **B. Refinement and brand types** `zv.Ranged`, `zv.Pool(..., struct {})` | Overflow in ranged arithmetic, out-of-range values, cross-pool handle mixups, unsafe narrowing | Built |
 | **C. Runtime ownership backstops** `zv.Linear`, generational handles (`zv.Pool`, and `zv.Slots` over borrowed storage), `zv.PinCheck` | Double consume, use-after-free via stale handle, copied self-referential structs, leaks | Built |
-| **D. Static ownership checker** `zv-own` (over AIR) | The bugs in C, at compile time, plus region escapes and pointer invalidation | Designed |
+| **D. Static ownership checker** `zv-own` (over AIR) | The bugs in C, at compile time, plus region escapes and pointer invalidation | Phase 3 in progress: linearity done (`docs/phase3.md`) |
 | **E. Deductive verifier** `zvc` (Verus-style, Z3) | Functional correctness and absence of every safety panic | Phase 2 done: reads AIR packs, bit-precise, Z3 over a pipe; seven zmoltcp functions proved in its build |
 | **F. C backend + CBMC** | Panic-freedom of bounded proof harnesses | C emission tested, checker not wired |
 | **H. Governance** assurance manifest + laws | Silent erosion of guarantees by contributors | Built |
@@ -89,8 +89,10 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 | `tests/should_panic/` | Contributor mistakes that must panic in safe builds |
 | `tests/compile_fail/cases.txt` | Contributor mistakes that must be rejected at compile time |
 | `tests/baseline/` | The same mistakes in plain Zig, showing what the stock compiler does with them |
+| `src/own/` | The ownership checker: reads AIR packs, follows `zv.Linear` tokens (and, from M2, owners of memory) over the structured control flow (`docs/phase3.md`) |
 | `src/zvc/` | The verifier: reads AIR packs (`zv_air`), derives verification conditions, discharges them with Z3 over a pipe (`docs/phase2.md`) |
 | `tools/zvc_export.sh`, `tools/run_zvc.sh`, `tools/install_z3.sh` | Export a file's AIR pack, run the zvc suite (`tests/zvc/`: pinned packs and verdicts), install the pinned Z3 |
+| `tools/run_own.sh`, `tools/own_repin.sh` | Run the zv-own suite (`tests/own/`: pinned packs and verdicts); export its packs again |
 | `tools/run_negative.sh` | Runs the should-panic and compile-fail suites |
 | `tools/run_baseline.sh` | Runs the plain-Zig controls in three build modes |
 | `docs/design.md` | Design document |

@@ -6,7 +6,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const zv_air = @import("zv_air");
 const schema = zv_air.schema;
-const source = @import("source.zig");
+pub const source = @import("source.zig");
 
 pub const Dirs = struct {
     /// Where module-relative paths resolve unless a module has a directory of its own.

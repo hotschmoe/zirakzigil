@@ -29,6 +29,15 @@ comptime {
     zv.requireAssurance(@This(), .tested);
 }
 
+// The ownership the checker follows is the one the types say.
+comptime {
+    std.debug.assert(zv.holdsLinear(Withdrawal));
+    std.debug.assert(zv.holdsLinear(?Withdrawal));
+    std.debug.assert(zv.holdsLinear(error{Insufficient}!Withdrawal));
+    std.debug.assert(!zv.holdsLinear(*Withdrawal));
+    std.debug.assert(!zv.holdsLinear(AccountId));
+}
+
 pub fn open(pool: *Accounts, initial: u64) !AccountId {
     return pool.alloc(.{ .balance = initial });
 }

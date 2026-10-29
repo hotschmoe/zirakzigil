@@ -12,7 +12,9 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-pub const version = 2;
+/// The version the compiler writes. A reader also accepts `min_version`, which lacks the `fields` table.
+pub const version = 3;
+pub const min_version = 2;
 pub const magic: [8]u8 = "ZVAIRPK\x00".*;
 pub const pack_ext = ".zvp";
 pub const index_ext = ".zvi";
@@ -115,6 +117,21 @@ pub const ConstRec = extern struct { a: u64, ty: TypeId, kind: ConstKind };
 pub const LocRec = extern struct { file: FileId, line: u32, col: u32 };
 
 pub const Param = extern struct { ty: TypeId, zir_index: u32 };
+
+/// A field of a struct, tuple or union type that a function uses by value: `owner` is the type, `index` the
+/// position in declaration order, `name` the field name (empty for tuples and union fields), `ty` its type.
+/// The table is sorted by (owner, index). A type without a record here has no known fields: it is either
+/// empty, or no function of the pack used it by value (only through pointers), so its layout was never
+/// needed. Two types the pack cannot tell apart by name and that disagree on a field are marked with
+/// `index == conflict`; their fields are not known.
+pub const FieldRec = extern struct {
+    owner: TypeId,
+    index: u32,
+    name: StrId,
+    ty: TypeId,
+
+    pub const conflict = std.math.maxInt(u32);
+};
 
 pub const CalleeRef = packed struct(u32) { inlined: bool, callee: u31 };
 
@@ -448,6 +465,7 @@ pub const Tables = struct {
     operands: []const Operand = &.{},
     attrs: []const Attr = &.{},
     bodies: []const Body = &.{},
+    fields: []const FieldRec = &.{},
 };
 
 const table_names = @typeInfo(Tables).@"struct".field_names;
@@ -470,16 +488,21 @@ pub const Header = extern struct {
     spans: [table_count]Span,
 };
 
+/// Tables of a version 2 pack: every table but `fields`.
+const v2_table_count = table_count - 1;
+
 /// What a pack says about the compilation that made it.
 pub const Meta = struct {
     zig_version: StrId,
     target: StrId,
     root: StrId,
     optimize: Optimize,
+    /// The schema the bytes were written in: 2 packs have no `fields` table.
+    schema: u32 = version,
 };
 
 comptime {
-    for ([_]type{ StrEntry, FileRec, TypeRec, ConstRec, LocRec, Param, Func, Attr, Body, Inst, Span, Header, Range }) |T| {
+    for ([_]type{ StrEntry, FileRec, FieldRec, TypeRec, ConstRec, LocRec, Param, Func, Attr, Body, Inst, Span, Header, Range }) |T| {
         var sum: usize = 0;
         for (@typeInfo(T).@"struct".field_types) |ft| sum += @sizeOf(ft);
         assert(sum == @sizeOf(T));
@@ -495,21 +518,25 @@ pub const Pack = struct {
 
     /// Views `bytes` in place; nothing is copied.
     pub fn parse(bytes: []align(8) const u8) Error!Pack {
-        if (bytes.len < @sizeOf(Header)) return error.Truncated;
+        const spans_at = @offsetOf(Header, "spans");
+        if (bytes.len < spans_at) return error.Truncated;
         const header: *const Header = @ptrCast(bytes.ptr);
         if (!std.mem.eql(u8, &header.magic, &magic)) return error.BadMagic;
-        if (header.schema != version) return error.BadSchema;
+        if (header.schema < min_version or header.schema > version) return error.BadSchema;
+        const spans = if (header.schema == version) table_count else v2_table_count;
+        if (bytes.len < spans_at + spans * @sizeOf(Span)) return error.Truncated;
         if (header.size != bytes.len) return error.Truncated;
         var t: Tables = .{};
-        inline for (table_names, header.spans) |name, span| {
+        inline for (table_names, 0..) |name, i| if (i < spans) {
+            const span = header.spans[i];
             const T = Elem(name);
             const len = @as(usize, span.len) * @sizeOf(T);
             if (span.off % @alignOf(T) != 0) return error.Misaligned;
             if (span.off > bytes.len or len > bytes.len - span.off) return error.Truncated;
             @field(t, name) = @ptrCast(@alignCast(bytes[span.off..][0..len]));
-        }
+        };
         return .{
-            .meta = .{ .zig_version = header.zig_version, .target = header.target, .root = header.root, .optimize = header.optimize },
+            .meta = .{ .zig_version = header.zig_version, .target = header.target, .root = header.root, .optimize = header.optimize, .schema = header.schema },
             .t = t,
         };
     }
@@ -551,6 +578,22 @@ pub const Pack = struct {
         return p.str(p.t.callees[@backingInt(id)]);
     }
 
+    /// The fields of a struct, tuple or union type, in declaration order; null when the pack does not know
+    /// them (see `FieldRec`). An empty struct has none and so reads as unknown, which is harmless: it holds nothing.
+    pub fn fieldsOf(p: Pack, ty: TypeId) ?[]const FieldRec {
+        const all = p.t.fields;
+        var lo: usize = 0;
+        var hi: usize = all.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (@backingInt(all[mid].owner) < @backingInt(ty)) lo = mid + 1 else hi = mid;
+        }
+        var end = lo;
+        while (end < all.len and all[end].owner == ty) end += 1;
+        if (end == lo or all[end - 1].index == FieldRec.conflict) return null;
+        return all[lo..end];
+    }
+
     /// Checks every reference of every record: ids in range, ranges inside their tables, types after
     /// their children, the unsupported counts and the function order. A pack that passes is safe to
     /// walk without further checks.
@@ -573,6 +616,14 @@ pub const Pack = struct {
                 else => false,
             };
             if (bad) return error.Invalid;
+        }
+        for (t.fields, 0..) |fl, i| {
+            if (@backingInt(fl.owner) >= t.types.len or @backingInt(fl.name) >= strs) return error.Invalid;
+            if (fl.ty != .none and @backingInt(fl.ty) >= t.types.len) return error.Invalid;
+            if (i > 0) {
+                const q = t.fields[i - 1];
+                if (@backingInt(q.owner) > @backingInt(fl.owner) or (q.owner == fl.owner and q.index >= fl.index)) return error.Invalid;
+            }
         }
         for (t.callees) |c| if (@backingInt(c) >= strs) return error.Invalid;
         for (t.locs) |l| if (@backingInt(l.file) >= t.files.len) return error.Invalid;
@@ -702,7 +753,8 @@ pub const Entry = struct {
     pub fn parse(line: []const u8) error{BadEntry}!Entry {
         var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, line, "\r\n"), ' ');
         if (!std.mem.eql(u8, it.next() orelse "", "zvi")) return error.BadEntry;
-        if ((std.fmt.parseInt(u32, it.next() orelse "", 10) catch return error.BadEntry) != version) return error.BadEntry;
+        const entry_version = std.fmt.parseInt(u32, it.next() orelse "", 10) catch return error.BadEntry;
+        if (entry_version < min_version or entry_version > version) return error.BadEntry;
         const format = std.meta.stringToEnum(Format, it.next() orelse "") orelse return error.BadEntry;
         const size = std.fmt.parseInt(u64, it.next() orelse "", 10) catch return error.BadEntry;
         const hash = std.fmt.parseInt(u64, it.next() orelse "", 16) catch return error.BadEntry;

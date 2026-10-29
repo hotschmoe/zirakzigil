@@ -36,6 +36,7 @@ pub fn build(b: *Builder, arena: Allocator, zcu: *Zcu, func_index: InternPool.In
     const ip = &zcu.intern_pool;
     const func = zcu.funcInfo(func_index);
     var c: Ctx = .{ .b = b, .arena = arena, .zcu = zcu, .air = air, .file = undefined };
+    try c.collectValueTypes();
     c.file = try c.fileId(zcu.navFileScopeIndex(func.owner_nav));
     c.base_line = zcu.navSrcLine(func.owner_nav);
     const file = c.file;
@@ -88,6 +89,9 @@ const Ctx = struct {
     loc: schema.LocId = .none,
     type_ids: std.AutoHashMapUnmanaged(InternPool.Index, schema.TypeId) = .empty,
     file_ids: std.AutoHashMapUnmanaged(Zcu.File.Index, schema.FileId) = .empty,
+    /// The types this function uses by value, and what they hold by value: their layout is resolved, so
+    /// their fields can be read and exported (`schema.FieldRec`). Pointees are not in it.
+    value_types: std.AutoHashMapUnmanaged(InternPool.Index, void) = .empty,
     refs: std.ArrayList(schema.CalleeRef) = .empty,
     unsupported: u32 = 0,
 
@@ -130,7 +134,90 @@ const Ctx = struct {
         }
         const id = try c.b.typeRec(rec);
         try c.type_ids.put(c.arena, ty.toIntern(), id);
+        if (c.value_types.contains(ty.toIntern())) try c.fields(ty, id);
         return id;
+    }
+
+    fn collectValueTypes(c: *Ctx) Error!void {
+        try c.collectBody(c.air.getMainBody());
+    }
+
+    /// Mirrors the walk of `inst`: the same instructions, none other.
+    fn collectBody(c: *Ctx, list: []const Air.Inst.Index) Error!void {
+        const air = c.air;
+        for (list) |index| {
+            try c.markValue(air.typeOfIndex(index, &c.zcu.intern_pool));
+            switch (air.instructions.items(.tag)[@backingInt(index)]) {
+                .block, .loop => try c.collectBody(air.unwrapBlock(index).body),
+                .dbg_inline_block => try c.collectBody(air.unwrapDbgBlock(index).body),
+                .cond_br => {
+                    const cond = air.unwrapCondBr(index);
+                    try c.collectBody(cond.then_body);
+                    try c.collectBody(cond.else_body);
+                },
+                .@"try", .try_cold => try c.collectBody(air.unwrapTry(index).else_body),
+                .try_ptr, .try_ptr_cold => try c.collectBody(air.unwrapTryPtr(index).else_body),
+                .switch_br, .loop_switch_br => {
+                    const sw = air.unwrapSwitch(index);
+                    var it = sw.iterateCases();
+                    while (it.next()) |case| try c.collectBody(case.body);
+                    try c.collectBody(it.elseBody());
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn markValue(c: *Ctx, ty: Type) Error!void {
+        const zcu = c.zcu;
+        if ((try c.value_types.getOrPut(c.arena, ty.toIntern())).found_existing) return;
+        switch (ty.zigTypeTag(zcu)) {
+            .array, .vector => try c.markValue(ty.childType(zcu)),
+            .optional => try c.markValue(ty.optionalChild(zcu)),
+            .error_union => try c.markValue(ty.errorUnionPayload(zcu)),
+            .@"struct", .@"union" => for (try c.fieldTypes(ty)) |field_ty| try c.markValue(.fromInterned(field_ty)),
+            else => {},
+        }
+    }
+
+    /// The field types of a struct, tuple or union whose layout is resolved.
+    fn fieldTypes(c: *Ctx, ty: Type) Error![]const InternPool.Index {
+        const ip = &c.zcu.intern_pool;
+        return switch (ip.indexToKey(ty.toIntern())) {
+            .struct_type => struct_blk: {
+                const loaded = ip.loadStructType(ty.toIntern());
+                break :struct_blk if (loaded.want_layout) loaded.field_types.get(ip) else &.{};
+            },
+            .tuple_type => |tuple| tuple.types.get(ip),
+            .union_type => union_blk: {
+                const loaded = ip.loadUnionType(ty.toIntern());
+                break :union_blk if (loaded.want_layout) loaded.field_types.get(ip) else &.{};
+            },
+            else => &.{},
+        };
+    }
+
+    /// Exports the fields of a type used by value (`schema.FieldRec`).
+    fn fields(c: *Ctx, ty: Type, id: schema.TypeId) Error!void {
+        const ip = &c.zcu.intern_pool;
+        // Copied: typeId below reads the intern pool again.
+        const names = try c.arena.dupe(InternPool.NullTerminatedString, switch (ip.indexToKey(ty.toIntern())) {
+            .struct_type => names_blk: {
+                const loaded = ip.loadStructType(ty.toIntern());
+                break :names_blk if (loaded.want_layout) loaded.field_names.get(ip) else &.{};
+            },
+            else => &.{},
+        });
+        const types = try c.arena.dupe(InternPool.Index, try c.fieldTypes(ty));
+        for (types, 0..) |field_ty, i| {
+            const name = if (i < names.len) names[i].toSlice(ip) else "";
+            try c.b.addField(.{
+                .owner = id,
+                .index = @intCast(i),
+                .name = try c.b.str(name),
+                .ty = try c.typeId(.fromInterned(field_ty)),
+            });
+        }
     }
 
     fn fileId(c: *Ctx, index: Zcu.File.Index) Error!schema.FileId {
