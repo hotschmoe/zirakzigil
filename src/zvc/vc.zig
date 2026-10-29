@@ -23,6 +23,8 @@ pub const Error = value.Error;
 
 pub const Kind = enum {
     overflow,
+    /// An operation Zig does not check here (safety is off) and leaves undefined on overflow: neither a panic nor a wrap.
+    unchecked,
     division,
     bounds,
     cast,
@@ -145,6 +147,8 @@ pub const Vc = struct {
     unbounded_loops: std.ArrayList(schema.LocId) = .empty,
     /// The summaries this function relied on at its calls: each is a promise that must be kept elsewhere.
     relied: std.ArrayList(*const Summary) = .empty,
+    /// The `zv.assume` calls on live paths: each is a premise the proof takes without proving it.
+    assumed: std.ArrayList(schema.LocId) = .empty,
     unsupported: ?Unsupported = null,
     loc: schema.LocId = .none,
 
@@ -234,24 +238,8 @@ pub const Vc = struct {
             const val = try v.ctx.symbolic(name, params[index].ty, true);
             try v.param_values.append(v.arena(), val);
             v.values[inst.id] = val;
-            st.pc = try pool.@"and"(st.pc, try v.boundsOf(val, params[index].ty));
         }
         try v.exec(v.pack.instsOf(v.func.insts), &st);
-    }
-
-    /// Facts every value of the type satisfies: a slice fits the address space.
-    fn boundsOf(v: *Vc, val: Value, ty: schema.TypeId) Allocator.Error!Term {
-        const pool = v.pool;
-        switch (val) {
-            .slice => |s| {
-                const t = v.ctx.typeRec(ty);
-                const size: u128 = if (v.ctx.intInfo(t.child)) |i| @max(1, i.bits / 8) else 1;
-                const limit = try pool.bv(64, (@as(u128, 1) << 63) / size - 1);
-                return pool.cmp(.ule, s.len, limit);
-            },
-            .array, .none, .scalar => return pool.tru(),
-            else => return pool.tru(),
-        }
     }
 
     // Attribute and operand access.
@@ -490,7 +478,10 @@ pub const Vc = struct {
                     else => return v.ctx.unsupported("load through {t}", .{std.meta.activeTag(p)}),
                 }
             },
-            .ptr_cast, .addrspace_cast => v.setResult(inst, try v.arg(inst, 0)),
+            .ptr_cast, .addrspace_cast => {
+                if (v.reinterprets(inst)) return v.ctx.unsupported("a pointer cast between integer types of different widths", .{});
+                v.setResult(inst, try v.arg(inst, 0));
+            },
             .struct_field_ptr, .struct_field_ptr_index_0, .struct_field_ptr_index_1, .struct_field_ptr_index_2, .struct_field_ptr_index_3 => {
                 const p = try v.arg(inst, 0);
                 if (p != .place) return v.ctx.unsupported("field pointer of {t}", .{std.meta.activeTag(p)});
@@ -792,6 +783,23 @@ pub const Vc = struct {
         }
     }
 
+    /// A pointer cast that reads integers of one width as another: the model keeps one value per cell.
+    fn reinterprets(v: *const Vc, inst: *const Inst) bool {
+        const from = v.operandType(v.ops(inst)[0]);
+        if (from == .none or inst.ty == .none) return false;
+        const f = v.ctx.typeRec(from);
+        const t = v.ctx.typeRec(inst.ty);
+        if (f.kind != .pointer or t.kind != .pointer) return false;
+        const a = v.elementOf(f.child);
+        const b = v.elementOf(t.child);
+        return a.kind == .int and b.kind == .int and a.bits != b.bits;
+    }
+
+    fn elementOf(v: *const Vc, id: schema.TypeId) schema.TypeRec {
+        const t = v.ctx.typeRec(id);
+        return if (t.kind == .array) v.ctx.typeRec(t.child) else t;
+    }
+
     // Arithmetic.
 
     fn checkedArith(v: *Vc, inst: *const Inst, st: *State) StepError!void {
@@ -805,7 +813,10 @@ pub const Vc = struct {
             else => .{ .mul, "*" },
         };
         const ok = try v.noOverflow(op, a, b, info);
-        try v.oblige(st, inst, .overflow, "integer overflow in `{s}` on {s}", .{ sym, v.ctx.typeName(inst.ty) }, ok);
+        if (inst.tag == .add or inst.tag == .sub or inst.tag == .mul)
+            try v.oblige(st, inst, .unchecked, "overflow in unchecked `{s}` on {s}: undefined, not a panic and not a wrap", .{ sym, v.ctx.typeName(inst.ty) }, ok)
+        else
+            try v.oblige(st, inst, .overflow, "integer overflow in `{s}` on {s}", .{ sym, v.ctx.typeName(inst.ty) }, ok);
         v.setScalar(inst, try pool.bin(op, a, b));
     }
 
@@ -896,6 +907,7 @@ pub const Vc = struct {
         const amount_bits = pool.bitsOf(amount);
         if (amount_bits > info.bits) return v.ctx.unsupported("shift amount wider than the value", .{});
         amount = try pool.zext(amount, info.bits);
+        try v.oblige(st, inst, .shift, "shift amount is too large", .{}, try pool.cmp(.ult, amount, try pool.bv(info.bits, info.bits)));
         const left = inst.tag == .shl or inst.tag == .shl_exact;
         const op: term.Op = if (left) .shl else if (info.signed) .ashr else .lshr;
         const result = try pool.bin(op, a, amount);
@@ -1184,6 +1196,7 @@ pub const Vc = struct {
             },
             .assume => {
                 if (n != 1) return v.ctx.unsupported("zv.assume with {d} arguments", .{n});
+                if (v.alive(st)) try v.assumed.append(v.arena(), if (inst.loc != .none) inst.loc else v.loc);
                 st.pc = try pool.@"and"(st.pc, (try v.operand(args[0])).scalar);
             },
             .ensures => {
@@ -1302,6 +1315,10 @@ pub const Vc = struct {
                 const b = try v.asInt(args[1]);
                 try v.oblige(st, inst, .ghost, "division by zero in a specification", .{}, try pool.ne(b, zero));
                 if (op == .@"Int.mod") return v.finishGhost(inst, try pool.bin(.smod, a, b));
+                const min = try pool.bv(term.ghost_bits, @as(u256, 1) << (term.ghost_bits - 1));
+                const neg1 = try pool.bv(term.ghost_bits, std.math.maxInt(u256));
+                const fits = try pool.@"or"(try pool.ne(a, min), try pool.ne(b, neg1));
+                try v.oblige(st, inst, .ghost, "a specification outgrows {d}-bit ghost integers", .{term.ghost_bits}, fits);
                 const q = try pool.bin(.sdiv, a, b);
                 const r = try pool.bin(.srem, a, b);
                 const adjust = try pool.@"and"(try pool.ne(r, zero), try pool.ne(try pool.cmp(.slt, r, zero), try pool.cmp(.slt, b, zero)));
@@ -1351,8 +1368,11 @@ pub const Vc = struct {
                 const n = try v.asInt(args[2]);
                 const end = try pool.bin(.add, lo, n);
                 const in_range = try pool.@"and"(
-                    try pool.cmp(.sle, zero, lo),
-                    try pool.@"and"(try pool.cmp(.sle, zero, n), try pool.cmp(.sle, end, try pool.seqLen(s))),
+                    try v.noOverflow(.add, lo, n, ghost_info),
+                    try pool.@"and"(
+                        try pool.cmp(.sle, zero, lo),
+                        try pool.@"and"(try pool.cmp(.sle, zero, n), try pool.cmp(.sle, end, try pool.seqLen(s))),
+                    ),
                 );
                 try v.oblige(st, inst, .ghost, "subsequence out of range in a specification", .{}, in_range);
                 v.setScalar(inst, try pool.seqExtract(s, lo, n));

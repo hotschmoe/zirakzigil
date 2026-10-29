@@ -82,6 +82,8 @@ pub const VerifyGateOptions = struct {
     /// Fail when the proofs take more than this many distinct `.trusted` functions on faith. The count is listed in
     /// every run; setting this ratchets it.
     max_trusted: ?u32 = null,
+    /// Fail when the proofs rest on more than this many distinct `zv.assume` calls. Listed in every run.
+    max_assume: ?u32 = null,
 };
 
 /// Adds the `verify` step: `zvc` proves every function the sources' assurance manifests mark `.verified`
@@ -103,6 +105,7 @@ pub fn addVerifyGate(b: *std.Build, options: VerifyGateOptions) *std.Build.Step 
     if (options.expect) |path| run.addArgs(&.{ "--expect", path });
     if (options.total) run.addArg("--total");
     if (options.max_trusted) |limit| run.addArgs(&.{ "--max-trusted", b.fmt("{d}", .{limit}) });
+    if (options.max_assume) |limit| run.addArgs(&.{ "--max-assume", b.fmt("{d}", .{limit}) });
     if (b.option([]const u8, "z3", "Path of the Z3 executable for `zig build verify`")) |path| run.addArgs(&.{ "--z3", path });
     run.addArgs(options.packs);
     const step = b.step("verify", "Prove every .verified function from the checked-in AIR packs");

@@ -28,12 +28,16 @@ pub const Program = struct {
     sources: *sources.Sources,
     funcs: std.StringHashMapUnmanaged(Ref) = .empty,
     runs: std.StringHashMapUnmanaged(*Run) = .empty,
+    /// Names that two different functions have: a call resolves by name, so it cannot tell which one it means.
+    ambiguous: std.StringHashMapUnmanaged(void) = .empty,
 
     pub fn init(gpa: Allocator, arena: Allocator, srcs: *sources.Sources, packs: []const *const schema.Pack) Allocator.Error!Program {
         var p: Program = .{ .gpa = gpa, .arena = arena, .pool = .init(gpa), .sources = srcs };
         for (packs) |pack| for (pack.t.funcs) |f| {
             const gop = try p.funcs.getOrPut(arena, pack.str(f.fqn));
-            if (!gop.found_existing) gop.value_ptr.* = .{ .pack = pack, .func = f };
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{ .pack = pack, .func = f };
+            } else if (gop.value_ptr.func.id != f.id) try p.ambiguous.put(arena, gop.key_ptr.*, {});
         };
         return p;
     }
@@ -84,6 +88,7 @@ pub const Program = struct {
     fn summaryHook(context: *anyopaque, caller: *vc.Vc, callee: []const u8) vc.Error!*const vc.Summary {
         const p: *Program = @ptrCast(@alignCast(context));
         const ref = p.funcs.get(callee) orelse return caller.ctx.unsupported("call to {s}, which is not in the packs", .{callee});
+        if (p.ambiguous.contains(callee)) return caller.ctx.unsupported("call to {s}, which names two different functions in the packs", .{callee});
         const level = (try p.sources.levelOf(ref.pack, ref.func)) orelse
             return caller.ctx.unsupported("call to {s}, which no assurance manifest lists", .{callee});
         switch (level) {
