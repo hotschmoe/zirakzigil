@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compares what zvc parses from a source file with what the AIR export says about the same functions.
 
-usage: air_vs_zvc.py FILE.zig AIR_DIR
+usage: air_vs_zvc.py FILE.zig PACK.json|AIR_DIR   (the JSON form of a pack: zv-air dump)
 zvc needs z3 only to prove; its parser is used here, so a stub stands in when z3 is not installed.
 """
 import collections
@@ -41,9 +41,10 @@ def main():
     toks = zvc.lex(src)
     levels = zvc.manifest(src)
     docs = {}
-    for f in air_dir.glob("*.json"):
-        d = json.loads(f.read_text(encoding="utf-8"))
-        docs[d["fqn"].split(".", 1)[-1]] = d
+    for f in sorted(air_dir.rglob("*.json")) if air_dir.is_dir() else [air_dir]:
+        pack = json.loads(f.read_text(encoding="utf-8"))
+        for d in pack["functions"]:
+            docs[d["fqn"].split(".", 1)[-1]] = d
 
     print(f"{'function':<14} {'level':<9} {'zvc':<34} AIR")
     for name, level in levels.items():

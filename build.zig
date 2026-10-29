@@ -303,4 +303,14 @@ pub fn build(b: *std.Build) void {
     consumer_matrix.setCwd(b.path("tests/consumer"));
     consumer_matrix.has_side_effects = true;
     matrix.dependOn(&consumer_matrix.step);
+
+    // The reader for zig-zv AIR packs (schema v2): a library for tools, and a command line for people.
+    const air = b.addModule("zv_air", .{ .root_source_file = b.path("src/air/air.zig") });
+    const air_cli = b.addExecutable(.{ .name = "zv-air", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/zv_air_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zv_air", .module = air }},
+    }) });
+    b.step("zv-air", "Install the pack reader tool").dependOn(&b.addInstallArtifact(air_cli, .{}).step);
 }

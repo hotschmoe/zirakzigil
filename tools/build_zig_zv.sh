@@ -59,6 +59,7 @@ git clean --quiet -fd -e zig-out -e .zig-cache
 
 if [ "$name" != zig-stock ]; then
     cp -R "$compiler/src/zv_air" src/zv_air
+    cp "$root/src/air/schema.zig" "$root/src/air/builder.zig" "$root/src/air/json.zig" src/zv_air/
     # Loud on drift: every anchor must match exactly once, or nothing is written.
     hook="$host_zig run $root/tools/zv_hook.zig --"
     $hook apply "$compiler/hook/rules.zon" .
@@ -92,8 +93,8 @@ if [ "$ref" = "$tag" ]; then
 fi
 
 if [ "$name" != zig-stock ]; then
-    # Smoke test: one function exported directly and through the cache, where a hit after deleting
-    # the output directory must restore it.
+    # Smoke test: one function exported directly (no cache) and through the cache, where a hit after
+    # deleting the index directory must name the same pack again.
     smoke=$work/smoke
     rm -rf "$smoke"
     mkdir -p "$smoke"
@@ -102,11 +103,13 @@ if [ "$name" != zig-stock ]; then
 }
 ' >"$smoke/answer.zig"
     (cd "$smoke" && ZV_AIR_OUT=direct "$tree/$bin" build-obj -fno-emit-bin answer.zig)
-    ls "$smoke"/direct/answer.*.json >/dev/null 2>&1 || { echo "error: smoke export produced no JSON" >&2; exit 1; }
+    ls "$smoke"/direct/*.zvp "$smoke"/direct/*.zvi >/dev/null 2>&1 || { echo "error: smoke export produced no pack" >&2; exit 1; }
     for run in miss hit; do
         rm -rf "$smoke/cached"
         (cd "$smoke" && ZV_AIR_OUT=cached "$tree/$bin" build-obj --cache-dir cache answer.zig)
-        ls "$smoke"/cached/answer.*.json >/dev/null 2>&1 || { echo "error: smoke cache $run produced no JSON" >&2; exit 1; }
+        ls "$smoke"/cached/*.zvi >/dev/null 2>&1 || { echo "error: smoke cache $run produced no index entry" >&2; exit 1; }
     done
+    (cd "$smoke" && ZV_AIR_JSON=1 ZV_AIR_OUT=json "$tree/$bin" build-obj -fno-emit-bin answer.zig)
+    ls "$smoke"/json/*.json >/dev/null 2>&1 || { echo "error: smoke export produced no JSON" >&2; exit 1; }
 fi
 echo "built $tree/$bin"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage and oracle check for the AIR export (schema v1, see docs/phase1.md).
+"""Coverage and oracle check for the AIR export (schema v2, JSON form, see docs/phase1.md).
 
 Compares the hook's JSON with the text that the compiler's own printer (`--verbose-air`, a build
 with -Ddebug-extensions) writes for the same run: for every exported function, every instruction's
@@ -10,12 +10,13 @@ instructions that print it, and `dbg_stmt` position must agree. The two come fro
 The printer runs after legalization and liveness, the hook before, so instructions that legalization
 rewrites differ by design; those are the pinned ones below and nothing else may differ.
 
-usage: air_oracle.py JSON_DIR DUMP.txt --functions N --instructions N
+usage: air_oracle.py JSON_DIR_OR_FILE DUMP.txt --functions N --instructions N
 """
 import argparse
 import collections
 import json
 import re
+import struct
 import sys
 from pathlib import Path
 
@@ -30,13 +31,18 @@ NOT_TYPE = ("%", "<", "@.", '"', ".")
 CALLS = ("call", "call_always_tail", "call_never_tail", "call_never_inline", "aggregate_init")
 
 
+def scrub(text):
+    """schema.scrub: the compiler-internal ids in generated names are not part of the export."""
+    return re.sub(r"__([a-z]+)_[0-9]+(?![A-Za-z0-9_])", r"__\1", text)
+
+
 def parse_dump(text):
     functions = {}
     current = None
     for line in text.splitlines():
         m = BEGIN.match(line)
         if m:
-            current = functions[m.group(1)] = {"insts": {}, "stack": [None]}
+            current = functions[m.group(1)] = {"insts": {}, "stack": [None], "name": m.group(1)}
             continue
         if current is None:
             continue
@@ -122,6 +128,38 @@ def dump_operands(tag, inst):
     return ty, out, None
 
 
+def render_float(bits):
+    text = repr(struct.unpack("<d", struct.pack("<Q", int(bits, 16)))[0])
+    return text[:-2] if text.endswith(".0") else text
+
+
+def render_const(doc, op):
+    """The constant the way the compiler prints it, from its structured form."""
+    kind, val = op["kind"], op.get("val")
+    types = doc["types"]
+    if kind == "undef":
+        return "undefined"
+    if kind in ("void",):
+        return "{}"
+    if kind == "null":
+        return "null"
+    if kind == "bool":
+        return "true" if val else "false"
+    if kind == "int":
+        return str(val)
+    if kind == "float":
+        return render_float(val)
+    if kind in ("enum_literal", "enum_tag"):
+        return "." + val
+    if kind == "error":
+        return "error." + val
+    if kind == "func":
+        return f"(function '{val.rsplit('.', 1)[-1]}')"
+    if kind == "type":
+        return types[val]["name"]
+    return val
+
+
 def hook_operands(doc, inst):
     out = []
     target = inst.get("attrs", {}).get("target")
@@ -133,7 +171,7 @@ def hook_operands(doc, inst):
         elif "inst" in op:
             out.append(("i", op["inst"]))
         else:
-            out.append(("c", f"{doc['types'][op['ty']]['name']}, {op['val']}"))
+            out.append(("c", f"{doc['types'][op['ty']]['name']}, {render_const(doc, op)}"))
     return out
 
 
@@ -184,12 +222,14 @@ def compare(doc, dump, problems, stats):
         if inst.get("unsupported"):
             continue
         ty, ops, position = dump_operands(inst["tag"], theirs)
+        ops = [(k, scrub(v)) if k == "c" else (k, v) for k, v in ops]
+        ty = scrub(ty) if ty else ty
         if position is not None:
-            attrs = inst["attrs"]
+            _, line, col = inst["loc"]
             owner = inline_owner(parent, flat, ident)
-            base = bases.setdefault(owner, attrs["line"] - position[0] + 1)
-            if (attrs["line"], attrs["col"]) != (base + position[0] - 1, position[1]):
-                problems.append(f"{where}: position {attrs['line']}:{attrs['col']}, dump {position} on declaration line {base}")
+            base = bases.setdefault(owner, line - position[0] + 1)
+            if (line, col) != (base + position[0] - 1, position[1]):
+                problems.append(f"{where}: position {line}:{col}, dump {position} on declaration line {base}")
             continue
         mine = hook_operands(doc, inst)
         if inst["tag"] == "dbg_inline_block":
@@ -221,29 +261,54 @@ def check_pinned(fqn, changed, added, problems):
         problems.append(f"{fqn}: legalization changed {changed} and added {added}, pinned {PINNED_LEGALIZED[fqn]}")
 
 
+def load_docs(path):
+    """One document per function, with the pack's tables alongside, from a JSON file or a directory."""
+    docs = []
+    for file in sorted(path.rglob("*.json")) if path.is_dir() else [path]:
+        pack = json.loads(file.read_text(encoding="utf-8"))
+        for function in pack["functions"]:
+            docs.append({**function, "types": pack["types"], "callees": pack["callees"], "files": pack["files"]})
+    return docs
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("json_dir")
+    ap.add_argument("json_dir", help="a pack as JSON, or a directory of them")
     ap.add_argument("dump")
     ap.add_argument("--functions", type=int, required=True)
     ap.add_argument("--instructions", type=int, required=True)
     args = ap.parse_args()
 
-    docs = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(Path(args.json_dir).glob("*.json"))]
+    docs = load_docs(Path(args.json_dir))
     dumps = parse_dump(Path(args.dump).read_text(encoding="utf-8", errors="replace"))
+    by_name = collections.defaultdict(list)
+    for dump in dumps.values():
+        by_name[scrub(dump["name"])].append(dump)
+    used = set()
     problems = []
     stats = collections.Counter()
     for doc in docs:
         flat, _ = flatten(doc)
         stats["instructions"] += len(flat)
         stats["unsupported"] += doc["unsupported"]
-        if doc["fqn"] in dumps:
-            before = (stats["pinned_changed"], stats["pinned_added"])
-            compare(doc, dumps[doc["fqn"]], problems, stats)
-            if doc["fqn"] in PINNED_LEGALIZED:
-                check_pinned(doc["fqn"], stats["pinned_changed"] - before[0], stats["pinned_added"] - before[1], problems)
-        else:
+        # Generic instances share a name once the compiler's ids are hidden: take the dump that agrees.
+        best = None
+        for dump in (d for d in by_name.get(doc["fqn"], []) if d["name"] not in used):
+            trial = (dump, collections.Counter(), [])
+            compare(doc, dump, trial[2], trial[1])
+            best = best or trial
+            if not trial[2]:
+                best = trial
+                break
+        if best is None:
             problems.append(f"{doc['fqn']}: the compiler printed no AIR for it")
+            continue
+        dump, trial_stats, trial_problems = best
+        used.add(dump["name"])
+        stats.update(trial_stats)
+        problems.extend(trial_problems)
+        if doc["fqn"] in PINNED_LEGALIZED:
+            check_pinned(doc["fqn"], trial_stats["pinned_changed"], trial_stats["pinned_added"], problems)
     if len(docs) != args.functions:
         problems.append(f"functions: {len(docs)}, expected {args.functions}")
     if stats["instructions"] != args.instructions:

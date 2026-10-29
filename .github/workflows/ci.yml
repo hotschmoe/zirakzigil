@@ -46,6 +46,8 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
+      - name: The pack reader and its tool build
+        run: zig build zv-air
       - name: Every hook anchor resolves exactly once in the pinned Zig tree
         run: |
           git clone --quiet --filter=blob:none https://codeberg.org/ziglang/zig.git upstream
