@@ -24,7 +24,7 @@ for dir in tests/own tests/own/std; do
     $own --module target=tests/own --expect tests/own/review1.expect $dir/review1.zvp
     $own --module target=tests/own --expect tests/own/stdcode.expect $dir/stdcode.zvp
     $own --module target=tests/own --expect tests/own/switchloop.expect $dir/switchloop.zvp
-    for suite in review2 review2b real fp_zls fp_zls2 fp_zls3 fp_zls4 fp_zls5 fp_zls6 fp_zls7 fp_idioms fp_loops fp_tags review3 review3b; do
+    for suite in review2 review2b real fp_zls fp_zls2 fp_zls3 fp_zls4 fp_zls5 fp_zls6 fp_zls7 fp_idioms fp_loops fp_tags fp_tags2 review3 review3b; do
         $own --module target=tests/own --expect tests/own/$suite.expect $dir/$suite.zvp
     done
 done

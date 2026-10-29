@@ -1805,7 +1805,13 @@ pub const Run = struct {
         if (r.restores.get(call_id)) |list| for (list) |back| {
             if (back.obj) try r.writeObj(st, back.place, back.val.ids) else try r.writeLeafAs(st, back.place, back.val, true);
         };
+        // Only a block a restored place holds again is ended again: a name the call itself made anew is not that block.
+        var again: Set = .empty;
+        if (r.restores.get(call_id)) |list| for (list) |back| {
+            if (!back.obj) again = try again.merge(r.arena, back.val.ids);
+        };
         if (r.fail_ends.get(call_id)) |list| for (list) |e| {
+            if (!again.has(e.id)) continue;
             // The restored places hold the block again; ending it once more replaces it there too.
             _ = st.dead.swapRemove(e.id);
             try r.kill(st, e.id, e.event);
