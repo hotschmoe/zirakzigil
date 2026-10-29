@@ -69,11 +69,15 @@ pub fn Ghost(comptime T: type) type {
     return if (ghost) T else void;
 }
 
+/// Bits of a ghost integer: `zvc` proves with exactly this width (`term.ghost_bits`), so a proof holds for what runs.
+pub const ghost_bits = 256;
+const Word = @Int(.signed, ghost_bits);
+
 /// Ghost integer, for specifications that must not wrap. `zvc` reads it as a mathematical integer; run in a
-/// ghost build it is an `i128` and panics on overflow. It does not exist outside ghost builds, so use it
+/// ghost build it is an `i256` and panics on overflow. It does not exist outside ghost builds, so use it
 /// behind `zv.ghost`: `zv.ensures(r, !zv.ghost or zv.Int.of(r).le(zv.Int.of(x)))`.
 pub const Int = if (ghost) struct {
-    v: i128,
+    v: Word,
 
     const Self = @This();
 
@@ -120,10 +124,11 @@ pub const Int = if (ghost) struct {
     }
 } else void;
 
-/// Ghost sequence of ghost integers. `zvc` reads it as an unbounded sequence; run in a ghost build it holds
-/// at most `capacity` elements. Like `Int`, it exists only in ghost builds.
+/// Ghost sequence of ghost integers. `zvc` reads it as a sequence and obliges it to stay within `capacity`
+/// (`term.seq_capacity`) elements, which is all it holds when run in a ghost build.
+/// Like `Int`, it exists only in ghost builds.
 pub const Seq = if (ghost) struct {
-    items: [capacity]i128 = undefined,
+    items: [capacity]Word = undefined,
     n: usize = 0,
 
     pub const capacity = 64;

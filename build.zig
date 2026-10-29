@@ -79,11 +79,15 @@ pub const VerifyGateOptions = struct {
     expect: ?[]const u8 = null,
     /// Refuse a loop that states no `zv.decreases`.
     total: bool = false,
+    /// Fail when the proofs take more than this many distinct `.trusted` functions on faith. The count is listed in
+    /// every run; setting this ratchets it.
+    max_trusted: ?u32 = null,
 };
 
 /// Adds the `verify` step: `zvc` proves every function the sources' assurance manifests mark `.verified`
-/// from the checked-in AIR packs, and fails when one is refuted, unproven, missing from the packs, or when a
-/// pinned source changed since the packs were exported. Z3 is found through `-Dz3=PATH`, `ZV_Z3` or `PATH`.
+/// from the checked-in AIR packs, and fails when one is refuted, unproven, missing from the packs, relies on a
+/// `.verified` callee that is not proved, or when a pinned source changed since the packs were exported.
+/// Z3 is found through `-Dz3=PATH`, `ZV_Z3` or `PATH`.
 pub fn addVerifyGate(b: *std.Build, options: VerifyGateOptions) *std.Build.Step {
     const dep = b.dependencyFromBuildZig(@This(), .{ .ghost = false });
     const zvc = b.addExecutable(.{ .name = "zvc", .root_module = b.createModule(.{
@@ -98,6 +102,7 @@ pub fn addVerifyGate(b: *std.Build, options: VerifyGateOptions) *std.Build.Step 
     run.addArgs(&.{ "--pins", options.pins, "--src", options.src });
     if (options.expect) |path| run.addArgs(&.{ "--expect", path });
     if (options.total) run.addArg("--total");
+    if (options.max_trusted) |limit| run.addArgs(&.{ "--max-trusted", b.fmt("{d}", .{limit}) });
     if (b.option([]const u8, "z3", "Path of the Z3 executable for `zig build verify`")) |path| run.addArgs(&.{ "--z3", path });
     run.addArgs(options.packs);
     const step = b.step("verify", "Prove every .verified function from the checked-in AIR packs");

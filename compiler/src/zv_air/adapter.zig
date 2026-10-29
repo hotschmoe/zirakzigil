@@ -175,7 +175,8 @@ const Ctx = struct {
                 .@"unreachable" => {},
             },
             .int => |int| switch (int.storage) {
-                .u64 => |v| {
+                // Sign extension to 64 bits cannot tell 2^63 from -2^63 in a wider signed type: that stays text.
+                .u64 => |v| if (v <= std.math.maxInt(i64) or !ty.isSignedInt(zcu)) {
                     rec.kind = .int;
                     rec.a = v;
                 },

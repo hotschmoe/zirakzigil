@@ -3,10 +3,11 @@
 //!   zvc [options] PATH...        PATH is a `.zvp` pack or an index directory
 //!     --src DIR                  where module-relative source paths are found (default `.`)
 //!     --module NAME=DIR          a different directory for the sources of one module
-//!     --only TEXT                only functions whose name contains TEXT
+//!     --only TEXT                only functions whose name contains TEXT (the `.verified` functions they rely on are proved too)
 //!     --expect FILE              lines `NAME proved|refuted|unproven`; exit 0 iff every verdict matches
 //!     --pins FILE                lines `SHA256 PATH`: the sources the packs were exported from; any difference is an error
 //!     --total                    a loop without `zv.decreases` leaves its function unproven
+//!     --max-trusted N            fail when the proofs assume more than N distinct `.trusted` functions
 //!     --z3 PATH                  the solver (default: $ZV_Z3, else `z3` on PATH)
 //!     --timeout MS               per obligation (default 10000)
 //!     --obligations              list every obligation of each function, proved or not
@@ -41,6 +42,7 @@ const Options = struct {
     total: bool = false,
     obligations: bool = false,
     pins: ?[]const u8 = null,
+    max_trusted: ?usize = null,
 };
 
 const Result = struct {
@@ -53,6 +55,21 @@ const Result = struct {
     unbounded: []const schema.LocId,
     pack: *const schema.Pack,
     ms: u64,
+    /// Run only because a verified function relies on it.
+    callee: bool = false,
+    /// The verified callees this verdict relies on that are not proved: the verdict cannot be `proved`.
+    blocked_by: []const []const u8 = &.{},
+    /// The `.trusted` functions the proof takes on faith: their contracts, and that they do not panic.
+    assumes: []const []const u8 = &.{},
+};
+
+/// A verified function as the driver sees it: the others its proof rests on, by index.
+const Entry = struct {
+    result: Result,
+    ref: ?program.Ref,
+    deps: []const usize = &.{},
+    trusted: []const []const u8 = &.{},
+    settled: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -77,8 +94,8 @@ pub fn main(init: std.process.Init) !void {
     var prog = try program.Program.init(gpa, arena, &srcs, packs.items);
     defer prog.deinit();
 
-    var results: std.ArrayList(Result) = .empty;
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var entries: std.ArrayList(Entry) = .empty;
+    var index: std.StringHashMapUnmanaged(usize) = .empty;
     for (packs.items) |pack| {
         for (pack.t.funcs) |f| {
             const level = (try srcs.levelOf(pack, f)) orelse continue;
@@ -91,27 +108,43 @@ pub fn main(init: std.process.Init) !void {
             }
             if (level != .verified) continue;
             const key = try std.fmt.allocPrint(arena, "{s}#{x}", .{ fqn, f.id });
-            if ((try seen.getOrPut(arena, key)).found_existing) continue;
+            const gop = try index.getOrPut(arena, key);
+            if (gop.found_existing) continue;
             if (opts.list) {
                 try out.print("{s}\n", .{fqn});
                 continue;
             }
-            if (pack.meta.optimize == .fast or pack.meta.optimize == .small)
-                fatal("{s}: the pack was exported in {t}, where contracts compile out; export in Debug or ReleaseSafe", .{ fqn, pack.meta.optimize });
-            const result = try verifyOne(gpa, io, arena, &prog, .{ .pack = pack, .func = f }, z3, opts, if (opts.smt) out else null);
-            try results.append(arena, result);
-            try report(out, &srcs, result);
-            if (opts.obligations) {
-                const r = try prog.run(.{ .pack = pack, .func = f });
-                for (r.vc.obligations.items) |ob| {
-                    try printWhere(out, &srcs, pack, ob.loc);
-                    try out.print(": {s}\n", .{ob.text});
-                }
-            }
-            try out.flush();
+            gop.value_ptr.* = entries.items.len;
+            try entries.append(arena, try verifyEntry(gpa, io, arena, &prog, .{ .pack = pack, .func = f }, z3, opts, if (opts.smt) out else null));
         }
     }
     if (opts.list or opts.survey) return out.flush();
+
+    // A proof that relies on a callee's contract holds only if the callee is proved too, whatever --only selected.
+    var at: usize = 0;
+    while (at < entries.items.len) : (at += 1) {
+        const ref = entries.items[at].ref orelse continue;
+        var deps: std.ArrayList(usize) = .empty;
+        var trusted: std.ArrayList([]const u8) = .empty;
+        for ((try prog.run(ref)).vc.relied.items) |summary| {
+            if (summary.trusted) {
+                try addUnique(arena, &trusted, try source.declaredName(arena, summary.callee));
+                continue;
+            }
+            const callee = prog.funcs.get(summary.callee).?;
+            const key = try std.fmt.allocPrint(arena, "{s}#{x}", .{ callee.pack.str(callee.func.fqn), callee.func.id });
+            const gop = try index.getOrPut(arena, key);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = entries.items.len;
+                var entry = try verifyEntry(gpa, io, arena, &prog, callee, z3, opts, if (opts.smt) out else null);
+                entry.result.callee = true;
+                try entries.append(arena, entry);
+            }
+            try deps.append(arena, gop.value_ptr.*);
+        }
+        entries.items[at].deps = deps.items;
+        entries.items[at].trusted = trusted.items;
+    }
 
     // A function the manifest calls .verified that the packs do not contain was never looked at.
     var files = srcs.files.valueIterator();
@@ -122,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
             if (e.value_ptr.* != .verified) continue;
             if (opts.only) |only| if (std.mem.indexOf(u8, e.key_ptr.*, only) == null) continue;
             if (seenName(&prog, e.key_ptr.*)) continue;
-            const result: Result = .{
+            try entries.append(arena, .{ .ref = null, .result = .{
                 .name = e.key_ptr.*,
                 .verdict = .unproven,
                 .obligations = 0,
@@ -131,19 +164,79 @@ pub fn main(init: std.process.Init) !void {
                 .unbounded = &.{},
                 .pack = packs.items[0],
                 .ms = 0,
-            };
-            try results.append(arena, result);
-            try report(out, &srcs, result);
+            } });
         }
     }
 
+    var results: std.ArrayList(Result) = .empty;
+    var assumed: std.ArrayList([]const u8) = .empty;
     var counts: [3]usize = @splat(0);
-    for (results.items) |r| counts[@backingInt(r.verdict)] += 1;
+    for (0..entries.items.len) |i| try settle(arena, entries.items, i);
+    for (entries.items) |e| {
+        counts[@backingInt(e.result.verdict)] += 1;
+        try results.append(arena, e.result);
+        for (e.result.assumes) |name| try addUnique(arena, &assumed, name);
+        try report(out, &srcs, e.result);
+        if (opts.obligations) if (e.ref) |ref| for ((try prog.run(ref)).vc.obligations.items) |ob| {
+            try printWhere(out, &srcs, ref.pack, ob.loc);
+            try out.print(": {s}\n", .{ob.text});
+        };
+        try out.flush();
+    }
     try out.print("\nzvc: {d} proved, {d} refuted, {d} unproven\n", .{ counts[0], counts[1], counts[2] });
     var ok = counts[1] == 0 and counts[2] == 0;
     if (opts.expect) |path| ok = try compareExpected(io, arena, out, path, results.items);
+    if (assumed.items.len != 0) {
+        try out.print("zvc: {d} trusted assumption(s), not machine-checked:", .{assumed.items.len});
+        for (assumed.items, 0..) |name, i| try out.print("{s} {s}", .{ if (i == 0) "" else ",", name });
+        try out.writeByte('\n');
+    }
+    if (opts.max_trusted) |limit| if (assumed.items.len > limit) {
+        try out.print("zvc: more trusted assumptions than the {d} allowed\n", .{limit});
+        ok = false;
+    };
     try out.flush();
     if (!ok) std.process.exit(1);
+}
+
+fn addUnique(arena: Allocator, list: *std.ArrayList([]const u8), name: []const u8) Allocator.Error!void {
+    for (list.items) |x| if (std.mem.eql(u8, x, name)) return;
+    try list.append(arena, name);
+}
+
+/// Fixes the verdict of a function once the functions it relies on are fixed: a proof that rests on a contract
+/// nobody proved is no proof, and it takes on faith whatever its callees take on faith.
+fn settle(arena: Allocator, entries: []Entry, i: usize) Allocator.Error!void {
+    const e = &entries[i];
+    if (e.settled) return;
+    e.settled = true;
+    var blocked: std.ArrayList([]const u8) = .empty;
+    var assumes: std.ArrayList([]const u8) = .empty;
+    for (e.trusted) |name| try addUnique(arena, &assumes, name);
+    for (e.deps) |d| {
+        try settle(arena, entries, d);
+        const callee = entries[d].result;
+        if (callee.verdict != .proved) try addUnique(arena, &blocked, callee.name);
+        for (callee.assumes) |name| try addUnique(arena, &assumes, name);
+    }
+    e.result.assumes = assumes.items;
+    e.result.blocked_by = blocked.items;
+    if (blocked.items.len != 0 and e.result.verdict == .proved) e.result.verdict = .unproven;
+}
+
+fn verifyEntry(
+    gpa: Allocator,
+    io: Io,
+    arena: Allocator,
+    prog: *program.Program,
+    ref: program.Ref,
+    z3: []const u8,
+    opts: Options,
+    trace: ?*Io.Writer,
+) !Entry {
+    if (ref.pack.meta.optimize == .fast or ref.pack.meta.optimize == .small)
+        fatal("{s}: the pack was exported in {t}, where contracts compile out; export in Debug or ReleaseSafe", .{ ref.pack.str(ref.func.fqn), ref.pack.meta.optimize });
+    return .{ .ref = ref, .result = try verifyOne(gpa, io, arena, prog, ref, z3, opts, trace) };
 }
 
 fn seenName(prog: *program.Program, name: []const u8) bool {
@@ -223,6 +316,8 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
                 o.pins = v;
             } else if (std.mem.eql(u8, a, "--z3")) {
                 o.z3 = v;
+            } else if (std.mem.eql(u8, a, "--max-trusted")) {
+                o.max_trusted = std.fmt.parseInt(usize, v, 10) catch return null;
             } else if (std.mem.eql(u8, a, "--timeout")) {
                 o.timeout_ms = std.fmt.parseInt(u32, v, 10) catch return null;
             } else if (std.mem.eql(u8, a, "--module")) {
@@ -238,7 +333,7 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: zvc [--src DIR] [--module NAME=DIR] [--only TEXT] [--expect FILE] [--total] [--z3 PATH] [--timeout MS] [--smt] [--list] [--survey] PACK|INDEX_DIR...\n", .{});
+    std.debug.print("usage: zvc [--src DIR] [--module NAME=DIR] [--only TEXT] [--expect FILE] [--total] [--max-trusted N] [--z3 PATH] [--timeout MS] [--smt] [--list] [--survey] PACK|INDEX_DIR...\n", .{});
     std.process.exit(2);
 }
 
@@ -307,7 +402,13 @@ fn report(out: *Io.Writer, srcs: *sources.Sources, r: Result) !void {
         .refuted => "REFUTED  ",
         .unproven => "UNPROVEN ",
     };
-    try out.print("{s}{s}: {d} obligations, {d} ms\n", .{ label, r.name, r.obligations, r.ms });
+    try out.print("{s}{s}{s}: {d} obligations, {d} ms", .{ label, r.name, if (r.callee) " (relied on)" else "", r.obligations, r.ms });
+    if (r.assumes.len != 0) {
+        try out.writeAll(", assuming trusted:");
+        for (r.assumes, 0..) |name, i| try out.print("{s} {s}", .{ if (i == 0) "" else ",", name });
+    }
+    try out.writeByte('\n');
+    for (r.blocked_by) |name| try out.print("    relies on {s}, which is not proved\n", .{name});
     for (r.failures) |fl| {
         try printWhere(out, srcs, r.pack, fl.ob.loc);
         if (fl.ce) |ce| {

@@ -4,7 +4,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-for file in examples/search.zig tests/zvc/cases.zig tests/zvc/features.zig; do
+for file in examples/search.zig tests/zvc/cases.zig tests/zvc/features.zig tests/zvc/soundness.zig; do
     sh tools/zvc_export.sh tests/zvc "$file"
 done
-sha256sum examples/search.zig tests/zvc/cases.zig tests/zvc/features.zig >tests/zvc/SOURCES
+sha256sum examples/search.zig tests/zvc/cases.zig tests/zvc/features.zig tests/zvc/soundness.zig >tests/zvc/SOURCES

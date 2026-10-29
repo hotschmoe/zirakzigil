@@ -9,7 +9,11 @@ const assert = std.debug.assert;
 pub const Term = enum(u32) { _ };
 
 /// Width of the ghost integer `zv.Int`: the largest literal and the width every ghost value has.
+/// Run, `zv.Int` is an integer of this width (`zv.ghost_bits`), so what is proved is what the run checks.
 pub const ghost_bits = 256;
+
+/// Elements a `zv.Seq` holds when run (`zv.Seq.capacity`); going past it is an obligation.
+pub const seq_capacity = 64;
 
 pub const Sort = union(enum) {
     bool,
@@ -99,12 +103,15 @@ const NodeContext = struct {
 };
 
 pub fn mask(bits: u16) u256 {
-    return if (bits >= 128) std.math.maxInt(u256) else (@as(u256, 1) << @intCast(bits)) - 1;
+    assert(bits <= 256);
+    return if (bits == 256) std.math.maxInt(u256) else (@as(u256, 1) << @intCast(bits)) - 1;
 }
 
+/// `value`, a `bits`-wide two's complement pattern, as the integer it stands for.
 pub fn signed(bits: u16, value: u256) i256 {
-    if (bits >= 128) return @bitCast(value);
-    const shift: u7 = @intCast(128 - bits);
+    assert(bits >= 1 and bits <= 256);
+    if (bits == 256) return @bitCast(value);
+    const shift: u8 = @intCast(256 - bits);
     return @as(i256, @bitCast(value << shift)) >> shift;
 }
 
@@ -114,6 +121,7 @@ pub const Pool = struct {
     index: std.HashMapUnmanaged(Node, Term, NodeContext, 80) = .empty,
     names: std.ArrayList([]const u8) = .empty,
     name_index: std.StringHashMapUnmanaged(u32) = .empty,
+    error_codes: std.StringHashMapUnmanaged(u16) = .empty,
     arena: std.heap.ArenaAllocator,
     fresh_count: u32 = 0,
 
@@ -126,6 +134,7 @@ pub const Pool = struct {
         p.index.deinit(p.gpa);
         p.names.deinit(p.gpa);
         p.name_index.deinit(p.gpa);
+        p.error_codes.deinit(p.gpa);
         p.arena.deinit();
     }
 
@@ -160,6 +169,20 @@ pub const Pool = struct {
 
     pub fn name(p: *const Pool, id: u32) []const u8 {
         return p.names.items[id];
+    }
+
+    /// The code of an error: 1, 2, 3 in the order the program names them, so two errors never share one. 0 is no error.
+    pub fn errorCode(p: *Pool, error_name: []const u8) Allocator.Error!?u16 {
+        const gop = try p.error_codes.getOrPut(p.gpa, error_name);
+        if (!gop.found_existing) {
+            if (p.error_codes.count() > std.math.maxInt(u16)) {
+                _ = p.error_codes.remove(error_name);
+                return null;
+            }
+            gop.key_ptr.* = try p.arena.allocator().dupe(u8, error_name);
+            gop.value_ptr.* = @intCast(p.error_codes.count());
+        }
+        return gop.value_ptr.*;
     }
 
     pub fn tru(p: *Pool) Allocator.Error!Term {
@@ -385,7 +408,7 @@ pub const Pool = struct {
             .lshr => if (y >= bits) 0 else x >> @intCast(y),
             .ashr => blk: {
                 const sx = signed(bits, x);
-                const sh: u7 = if (y >= bits) @intCast(@min(bits - 1, 127)) else @intCast(y);
+                const sh: u8 = if (y >= bits) @intCast(bits - 1) else @intCast(y);
                 break :blk @as(u256, @bitCast(sx >> sh)) & m;
             },
             else => null,
