@@ -97,6 +97,15 @@ pub const Set = struct {
 pub const PlaceId = u32;
 pub const no_place: PlaceId = std.math.maxInt(u32);
 
+/// The epoch of a value nothing can change.
+pub const fixed_epoch: u32 = std.math.maxInt(u32);
+
+/// A bool that is true exactly when the scalar at `at` is (`eq`) or is not (`!eq`) `value`.
+pub const Probe = struct { at: PlaceId, value: u64, eq: bool };
+
+/// What holds when a bool built by `and` / `or` is true (`yes`) or false (`no`): tests of scalars, all of them.
+pub const Implied = struct { yes: []const Probe = &.{}, no: []const Probe = &.{} };
+
 pub const RootKind = enum(u8) {
     /// A stack slot: the `alloc` instruction `n`. The function owns its content, so stores are strong updates.
     cell,
@@ -124,6 +133,8 @@ pub const len_step: u32 = std.math.maxInt(u32) - 2;
 pub const Places = struct {
     recs: std.ArrayList(Rec) = .empty,
     map: std.AutoHashMapUnmanaged(Rec, PlaceId) = .empty,
+    /// Places that have a child at a constant index.
+    indexed: std.AutoHashMapUnmanaged(PlaceId, void) = .empty,
 
     pub const Rec = struct { kind: RootKind, n: u32, parent: PlaceId, step: u32 };
 
@@ -133,6 +144,7 @@ pub const Places = struct {
 
     pub fn child(p: *Places, arena: Allocator, parent: PlaceId, step: u32) Allocator.Error!PlaceId {
         const r = p.recs.items[parent];
+        if (step >= index_step and step < len_step) try p.indexed.put(arena, parent, {});
         return p.intern(arena, .{ .kind = r.kind, .n = r.n, .parent = parent, .step = step });
     }
 
@@ -229,8 +241,22 @@ pub const Val = struct {
     maybe: bool = false,
     /// A container made with room for this many elements and none in it (`initCapacity`).
     room: ?u64 = null,
+    /// A number, a bool or an enum known to be this constant (an enum by the hash of its name).
+    con: ?u64 = null,
+    /// A scalar read from this place, or a bool that tests one (`probe`): good only while `ep` is the epoch of the run (no
+    /// memory was written since), or `fixed_epoch` (a field of a parameter passed by value).
+    at: ?PlaceId = null,
+    probe: ?Probe = null,
+    imp: ?*const Implied = null,
+    ep: u32 = 0,
 
     pub const none: Val = .{};
+
+    /// What of a scalar is still true once it is written to memory: its constant, and which field of a parameter it is.
+    pub fn scalarKept(v: Val) Val {
+        const fixed = v.at != null and v.ep == fixed_epoch;
+        return .{ .con = v.con, .at = if (fixed) v.at else null, .ep = if (fixed) fixed_epoch else 0 };
+    }
 
     pub fn isEmpty(v: Val) bool {
         return v.toks.isEmpty() and v.ids.isEmpty() and v.obj.isEmpty() and v.place == null and v.src == null and v.parts == null;
@@ -250,6 +276,11 @@ pub const Val = struct {
             .alt = a.alt or b.alt or (!a.toks.isEmpty() and !b.toks.isEmpty() and !a.toks.eql(b.toks)),
             .maybe = a.maybe or b.maybe or (!a.ids.isEmpty() and !b.ids.isEmpty() and !a.ids.eql(b.ids)),
             .room = if (a.room != null and a.room == b.room) a.room else null,
+            .con = if (a.con != null and a.con == b.con) a.con else null,
+            .at = if (a.at != null and a.at == b.at and a.ep == b.ep) a.at else null,
+            .probe = if (a.probe != null and b.probe != null and a.ep == b.ep and std.meta.eql(a.probe.?, b.probe.?)) a.probe else null,
+            .imp = if (a.imp == b.imp) a.imp else null,
+            .ep = a.ep,
         };
         if (a.parts) |pa| if (b.parts) |pb| if (pa.len == pb.len) {
             const parts = try arena.alloc(Val, pa.len);
@@ -269,13 +300,24 @@ pub const Val = struct {
     }
 
     pub fn eql(a: Val, b: Val) bool {
-        if (!a.toks.eql(b.toks) or !a.ids.eql(b.ids) or !a.obj.eql(b.obj) or !a.moved.eql(b.moved) or a.place != b.place or a.src != b.src or a.from != b.from or a.alt != b.alt or a.maybe != b.maybe or a.room != b.room or a.off != b.off or a.many != b.many) return false;
+        if (!a.toks.eql(b.toks) or !a.ids.eql(b.ids) or !a.obj.eql(b.obj) or !a.moved.eql(b.moved) or a.place != b.place or a.src != b.src or a.from != b.from or a.alt != b.alt or a.maybe != b.maybe or a.room != b.room or a.off != b.off or a.many != b.many or a.con != b.con) return false;
         if (a.parts) |pa| {
             const pb = b.parts orelse return false;
             if (pa.len != pb.len) return false;
             for (pa, pb) |x, y| if (!x.eql(y)) return false;
         } else if (b.parts != null) return false;
         return true;
+    }
+
+    /// Nothing but the constants of a value: what is left of it where it does not exist.
+    pub fn onlyCons(v: Val, arena: Allocator) Allocator.Error!Val {
+        var out: Val = .{ .con = v.con };
+        if (v.parts) |parts| {
+            const copy = try arena.alloc(Val, parts.len);
+            for (copy, parts) |*slot, part| slot.* = try part.onlyCons(arena);
+            out.parts = copy;
+        }
+        return out;
     }
 
     /// Without the structure: one value holding everything.

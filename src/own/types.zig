@@ -82,10 +82,11 @@ pub const Types = struct {
         return r.kind == .pointer and r.flags.size == .one and r.flags.is_const;
     }
 
-    /// The fields of a struct (or the struct inside an optional or error union), when the pack knows them.
+    /// The fields of a struct or the variants of a union (or those of the one inside an optional or error union), when the
+    /// pack knows them.
     pub fn structFields(t: Types, id: schema.TypeId) ?[]const schema.FieldRec {
         const at = t.payload(id);
-        if (at == .none or t.rec(at).kind != .@"struct" or t.isLinear(at) or t.isAllocator(at)) return null;
+        if (at == .none or (t.rec(at).kind != .@"struct" and t.rec(at).kind != .@"union") or t.isLinear(at) or t.isAllocator(at)) return null;
         const fields = t.pack.fieldsOf(at) orelse return null;
         return if (fields.len == 0) null else fields;
     }

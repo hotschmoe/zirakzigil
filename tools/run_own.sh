@@ -24,7 +24,7 @@ for dir in tests/own tests/own/std; do
     $own --module target=tests/own --expect tests/own/review1.expect $dir/review1.zvp
     $own --module target=tests/own --expect tests/own/stdcode.expect $dir/stdcode.zvp
     $own --module target=tests/own --expect tests/own/switchloop.expect $dir/switchloop.zvp
-    for suite in review2 review2b real fp_zls fp_zls2 fp_zls3 fp_zls4 fp_zls5 fp_zls6 fp_zls7 fp_idioms fp_loops; do
+    for suite in review2 review2b real fp_zls fp_zls2 fp_zls3 fp_zls4 fp_zls5 fp_zls6 fp_zls7 fp_idioms fp_loops fp_tags fp_tags2 review3 review3b; do
         $own --module target=tests/own --expect tests/own/$suite.expect $dir/$suite.zvp
     done
 done
@@ -52,11 +52,19 @@ counted() { # PACK FUNCTION PATTERN
 for dir in tests/own tests/own/std; do
     counted $dir/review1.zvp badLinearInList "1 linear values handed to memory it does not follow"
     counted $dir/stdcode.zvp okResizeInPlace "1 resizes by a length it cannot show to be non-zero"
-    counted $dir/review2b.zvp freeBoth "1 functions that assume two pointer parameters of one type do not overlap"
+    counted $dir/review2b.zvp freeBoth "1 functions that end or change memory through two or more pointer parameters"
     counted $dir/review2.zvp badPqSift "1 pointers stale only if a container had no room"
     counted $dir/review2.zvp badPqPopMoves "1 pointers stale only if a container had no room"
 done
 for dir in tests/own tests/own/std; do
     counted $dir/real.zvp lostWidgetChild "[1-9][0-9]* pointers to locals handed to calls"
 done
-counted tests/own/std/real.zvp savedScannerAdvances "[1-9][0-9]* pointers stale only if a container had no room"
+counted tests/own/std/real.zvp savedScannerAdvances "[1-9][0-9]* uses of a pointer that may lead into freed memory"
+
+# Review 3: the frees of elements, a conditional free of a by-value parameter, a site that allocates again and a growth after a
+# reserve of an unread size are not decided; each of these programs is a bug that Debug faults on, and the footer says so.
+for dir in tests/own tests/own/std; do
+    for c in review3.badVarIndex review3.badConstIndex review3.badKeepFirst review3.badPrevBuf review3.badOwnOrFree review3b.badSavedElem review3b.badGrowPast; do
+        counted $dir/${c%%.*}.zvp "${c#*.}" "[1-9][0-9]* ends that may not have happened to the block"
+    done
+done
