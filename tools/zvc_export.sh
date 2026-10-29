@@ -5,6 +5,8 @@
 # functions to export. Without --only, every pub function of the file. The file's imports of other
 # modules must be named after the dependency: `zv` is src/zv.zig. `--dep NAME=FILE.zig` adds a module of that name
 # (it may import `zv` too), for a file that imports a sibling the way a build.zig would wire it.
+# ZV_AIR_STD=1 also exports std, cut down to what the project reaches (zv-air slice): the checker then reads the
+# bodies of std's containers instead of a table.
 # The compiler is zig-zv (tools/build_zig_zv.sh): ZIG_ZV, else compiler/.work/zig-src/zig-out/bin/zig-zv.
 set -eu
 
@@ -68,4 +70,10 @@ ZV_AIR_OUT=$index "$zv" test -fno-emit-bin -target "$target" -mcpu baseline $lib
     -Mzv_options="$work/zv_options.zig"
 pack=$(ls "$index"/*.zvp)
 cp "$pack" "$out/$stem.zvp"
+# With the library in the pack (ZV_AIR_STD=1), keep the project and the library functions it reaches.
+if [ -n "${ZV_AIR_STD:-}" ]; then
+    cli=$root/zig-out/bin/zv-air
+    [ -f "$cli" ] || [ -f "$cli.exe" ] || (cd "$root" && zig build zv-air)
+    "$cli" slice "$out/$stem.zvp" "$out/$stem.zvp" >/dev/null
+fi
 echo "exported $out/$stem.zvp"
