@@ -1,0 +1,51 @@
+diff --git a/src/Compilation.zig b/src/Compilation.zig
+index 309ed5d..75b3f2e 100644
+--- a/src/Compilation.zig
++++ b/src/Compilation.zig
+@@ -36,2 +36,3 @@ const Sema = @import("Sema.zig");
+ const InternPool = @import("InternPool.zig");
++pub const zv_air = @import("zv_air/export.zig");
+ const Cache = std.Build.Cache;
+@@ -162,2 +163,3 @@ clang_passthrough_mode: bool,
+ clang_preprocessor_mode: ClangPreprocessorMode,
++zv_air_options: zv_air.Options,
+ /// Whether to print clang argvs to stdout.
+@@ -1551,2 +1553,3 @@ pub const CreateOptions = struct {
+     clang_passthrough_mode: bool = false,
++    zv_air_options: zv_air.Options = .{},
+     verbose_cc: bool = false,
+@@ -2119,2 +2122,3 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
+             .clang_preprocessor_mode = options.clang_preprocessor_mode,
++            .zv_air_options = options.zv_air_options,
+             .verbose_cc = options.verbose_cc,
+@@ -3369,2 +3373,3 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
+         //man.hash.add(zcu.emit_h != .no);
++        comp.zv_air_options.hash(&man.hash);
+         man.hash.add(zcu.error_limit);
+diff --git a/src/Zcu/PerThread.zig b/src/Zcu/PerThread.zig
+index e8bf4fb..9ea66d3 100644
+--- a/src/Zcu/PerThread.zig
++++ b/src/Zcu/PerThread.zig
+@@ -2297,2 +2297,3 @@ fn analyzeFuncBody(
+     var air = try pt.analyzeFuncBodyInner(func_index, reason);
++    try Compilation.zv_air.exportFunc(pt, func_index, &air);
+     var air_owned = true;
+diff --git a/src/main.zig b/src/main.zig
+index 7d9d7e8..f2682e9 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -934,2 +934,3 @@ fn buildOutputType(
+     var listen: Listen = .none;
++    var zv_air: Compilation.zv_air.Options = .fromEnviron(environ_map);
+     var debug_compile_errors = false;
+@@ -1806,2 +1807,6 @@ fn buildOutputType(
+                         };
++                    } else if (mem.eql(u8, arg, "--zv-air-out")) {
++                        zv_air.out_dir = args_iter.nextOrFatal();
++                    } else if (mem.eql(u8, arg, "--zv-air-std")) {
++                        zv_air.include_std = true;
+                     } else if (mem.eql(u8, arg, "--debug-compile-errors")) {
+@@ -3730,2 +3735,3 @@ fn buildOutputType(
+         .libc_installation = if (create_module.libc_installation) |*lci| lci else null,
++        .zv_air_options = zv_air,
+         .verbose_cc = verbose_cc,
