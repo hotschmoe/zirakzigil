@@ -111,8 +111,8 @@ fn object(m: []const u8, allocator_name: []const u8, end_name: []const u8, reset
 
 /// `zv.Pool` and `zv.Slots`: a handle is a copyable name for a slot; freeing it ends every pointer taken through it.
 fn pool(m: []const u8) Effect {
-    if (std.mem.eql(u8, m, "alloc")) return .handle;
-    if (std.mem.eql(u8, m, "free")) return .free;
+    if (std.mem.eql(u8, m, "alloc") or std.mem.eql(u8, m, "insert")) return .handle;
+    if (std.mem.eql(u8, m, "free") or std.mem.eql(u8, m, "take")) return .free;
     return .none;
 }
 

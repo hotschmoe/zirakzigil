@@ -50,9 +50,14 @@ pub const Summary = struct {
     kills: []const Kill = &.{},
     /// Bit i: the allocation or handle behind parameter i is freed.
     frees: u64 = 0,
+    /// Values that arrive in one parameter and are stored below another one.
+    stores: []const Store = &.{},
 };
 
 pub const Kill = struct { param: u32, path: []const u32, ends: bool };
+
+/// Parameter `from` (or something it points to) is stored at `path` below what parameter `into` points to.
+pub const Store = struct { from: u32, into: u32, path: []const u32 };
 
 /// The result depends on parameter `param` (`stored`: on what was read out of it, not the parameter itself),
 /// at `path` below what it points to.
@@ -257,6 +262,7 @@ const Run = struct {
     /// For the summary: what the function does to what its parameters point into.
     kills: std.ArrayList(Kill) = .empty,
     frees: u64 = 0,
+    stores: std.ArrayList(Store) = .empty,
     ret_refs: std.ArrayList(RetRef) = .empty,
     ret_alloc: bool = false,
     blocks: std.AutoHashMapUnmanaged(u32, *BlockCtx) = .empty,
@@ -324,8 +330,14 @@ const Run = struct {
             .name = try arena.dupe(u8, r.name),
             .diags = diags,
             .stats = r.stats,
-            .summary = .{ .complete = complete, .ret = try r.persistRefs(arena), .ret_alloc = r.ret_alloc, .kills = kills, .frees = r.frees },
+            .summary = .{ .complete = complete, .ret = try r.persistRefs(arena), .ret_alloc = r.ret_alloc, .kills = kills, .frees = r.frees, .stores = try r.persistStores(arena) },
         };
+    }
+
+    fn persistStores(r: *Run, arena: Allocator) Allocator.Error![]const Store {
+        const out = try arena.alloc(Store, r.stores.items.len);
+        for (out, r.stores.items) |*slot, s| slot.* = .{ .from = s.from, .into = s.into, .path = try arena.dupe(u32, s.path) };
+        return out;
     }
 
     fn persistRefs(r: *Run, arena: Allocator) Allocator.Error![]const RetRef {
@@ -442,7 +454,11 @@ const Run = struct {
     }
 
     fn set(r: *Run, inst: *const Inst, val: Val) void {
-        r.vals[inst.id] = val;
+        // A number points nowhere and holds nothing, whatever it was computed from.
+        r.vals[inst.id] = switch (r.ty.kind(inst.ty)) {
+            .int, .bool, .float, .@"enum", .error_set, .comptime_int, .comptime_float, .void, .noreturn, .enum_literal => Val.none,
+            else => val,
+        };
     }
 
     /// A value of type `ty` made of fresh tokens, all of them live.
@@ -476,7 +492,15 @@ const Run = struct {
     // Memory.
 
     fn readPlace(r: *Run, st: *const State, place: PlaceId) Allocator.Error!Val {
-        if (st.mem.get(place)) |v| return v;
+        if (st.mem.get(place)) |v| {
+            // Parts written after the whole was stored are newer than it.
+            var out = v;
+            var it = st.mem.iterator();
+            while (it.next()) |e| {
+                if (e.key_ptr.* != place and r.places.contains(place, e.key_ptr.*)) out = try out.flat().join(r.arena, e.value_ptr.flat());
+            }
+            return out;
+        }
         // Stored whole in an ancestor: project the fields down.
         var path: std.ArrayList(u32) = .empty;
         var at = place;
@@ -640,7 +664,7 @@ const Run = struct {
                 }
                 const local = try r.owner(.local, inst.id, dom.no_place);
                 st.revive(local);
-                r.set(inst, .{ .place = cell, .owners = try Set.single(r.arena, local) });
+                r.set(inst, .{ .place = cell, .owners = try Set.single(r.arena, local), .off = 0 });
             },
             .store, .store_safe => try r.store(inst, st, r.arg(inst, 0), r.arg(inst, 1), r.operandType(r.v.ops(inst)[1])),
             .load => {
@@ -649,11 +673,32 @@ const Run = struct {
                 r.set(inst, try r.load(st, inst, p, inst.ty));
             },
 
-            .ptr_cast, .bit_cast, .bit_cast_safe, .addrspace_cast, .slice_ptr, .array_to_slice, .ptr_add, .ptr_sub, .slice, .ptr_slice_ptr_ptr, .ptr_slice_len_ptr => {
-                if (r.ty.hasPointers(inst.ty) or r.ty.hasTokens(inst.ty)) r.set(inst, r.arg(inst, 0)) else r.set(inst, .none);
+            .ptr_cast, .bit_cast, .bit_cast_safe, .addrspace_cast, .slice_ptr, .array_to_slice, .slice, .ptr_slice_ptr_ptr, .ptr_slice_len_ptr => {
+                if (r.ty.hasPointers(inst.ty) or r.ty.hasTokens(inst.ty)) {
+                    var v = r.arg(inst, 0);
+                    // An offset counts elements: a cast to another element type changes the unit.
+                    if (r.elemType(r.operandType(r.v.ops(inst)[0])) != r.elemType(inst.ty)) v.off = null;
+                    r.set(inst, v);
+                } else r.set(inst, .none);
+            },
+            .ptr_from_int => {
+                // A pointer made of a constant (an undefined or comptime-known address) leads nowhere; one made of a
+                // computed integer has lost where it came from.
+                if (r.v.ops(inst)[0].kind != .constant) return r.unsupported(inst, "a pointer made from an integer", .{});
+                r.set(inst, .none);
+            },
+            .ptr_add, .ptr_sub => {
+                var p = r.arg(inst, 0);
+                const by = r.v.ops(inst)[1];
+                p.off = if (p.off != null and by.kind == .constant and r.v.constant(by).kind == .int) blk: {
+                    const n: i64 = @bitCast(r.v.constant(by).a);
+                    break :blk if (inst.tag == .ptr_add) p.off.? +% n else p.off.? -% n;
+                } else null;
+                r.set(inst, p);
             },
             .slice_elem_ptr, .ptr_elem_ptr => {
                 var p = r.arg(inst, 0);
+                p.off = null;
                 if (p.place) |pl| p.place = try r.places.child(r.arena, pl, dom.elem_step);
                 r.set(inst, p);
             },
@@ -769,6 +814,7 @@ const Run = struct {
             .memcpy, .memmove => {
                 const dst = r.arg(inst, 0);
                 const src = r.arg(inst, 1);
+                if (inst.tag == .memcpy) try r.checkDisjoint(st, inst, dst, src);
                 try r.alive(st, inst, dst, "write");
                 try r.alive(st, inst, src, "read");
                 var content: Val = if (src.place) |pl| (try r.readPlace(st, pl)).flat() else .none;
@@ -800,6 +846,35 @@ const Run = struct {
         }
     }
 
+    /// What a pointer or slice points at, looking through an array to its element.
+    fn elemType(r: *Run, ty: schema.TypeId) schema.TypeId {
+        const pt = r.ty.pointee(ty) orelse return .none;
+        const rec = r.ty.rec(pt);
+        return if (rec.kind == .array) rec.child else pt;
+    }
+
+    /// The number of elements a pointer to a fixed-size array covers; null for a slice or a pointer to one.
+    fn coveredLen(r: *Run, ty: schema.TypeId) ?u64 {
+        const pt = r.ty.pointee(ty) orelse return null;
+        const rec = r.ty.rec(pt);
+        return if (rec.kind == .array) rec.len else null;
+    }
+
+    /// `@memcpy` needs disjoint memory. Two ranges of one array whose offsets and sizes are constants are known to be
+    /// disjoint or not; anything dynamic is left to the safety check.
+    fn checkDisjoint(r: *Run, st: *State, inst: *const Inst, dst: Val, src: Val) Error!void {
+        const ops = r.v.ops(inst);
+        const dp = dst.place orelse return;
+        const sp = src.place orelse return;
+        if (dp != sp) return;
+        const do = dst.off orelse return;
+        const so = src.off orelse return;
+        const dl: i64 = @intCast(r.coveredLen(r.operandType(ops[0])) orelse return);
+        const sl: i64 = @intCast(r.coveredLen(r.operandType(ops[1])) orelse return);
+        if (do < so + sl and so < do + dl)
+            try r.report(st, .alias, inst.loc, &.{}, "the range [{d}, {d}) is copied onto [{d}, {d}) of `{s}`, which overlaps it", .{ so, so + sl, do, do + dl, r.placeName(dp) });
+    }
+
     fn pointeeOf(r: *Run, ptr_ty: schema.TypeId) schema.TypeId {
         return r.ty.pointee(ptr_ty) orelse .none;
     }
@@ -814,6 +889,7 @@ const Run = struct {
         const param_owner = try r.owner(.param, i, dom.no_place);
         if (r.ty.isPointer(inst.ty)) {
             val.place = try r.places.root(r.arena, .param, i);
+            val.off = 0;
             val.owners = try val.owners.with(r.arena, param_owner);
         } else if (r.ty.hasPointers(inst.ty)) {
             val.owners = try val.owners.with(r.arena, param_owner);
@@ -978,6 +1054,7 @@ const Run = struct {
                 r.stats.transfers += 1;
                 try r.sink(st, inst, val, "stored into memory the caller owns", "");
             }
+            try r.noteStores(pl, val);
             try r.writePlace(st, pl, val);
             // A new value in the place of an object (`arena = .init(gpa)`) starts it afresh.
             for (r.owners.items, 0..) |o, id| {
@@ -986,6 +1063,20 @@ const Run = struct {
         } else if (!val.toks.isEmpty()) {
             r.stats.transfers += 1;
             try r.sink(st, inst, val, "stored into memory the checker does not track", "");
+        }
+    }
+
+    /// For the summary: a value that came in through a parameter is stored below another parameter.
+    fn noteStores(r: *Run, into: PlaceId, val: Val) Allocator.Error!void {
+        const root = r.places.rec(into);
+        if (root.kind != .param) return;
+        for (val.owners.ids) |o| {
+            const rec = r.owners.items[o];
+            if (rec.kind != .param or rec.n == root.n) continue;
+            const path = try r.places.path(r.arena, into);
+            var known = false;
+            for (r.stores.items) |q| known = known or (q.from == rec.n and q.into == root.n and std.mem.eql(u32, q.path, path));
+            if (!known) try r.stores.append(r.arena, .{ .from = rec.n, .into = root.n, .path = path });
         }
     }
 
@@ -1021,7 +1112,10 @@ const Run = struct {
         if (r.ty.hasPointers(ty)) {
             // What was stored carries its own owners; a pointer found in memory nobody stored into depends on
             // the storage it was read from, which is not the stack slot or parameter that holds its address.
-            if (ptr.place) |pl| out.owners = try out.owners.with(r.arena, try r.bufferOwner(st, inst.id, pl));
+            // A struct read out of memory is a copy of what was stored: only a pointer or slice itself points into it.
+            if (ptr.place) |pl| if (r.topLevelPointer(ty)) {
+                out.owners = try out.owners.with(r.arena, try r.bufferOwner(st, inst.id, pl));
+            };
             // Memory a container got from an allocator depends on it.
             if (ptr.place) |pl| {
                 var at = pl;
@@ -1207,6 +1301,8 @@ const Run = struct {
                         // a container of std is known to hand out pointers into its buffer.
                         var dep = a;
                         if (holds and effect != .reads) dep.place = null;
+                        // A container method that takes the container by value (`getPtr`) still hands out its buffer.
+                        if (effect == .reads and dep.place == null) dep.place = a.src;
                         owners = try owners.merge(r.arena, try r.dependsOn(st, inst, dep, &.{}, holds));
                     };
                 }
@@ -1297,6 +1393,18 @@ const Run = struct {
             for (k.path) |down| place = try r.places.child(r.arena, place, down);
             const text = try std.fmt.allocPrint(r.arena, "`{s}` {s} `{s}` here", .{ r.callName(inst), if (k.ends) "ends" else "invalidates pointers into", r.placeName(place) });
             try r.killPlace(st, place, k.ends, inst.loc, text);
+        }
+        for (s.stores) |put| {
+            if (put.from >= args.len or put.into >= args.len) continue;
+            const value: Val = .{ .owners = args[put.from].owners };
+            const dst = args[put.into];
+            try r.escapes(st, inst, value, r.isLocalPtr(dst), "stored by the callee into memory that outlives it");
+            if (dst.place) |base| if (r.isLocalPtr(dst)) {
+                var at = base;
+                for (put.path) |down| at = try r.places.child(r.arena, at, down);
+                const old = st.mem.get(at) orelse Val.none;
+                try st.mem.put(r.arena, at, try old.join(r.arena, value));
+            };
         }
         for (args, 0..) |a, i| {
             if (i >= 64 or s.frees & (@as(u64, 1) << @intCast(i)) == 0) continue;
@@ -1399,11 +1507,14 @@ const Run = struct {
     fn storeArgs(r: *Run, st: *State, inst: *const Inst, args: []const Val) Error!void {
         // `appendSlice` and its kin copy the elements, not the slice they are read from.
         const callee = r.callName(inst);
+        // `getOrPut` hands back the slot for the caller to fill in, which is where a key is replaced by an owned copy.
+        if (std.mem.indexOf(u8, callee, "getOrPut") != null) return;
         if (std.mem.indexOf(u8, callee, "Slice") != null or std.mem.indexOf(u8, callee, "NTimes") != null or std.mem.indexOf(u8, callee, "Many") != null) return;
         const self_val = args[0];
         const into_local = r.isLocalPtr(self_val);
         for (args[1..]) |a| {
             try r.escapesInto(st, inst, a, into_local, "stored into a container that outlives it", self_val.place);
+            if (self_val.place) |pl| try r.noteStores(pl, a);
         }
     }
 

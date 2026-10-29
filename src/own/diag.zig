@@ -20,6 +20,8 @@ pub const Kind = enum {
     escape_local,
     /// A pointer into an arena or other region that outlives it.
     escape_region,
+    /// Two ranges of one array that overlap where they must not (`@memcpy`).
+    alias,
     /// A construct outside the supported fragment: the function is neither accepted nor refuted.
     unsupported,
 
@@ -36,6 +38,7 @@ pub const Kind = enum {
             .double_free => "double free",
             .escape_local => "pointer to a local escapes",
             .escape_region => "pointer escapes its region",
+            .alias => "overlapping ranges",
             .unsupported => "outside the supported fragment",
         };
     }
