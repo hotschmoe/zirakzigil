@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Reader for the zig-zv AIR export (schema v1, see docs/phase1.md).
+"""Reader for the JSON form of a zig-zv AIR pack (schema v2, see docs/phase1.md).
 
-Loads every JSON file, validates it against the schema, re-serializes it and
-checks the result is byte-identical to the input (the round-trip gate).
+Loads every JSON file, validates it against the schema (every table reference in range, tag and
+attribute names known, unsupported counts consistent), re-serializes it and checks the result is
+byte-identical to the input (the round-trip gate).
 
 usage: air_read.py PATH... [--pretty] [--list] [--quiet]
   PATH is a .json file or a directory of them. Exit status 1 on any failure.
@@ -10,10 +11,22 @@ usage: air_read.py PATH... [--pretty] [--list] [--quiet]
 import argparse
 import collections
 import json
+import re
 import sys
 from pathlib import Path
 
-SCHEMA = 1
+SCHEMA = 2
+TYPE_KINDS = {
+    "type", "void", "bool", "noreturn", "int", "float", "pointer", "array", "struct", "comptime_float",
+    "comptime_int", "undefined", "null", "optional", "error_union", "error_set", "enum", "union", "fn",
+    "opaque", "frame", "anyframe", "vector", "enum_literal",
+}
+CONST_KINDS = {"undef", "void", "null", "bool", "int", "float", "enum_literal", "enum_tag", "error", "func", "type", "text"}
+BODY_LABELS = {"then", "else", "error", "block", "loop", "inline", "case"}
+ATTR_KINDS = {
+    "index": int, "field": int, "locality": int, "callee": str, "target": int, "order": str, "name": str,
+    "op": str, "success": str, "failure": str, "operation": str, "nav": str, "source": str, "volatile": bool,
+}
 
 
 class SchemaError(Exception):
@@ -37,15 +50,36 @@ def check_keys(obj, where, required, optional=()):
     need(not extra, where, f"unexpected {sorted(extra)}")
 
 
-def check_operand(op, where, ntypes):
+def check_const(op, where, ctx):
+    check_keys(op, where, ["ty", "kind"], ["val"])
+    need(is_int(op["ty"]) and 0 <= op["ty"] < ctx["ntypes"], where, "type out of range")
+    kind = op["kind"]
+    need(kind in CONST_KINDS, where, f"unknown constant kind {kind!r}")
+    if kind in ("undef", "void", "null"):
+        need("val" not in op, where, "unexpected value")
+        return
+    need("val" in op, where, "missing value")
+    val = op["val"]
+    if kind == "bool":
+        need(isinstance(val, bool), where, "bad bool")
+    elif kind == "int":
+        need(is_int(val), where, "bad int")
+    elif kind == "float":
+        need(isinstance(val, str) and re.fullmatch(r"0x[0-9a-f]{16}", val), where, "bad float bits")
+    elif kind == "type":
+        need(is_int(val) and 0 <= val < ctx["ntypes"], where, "type value out of range")
+    else:
+        need(isinstance(val, str), where, "bad string")
+
+
+def check_operand(op, where, ctx):
     if op is None:
         return
-    check_keys(op, where, [], ["inst", "ty", "val"])
+    need(isinstance(op, dict), where, "expected object or null")
     if "inst" in op:
         need(set(op) == {"inst"} and is_int(op["inst"]), where, "bad inst operand")
     else:
-        need(set(op) == {"ty", "val"} and is_int(op["ty"]) and isinstance(op["val"], str), where, "bad const operand")
-        need(0 <= op["ty"] < ntypes, where, "type out of range")
+        check_const(op, where, ctx)
 
 
 def check_insts(insts, where, ctx):
@@ -62,52 +96,64 @@ def check_insts(insts, where, ctx):
             continue
         need(is_int(inst.get("ty")) and 0 <= inst["ty"] < ctx["ntypes"], w, "bad ty")
         for k, op in enumerate(inst.get("operands", [])):
-            check_operand(op, f"{w}.operands[{k}]", ctx["ntypes"])
-            if op and "inst" in op:
-                ctx["refs"].append(op["inst"])
+            check_operand(op, f"{w}.operands[{k}]", ctx)
         for key, v in inst.get("attrs", {}).items():
-            need(isinstance(v, (int, str, bool)), f"{w}.attrs.{key}", "bad attr value")
+            need(key in ATTR_KINDS and isinstance(v, ATTR_KINDS[key]) and (ATTR_KINDS[key] is bool or not isinstance(v, bool)),
+                 f"{w}.attrs.{key}", "bad attribute")
+            if key == "callee":
+                need(v in ctx["callees"], f"{w}.attrs.callee", "unknown callee")
         if "loc" in inst:
             loc = inst["loc"]
             need(isinstance(loc, list) and len(loc) == 3 and all(is_int(x) for x in loc), w, "bad loc")
-            need(loc[0] < ctx["nfiles"], w, "loc file out of range")
+            need(0 <= loc[0] < ctx["nfiles"], w, "loc file out of range")
         for k, body in enumerate(inst.get("bodies", [])):
             bw = f"{w}.bodies[{k}]"
             check_keys(body, bw, ["label", "insts"], ["items", "ranges"])
+            need(body["label"] in BODY_LABELS, bw, "unknown label")
             for item in body.get("items", []):
-                check_operand(item, bw + ".items", ctx["ntypes"])
+                check_operand(item, bw + ".items", ctx)
             for rng in body.get("ranges", []):
                 need(len(rng) == 2, bw, "range needs two bounds")
                 for end in rng:
-                    check_operand(end, bw + ".ranges", ctx["ntypes"])
+                    check_operand(end, bw + ".ranges", ctx)
             check_insts(body["insts"], bw + ".insts", ctx)
 
 
 def validate(doc, where):
-    check_keys(doc, where, [
-        "schema", "zig_version", "fqn", "file", "line", "generic_instance", "params", "ret",
-        "unsupported", "files", "types", "callees", "insts",
-    ])
+    check_keys(doc, where, ["schema", "zig_version", "target", "optimize", "root", "files", "types", "callees", "functions"])
     need(doc["schema"] == SCHEMA, where, f"schema {doc['schema']!r}, reader knows {SCHEMA}")
-    need(isinstance(doc["zig_version"], str) and isinstance(doc["fqn"], str), where, "bad strings")
-    need(is_int(doc["line"]) and isinstance(doc["generic_instance"], bool), where, "bad line/generic_instance")
+    for key in ("zig_version", "target", "optimize", "root"):
+        need(isinstance(doc[key], str), where, f"bad {key}")
     for f in doc["files"]:
         check_keys(f, where + ".files", ["module", "path"])
-    for t in doc["types"]:
-        check_keys(t, where + ".types", ["name", "kind"])
-    need(0 <= doc["file"] < len(doc["files"]), where, "file out of range")
-    need(0 <= doc["ret"] < len(doc["types"]), where, "ret out of range")
-    for p in doc["params"]:
-        check_keys(p, where + ".params", ["ty", "zir_index"])
-        need(0 <= p["ty"] < len(doc["types"]), where, "param type out of range")
-    for c in doc["callees"]:
-        check_keys(c, where + ".callees", ["fqn", "inlined"])
+    for i, t in enumerate(doc["types"]):
+        check_keys(t, where + ".types", ["name", "kind"], ["child", "bits", "signed", "len", "size", "const", "volatile", "allowzero"])
+        need(t["kind"] in TYPE_KINDS, where, f"unknown type kind {t['kind']!r}")
+        need("child" not in t or 0 <= t["child"] < i, where, "type child must come first")
+    need(all(isinstance(c, str) for c in doc["callees"]), where, "bad callees")
     ctx = {
-        "ntypes": len(doc["types"]), "nfiles": len(doc["files"]), "refs": [], "insts": 0,
+        "ntypes": len(doc["types"]), "nfiles": len(doc["files"]), "callees": set(doc["callees"]), "insts": 0,
         "tags": collections.Counter(), "unsupported": collections.Counter(),
     }
-    check_insts(doc["insts"], where + ".insts", ctx)
-    need(ctx["unsupported"].total() == doc["unsupported"], where, "unsupported count mismatch")
+    previous = None
+    for n, f in enumerate(doc["functions"]):
+        w = f"{where}.functions[{n}]"
+        check_keys(f, w, ["fqn", "id", "file", "line", "generic_instance", "params", "ret", "unsupported", "callees", "insts"])
+        need(isinstance(f["fqn"], str) and re.fullmatch(r"[0-9a-f]{16}", f["id"]), w, "bad fqn/id")
+        key = (f["fqn"].encode("utf-8"), f["id"])
+        need(previous is None or previous <= key, w, "functions out of order")
+        previous = key
+        need(0 <= f["file"] < len(doc["files"]) and 0 <= f["ret"] < len(doc["types"]), w, "table reference out of range")
+        need(is_int(f["line"]) and isinstance(f["generic_instance"], bool), w, "bad line/generic_instance")
+        for p in f["params"]:
+            check_keys(p, w + ".params", ["ty", "zir_index"])
+            need(0 <= p["ty"] < len(doc["types"]), w, "param type out of range")
+        for c in f["callees"]:
+            check_keys(c, w + ".callees", ["callee", "inlined"])
+            need(0 <= c["callee"] < len(doc["callees"]) and isinstance(c["inlined"], bool), w, "bad callee")
+        before = ctx["unsupported"].total()
+        check_insts(f["insts"], w + ".insts", ctx)
+        need(ctx["unsupported"].total() - before == f["unsupported"], w, "unsupported count mismatch")
     return ctx
 
 
@@ -146,21 +192,23 @@ def main():
         except (SchemaError, json.JSONDecodeError) as e:
             failures.append(f"{path}: {e}")
             continue
-        total["functions"] += 1
+        total["packs"] += 1
+        total["functions"] += len(doc["functions"])
         total["instructions"] += ctx["insts"]
-        total["generic_instances"] += doc["generic_instance"]
+        total["generic_instances"] += sum(f["generic_instance"] for f in doc["functions"])
         tags.update(ctx["tags"])
         unsupported.update(ctx["unsupported"])
         if args.pretty:
             print(dumps(doc, True))
         if args.list:
-            callees = sorted({c["fqn"] for c in doc["callees"]})
-            print(f"{doc['fqn']}\t{ctx['insts']} insts\tcalls: {', '.join(callees) or '-'}")
+            for f in doc["functions"]:
+                callees = sorted({doc["callees"][c["callee"]] for c in f["callees"]})
+                print(f"{f['fqn']}\t{f['id']}\tcalls: {', '.join(callees) or '-'}")
 
     for f in failures:
         print("FAIL", f, file=sys.stderr)
     if not args.quiet:
-        print(f"functions {total['functions']}  instructions {total['instructions']}  "
+        print(f"packs {total['packs']}  functions {total['functions']}  instructions {total['instructions']}  "
               f"generic instances {total['generic_instances']}  distinct tags {len(tags)}  "
               f"unsupported {unsupported.total()} {dict(unsupported) or ''}  "
               f"round-trip {'FAIL' if failures else 'pass'} ({len(failures)} failures)")
