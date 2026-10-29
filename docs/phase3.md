@@ -108,6 +108,8 @@ Kinds: `.invalidates`, `.ends`, `.resets`, `.releases`, `.reads`, `.handle`, `.f
 - A pointer to a local stored into a container that outlives the call is only an escape if it is still there when the function returns: `put(&ctx)` followed by `remove` is the registry-for-the-duration-of-a-call idiom, and a `try` that failed stored nothing.
 - A call through a function pointer is a call to a function nothing is known of; it is counted in the assumptions, not refused.
 - `reset` ends what the arena handed out, not the arena; a second `reset` is not a use after deinit.
+- An element read out of an array or slice is one of many: an allocation site names all of them, so freeing it does not say the next one is freed (a loop that cancels `handles[k]` for some k).
+- A callee is assumed to have freed a parameter only if it frees it on every path that returns; `isLive` is a question about a handle, not a use of it; a number read out of a stale handle is data.
 
 ### What is not followed (printed at the end of every run, never silent)
 
@@ -120,7 +122,7 @@ Kinds: `.invalidates`, `.ends`, `.resets`, `.releases`, `.reads`, `.handle`, `.f
 
 ### Running it on code that is not a test (false positives found and removed)
 
-The first run over `src/air`, `src/zvc` and `src/own` of this repository (612 functions of real, allocator-heavy Zig, exported with `ZVC_DEEP=1 tools/zvc_export.sh`) reported 23 findings and 9 unproven functions; every finding was a false positive (one was the registry idiom, which the code does on purpose and which is now recognized), and the changes above removed them. After them: 0 findings, 0 unproven on all 612, and `tests/own/memory.zig` still reports its 46 seeded mistakes (80 cases pinned in `tests/own/memory.expect`).
+The first run over `src/air`, `src/zvc` and `src/own` of this repository (about 520 functions of real, allocator-heavy Zig, exported with `ZVC_DEEP=1 tools/zvc_export.sh`) reported 23 findings and 9 unproven functions; every finding was a false positive (one was the registry idiom, which the code does on purpose and which is now recognized), and the changes above removed them. After them: 0 findings, 0 unproven on all of them, and `tests/own/memory.zig` still reports its 46 seeded mistakes (80 cases pinned in `tests/own/memory.expect`).
 
 ## M3: the gate
 
@@ -175,15 +177,15 @@ Correct code, which must stay clean:
 | Code | Functions | Findings | Unproven |
 | --- | --- | --- | --- |
 | `tests/own`: the correct cases (`ok*`) and the idiomatic allocator-heavy program `realish.zig` (lexer, parser, interning, LRU, writer) | about 90 | 0 | 0 |
-| this repository: `src/air`, `src/zvc`, `src/own`, `examples/` | about 650 | 0 | 0 |
-| zmoltcp 0.5.3, production code with its generics instantiated | 1960 | 0 | 0 |
-| zmoltcp 0.5.3 as `zig build test` reaches it, tests and laws included | 5297 | 1 (the law that a stale DNS handle is rejected, which cancels a query twice on purpose: a true positive in test code) | 0 |
+| this repository: `src/air`, `src/zvc`, `src/own`, `examples/` | 540 | 0 | 0 |
+| zmoltcp 0.5.3, production code with its generics instantiated (`own/zmoltcp.zvp`) | 986 | 0 | 0 |
+| zmoltcp 0.5.3 as `zig build test` reaches it, tests and laws included | 5297 | 0 | 0 |
 
-During development the same code produced about 40 false positives and 9 unproven functions before the precision decisions above were made; each is recorded there. The final false-positive rate on about 7,000 functions of code written without the checker is 0, with the usual caveat that the checker was shaped by that code; the seeded cases were written before the rules they exercise and none was edited to pass.
+During development the same code produced about 40 false positives and 9 unproven functions before the precision decisions above were made; each is recorded there. The final false-positive rate on about 6,900 function checks of code written without the checker (zmoltcp counted twice) is 0, with the usual caveat that the checker was shaped by that code; the seeded cases were written before the rules they exercise and none was edited to pass.
 
 Annotation burden: zero lines in all of the above, except the one-line manifest of `tests/own/registry.zig`. zmoltcp, which has no allocator at all and takes every buffer from its caller, needed none and gets no findings; the interesting surface there is the DNS socket's `zv.Slots` handles and the lending of local buffers to sockets, both in the corpus.
 
-Cost: `zv-own` checks the 1960 production functions of zmoltcp in 0.3 s and the 5297 reached by its tests in 1.9 s (Debug build of the checker, Windows).
+Cost: `zv-own` checks the 986 production functions of zmoltcp in 0.3 s and the 5297 reached by its tests in 1.9 s (Debug build of the checker, Windows).
 
 ### Assumptions the verdict rests on (printed with every run)
 

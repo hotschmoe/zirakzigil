@@ -360,7 +360,7 @@ The stack cannot make Zig safe by default the way Rust is. It can make every fun
 
 **Open research questions worth an experiment each.**
 
-1. Can `zv-own` infer most ownership annotations from allocator flow (who received the allocator that produced this slice) so contributors write almost none? **Answered in Phase 3 (`docs/phase3.md`): yes.** Allocator flow, std containers, `zv.Pool` and `zv.Slots`, and function summaries read from the packs need no annotation; 92 seeded mistakes and about 7,000 functions of real code needed one manifest line in total (a project type with its own invalidation rule). The cost is two documented limits: what a container holds is not followed, and a rule the checker was not told is not known.
+1. Can `zv-own` infer most ownership annotations from allocator flow (who received the allocator that produced this slice) so contributors write almost none? **Answered in Phase 3 (`docs/phase3.md`): yes.** Allocator flow, std containers, `zv.Pool` and `zv.Slots`, and function summaries read from the packs need no annotation; 92 seeded mistakes and about 6,900 function checks of real code needed one manifest line in total (a project type with its own invalidation rule). The cost is two documented limits: what a container holds is not followed, and a rule the checker was not told is not known.
 2. How much of AIR's structured control flow survives into a clean weakest-precondition encoding, especially `errdefer` and error unions?
 3. Can comptime-generated code (generic containers) be verified once per generic, or does it need verification per instantiation, as AIR suggests?
 4. What fraction of a real Zig codebase (TigerBeetle-style or one of ours) lands in each assurance level after a month of use?

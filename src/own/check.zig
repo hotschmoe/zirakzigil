@@ -701,6 +701,7 @@ const Run = struct {
             .slice_elem_ptr, .ptr_elem_ptr => {
                 var p = r.arg(inst, 0);
                 p.off = null;
+                p.many = true;
                 if (p.place) |pl| p.place = try r.places.child(r.arena, pl, dom.elem_step);
                 r.set(inst, p);
             },
@@ -753,6 +754,7 @@ const Run = struct {
                 if (inst.tag == .array_elem_val) {
                     var v = base.flat();
                     v.place = null;
+                    v.many = true;
                     r.set(inst, v);
                 } else {
                     var p = base;
@@ -1134,6 +1136,7 @@ const Run = struct {
                 }
             }
         }
+        if (ptr.many or (ptr.place != null and r.places.hasElem(ptr.place.?))) out.many = true;
         // A number read out of a stale handle is data, not a use of what the handle names.
         switch (r.ty.kind(ty)) {
             .int, .bool, .float, .@"enum", .error_set => return Val.none,
@@ -1489,6 +1492,8 @@ const Run = struct {
 
     /// `free(x)`: the allocations `x` points into end; a second free is a finding.
     fn freeAllocations(r: *Run, st: *State, inst: *const Inst, val: Val, what: []const u8) Error!void {
+        // One of many (an element read out of an array): the site names them all, and only one was freed.
+        if (val.many) return;
         for (val.owners.ids) |o| {
             const rec = r.owners.items[o];
             switch (rec.kind) {
