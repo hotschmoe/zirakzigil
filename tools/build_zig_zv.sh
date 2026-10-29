@@ -1,7 +1,10 @@
 #!/bin/sh
-# Builds zig-zv: upstream Zig at the pinned tag, plus compiler/src/zv_air and compiler/hook.patch.
+# Builds zig-zv: upstream Zig at the pinned tag, plus compiler/src/zv_air and the hook that
+# tools/zv_hook.zig inserts from compiler/hook/rules.zon.
 #   tools/build_zig_zv.sh          patched compiler -> compiler/.work/zig-src/zig-out/bin/zig-zv
 #   ZV_STOCK=1 tools/build_zig_zv.sh   unpatched, same build flags -> compiler/.work/zig-stock/zig-out/bin/zig-stock
+#   ZV_DEBUG_AIR=1 tools/build_zig_zv.sh   patched, plus -Ddebug-extensions (--verbose-air, the oracle for
+#                                      tools/air_oracle.py) -> compiler/.work/zig-air/zig-out/bin/zig-zv-air
 # ZV_ZIG_UPSTREAM overrides the clone source (a URL or a local path); ZIG selects the host zig;
 # ZV_WORK moves the working directory (default compiler/.work; use a native filesystem under WSL).
 # ZV_ZIG_REF builds another upstream ref (branch, tag or commit hash) instead of the pin; the commit and
@@ -16,9 +19,14 @@ tag=$(awk '$1 == "tag" { print $2 }' "$compiler/ZIG_VERSION")
 commit=$(awk '$1 == "commit" { print $2 }' "$compiler/ZIG_VERSION")
 ref=${ZV_ZIG_REF:-$tag}
 
+flags=
 if [ "${ZV_STOCK:-0}" = 1 ]; then
     name=zig-stock
     out=zig-stock
+elif [ "${ZV_DEBUG_AIR:-0}" = 1 ]; then
+    name=zig-air
+    out=zig-zv-air
+    flags=-Ddebug-extensions=true
 else
     name=zig-src
     out=zig-zv
@@ -49,9 +57,12 @@ fi
 git reset --quiet --hard "$commit"
 git clean --quiet -fd -e zig-out -e .zig-cache
 
-if [ "$name" = zig-src ]; then
+if [ "$name" != zig-stock ]; then
     cp -R "$compiler/src/zv_air" src/zv_air
-    git apply "$compiler/hook.patch"
+    # Loud on drift: every anchor must match exactly once, or nothing is written.
+    hook="$host_zig run $root/tools/zv_hook.zig --"
+    $hook apply "$compiler/hook/rules.zon" .
+    $hook verify "$compiler/hook/rules.zon" .
 fi
 
 # Upstream declares an 8 GB RSS bound for the compiler step, and this step peaks just above it on
@@ -60,7 +71,7 @@ fi
 # passes the checks below. Any other error fails the script.
 log=$work/$name.build.log
 status=0
-"$host_zig" build -Dno-lib -Denable-llvm=false -Doptimize=ReleaseFast >"$log" 2>&1 || status=$?
+"$host_zig" build -Dno-lib -Denable-llvm=false -Doptimize=ReleaseFast $flags >"$log" 2>&1 || status=$?
 cat "$log"
 if [ "$status" -ne 0 ]; then
     others=$(grep '^error:' "$log" | grep -v 'memory usage peaked at .* exceeding the declared upper bound' | grep -v 'the following build command' || true)
@@ -80,8 +91,9 @@ if [ "$ref" = "$tag" ]; then
     [ "$("$bin" version)" = "$tag" ] || { echo "error: $bin does not report version $tag" >&2; exit 1; }
 fi
 
-if [ "$name" = zig-src ]; then
-    # Smoke test: the patched compiler must export one function for a trivial program.
+if [ "$name" != zig-stock ]; then
+    # Smoke test: one function exported directly and through the cache, where a hit after deleting
+    # the output directory must restore it.
     smoke=$work/smoke
     rm -rf "$smoke"
     mkdir -p "$smoke"
@@ -89,7 +101,12 @@ if [ "$name" = zig-src ]; then
     return 42;
 }
 ' >"$smoke/answer.zig"
-    "$bin" build-obj -fno-emit-bin --zv-air-out "$smoke/out" "$smoke/answer.zig"
-    ls "$smoke"/out/answer.*.json >/dev/null 2>&1 || { echo "error: smoke export produced no JSON" >&2; exit 1; }
+    (cd "$smoke" && ZV_AIR_OUT=direct "$tree/$bin" build-obj -fno-emit-bin answer.zig)
+    ls "$smoke"/direct/answer.*.json >/dev/null 2>&1 || { echo "error: smoke export produced no JSON" >&2; exit 1; }
+    for run in miss hit; do
+        rm -rf "$smoke/cached"
+        (cd "$smoke" && ZV_AIR_OUT=cached "$tree/$bin" build-obj --cache-dir cache answer.zig)
+        ls "$smoke"/cached/answer.*.json >/dev/null 2>&1 || { echo "error: smoke cache $run produced no JSON" >&2; exit 1; }
+    done
 fi
 echo "built $tree/$bin"

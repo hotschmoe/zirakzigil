@@ -72,6 +72,13 @@ pub fn isToolchain(zcu: *Zcu, func_index: InternPool.Index) bool {
     return mod == zcu.std_mod or mod.root.root == .zig_lib;
 }
 
+/// Whether the function is in the project's build script, which `zig build` compiles only when its
+/// configuration cache misses, so exporting it would make the export depend on that cache.
+pub fn isBuildScript(zcu: *Zcu, func_index: InternPool.Index) bool {
+    const func = zcu.funcInfo(func_index);
+    return zcu.root_mod.deps.get("@build") == zcu.navFileScope(func.owner_nav).mod;
+}
+
 /// Builds the view of `air`. Everything is allocated from `arena`.
 pub fn view(arena: Allocator, zcu: *Zcu, func_index: InternPool.Index, air: *const Air) Error!Function {
     const ip = &zcu.intern_pool;
@@ -365,7 +372,11 @@ const Ctx = struct {
                 try a.ops(&.{extra.field_ptr});
                 try a.int("field", extra.field_index);
             },
-            .mul_add, .select => {
+            .mul_add => {
+                const extra = air.extraData(Air.Bin, data.pl_op.payload).data;
+                try a.ops(&.{ extra.lhs, extra.rhs, data.pl_op.operand });
+            },
+            .select => {
                 const extra = air.extraData(Air.Bin, data.pl_op.payload).data;
                 try a.ops(&.{ data.pl_op.operand, extra.lhs, extra.rhs });
             },

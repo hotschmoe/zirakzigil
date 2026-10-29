@@ -1,5 +1,5 @@
 //! Root for exporting a file whose functions are not all reachable from its tests:
-//!   zig-zv test -fno-emit-bin --zv-air-out DIR --dep target -Mroot=tools/air_all.zig -Mtarget=FILE.zig
+//!   ZV_AIR_OUT=DIR zig-zv test -fno-emit-bin --dep target -Mroot=tools/air_all.zig -Mtarget=FILE.zig
 //! Taking the address of every pub function as a runtime value makes the compiler analyze its body.
 const std = @import("std");
 const target = @import("target");
