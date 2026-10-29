@@ -26,7 +26,7 @@ Zig gives explicit *mechanics* (allocators, control flow, error handling) but no
 | **B. Refinement and brand types** `zv.Ranged`, `zv.Pool(..., struct {})` | Overflow in ranged arithmetic, out-of-range values, cross-pool handle mixups, unsafe narrowing | Built |
 | **C. Runtime ownership backstops** `zv.Linear`, generational handles (`zv.Pool`, and `zv.Slots` over borrowed storage), `zv.PinCheck` | Double consume, use-after-free via stale handle, copied self-referential structs, leaks | Built |
 | **D. Static ownership checker** `zv-own` (over AIR) | The bugs in C, at compile time, plus region escapes and pointer invalidation | Designed |
-| **E. Deductive verifier** `zvc` (Verus-style, Z3) | Functional correctness and absence of every safety panic | Spike, on a source subset |
+| **E. Deductive verifier** `zvc` (Verus-style, Z3) | Functional correctness and absence of every safety panic | Phase 2: reads AIR packs, bit-precise, Z3 over a pipe |
 | **F. C backend + CBMC** | Panic-freedom of bounded proof harnesses | C emission tested, checker not wired |
 | **H. Governance** assurance manifest + laws | Silent erosion of guarantees by contributors | Built |
 
@@ -89,7 +89,8 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 | `tests/should_panic/` | Contributor mistakes that must panic in safe builds |
 | `tests/compile_fail/cases.txt` | Contributor mistakes that must be rejected at compile time |
 | `tests/baseline/` | The same mistakes in plain Zig, showing what the stock compiler does with them |
-| `tools/zvc.py` | Static verifier spike: proves `.verified` functions with Z3 |
+| `src/zvc/` | The verifier: reads AIR packs (`zv_air`), derives verification conditions, discharges them with Z3 over a pipe (`docs/phase2.md`) |
+| `tools/zvc_export.sh`, `tools/run_zvc.sh`, `tools/install_z3.sh` | Export a file's AIR pack, run the zvc suite (`tests/zvc/`: pinned packs and verdicts), install the pinned Z3 |
 | `tools/run_negative.sh` | Runs the should-panic and compile-fail suites |
 | `tools/run_baseline.sh` | Runs the plain-Zig controls in three build modes |
 | `docs/design.md` | Design document |
@@ -97,7 +98,7 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 
 ## Running it
 
-Requires **Zig 0.17.0** (pinned in `build.zig.zon`), and Python 3 with `z3-solver` for the verifier.
+Requires **Zig 0.17.0** (pinned in `build.zig.zon`), and Z3 for the verifier (`tools/install_z3.sh DEST` installs the pinned release; `zvc` finds it through `ZV_Z3` or `PATH`).
 
 ```sh
 zig build test                          # unit, example and law tests, freestanding cross-compile, tests/consumer
@@ -110,8 +111,7 @@ zig build test --fuzz                   # laws under the real fuzzer (Linux/macO
 zig build test --fuzz=100K              # the same, stopping after 100K iterations (what CI runs)
 ./tools/run_negative.sh                 # 6 must-fail + 36 must-not-compile cases
 ./tools/run_baseline.sh                 # the same bugs in plain Zig (about 1.5 min)
-pip install z3-solver
-python3 tools/zvc.py examples/search.zig   # expect 4 verified, 2 rejected, exit code 1
+tools/run_zvc.sh                        # the verifier against its pinned AIR packs and verdicts (needs Z3)
 ```
 
 To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, `zirakzigil.addAssuranceGate` for the Phase 0 gate (a root module and the names of your law and scenario files). Your own `zig build matrix` is one call to `zirakzigil.addTestMatrix`; see "Build matrix" there.
@@ -124,17 +124,17 @@ To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.
 | Must panic: double consume, stale handle, pinned copy, violated precondition, parser law with an unguarded read, a falsified stateful law (must print a pasteable pinned entry) | 6/6 |
 | Must not compile: the original 6 plus 15 manifest rules (type constructors, methods, re-exports, foreign types, witnesses, typos, stale entries), 13 malformed `pinned` entries and 2 slot-brand mixups | 36/36 |
 | Plain-Zig controls | 9/9 behave as documented: 5 silent in every mode, 4 caught only at runtime in safe builds |
-| `zvc examples/search.zig` | 6 functions in ~0.6 s: 4 verified, 2 planted bugs rejected with counterexamples |
+| `tools/run_zvc.sh` | `examples/search.zig` from AIR in 0.8 s: 4 proved, 2 planted bugs refuted with counterexamples; 32 pinned cases of the verifier itself |
 
 The prototype was first built on Zig 0.16.0. Porting it to 0.17 took four mechanical changes: `**` array repetition became `@splat`, `StaticBitSet.initEmpty()` became `.empty`, `@typeInfo(T).@"struct"` exposes `decl_names` / `field_names` / `field_types` in place of `decls` / `fields`, and `@intFromEnum` became `@backingInt`. None of them touched the design. Only layers that read compiler internals (AIR) will need real rework per release.
 
 ### What `zvc` understands today
 
-Integer and bool parameters, `[]const T` slices, `const`/`var`, assignment and `+= -= *=`, `if`/`else`, `while` with a leading `zv.invariant`, `return` with `zv.ensures`, `+ - * / %`, comparisons, `and`/`or`/`!`, `xs[i]`, `xs.len`, `@as` widening. Anything else is reported **UNPROVEN**, never silently accepted. Termination is not checked and calls are not yet modular.
+Integers of any width, bool, slices and arrays of integers, optionals, structs by value, locals in memory cells, `if`, `while` and `for` (loops are cut at `zv.invariant`), arithmetic, bit and shift operations, casts, and the safety checks Zig inserts (overflow, bounds, division, unwrap, `unreachable`, `@panic`). Anything else is reported **UNPROVEN** with its position and the reason, never silently accepted. Termination is not checked yet and calls are not yet modular. Details in [`docs/phase2.md`](docs/phase2.md).
 
 ## Limits, honestly
 
-- `zvc` parses a source subset, not Zig's AIR. Generics, comptime-dependent code, calls, structs and pointers are out of scope for now.
+- `zvc` proves partial correctness over a fragment of AIR: calls between functions, termination, ghost integers and sequences, and pointers other than to locals are not covered yet, and a counterexample that passes through a loop cut by its invariant may not be a real execution.
 - Ownership is enforced only at runtime. The static checker `zv-own` is designed but not built.
 - The `Linear` ledger is a fixed 16K-slot global with no thread safety. It is fine for tests, not for production.
 

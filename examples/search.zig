@@ -1,7 +1,7 @@
 //! Functions written as ordinary Zig with zv contracts.
 //! - `zig build test` runs them with runtime contract checks.
-//! - `python3 tools/zvc.py examples/search.zig` proves the `.verified` ones
-//!   statically: contracts, absence of overflow panics, and in-bounds indexing.
+//! - `tools/run_zvc.sh` proves the `.verified` ones statically from their AIR: contracts, absence of
+//!   overflow panics, and in-bounds indexing.
 
 const std = @import("std");
 const zv = @import("zv");
@@ -75,7 +75,7 @@ pub fn clampedAdd(a: u32, b: u32, cap: u32) u32 {
     return zv.ensures(r, r <= cap);
 }
 
-/// Runtime-checked only (not in zvc's subset: it uses a Ranged type).
+/// Runtime-checked only (zvc reports it unproven: it uses a Ranged type).
 pub fn scale(x: zv.Ranged(0, 1000), k: zv.Ranged(0, 50)) zv.MulResult(zv.Ranged(0, 1000), zv.Ranged(0, 50)) {
     return zv.mul(x, k); // result type is Ranged(0, 50000): no overflow by construction
 }

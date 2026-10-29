@@ -148,7 +148,7 @@ We explored nine vectors. None alone replaces the borrow checker; four of them s
 | B. Comptime refinement and brand types | Overflow in ranged arithmetic, out-of-range literals, cross-pool handle mixups, narrowing | Low: just types | Days | **Built** |
 | C. Runtime ownership backstops | Double consume, use-after-free via stale handle, copied self-referential structs, leaks | None beyond using the types | Days | **Built** |
 | D. Static ownership checker over AIR (`zv-own`) | The same bugs as C, at compile time, plus region escapes and pointer invalidation | Medium: signatures carry ownership | Months | Designed |
-| E. Deductive verifier, Verus-style (`zvc`) | Functional correctness and absence of every safety panic | High for authors of verified code; low for callers | Months to a year | **Spike built** on a source subset |
+| E. Deductive verifier, Verus-style (`zvc`) | Functional correctness and absence of every safety panic | High for authors of verified code; low for callers | Months to a year | **Phase 2**: on AIR, bit-precise, Z3 over a pipe ([phase2.md](phase2.md)) |
 | F. C backend plus CBMC/ESBMC | Panic-freedom of bounded harnesses | Low: harnesses look like tests | Weeks | C emission tested; checker not wired |
 | G. Extraction to Lean or Bend | Deep laws about pure cores | High, but agent-friendly | Months | Designed |
 | H. Governance: manifests, laws, ratchets, proof agents | Silent erosion of guarantees by contributors | Low | Days | **Manifest gate built** |
@@ -295,7 +295,7 @@ The `lowerBound` result is the one that matters for teams: it proves every `xs[m
 
 **What it does not show.**
 
-- `zvc` parses a source subset, not AIR. Generics, comptime-dependent code, calls between verified functions, structs and pointers are outside it and are reported UNPROVEN rather than accepted. Termination is not checked.
+- This result is from the spike, which parsed a source subset. `zvc` now reads AIR ([phase2.md](phase2.md)); what is outside its fragment is reported UNPROVEN rather than accepted.
 - Ownership is enforced only at runtime. The static checker (`zv-own`) is designed, not built.
 - The ledger is a fixed 16K-slot global without thread safety, adequate for tests only.
 
