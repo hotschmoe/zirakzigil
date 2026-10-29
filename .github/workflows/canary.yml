@@ -1,11 +1,16 @@
-name: zig-master canary
+name: zig-zv canary
 
-# Applies compiler/hook.patch and compiler/src/zv_air to upstream Zig master and builds zig-zv,
-# to try the fork against a newer tree before porting to a new release (fork policy, docs/design.md).
-# On demand only: zirakzigil supports one pinned Zig release at a time.
+# Builds zig-zv (with -Ddebug-extensions, for the oracle) and runs the coverage and oracle gate plus the
+# cache scenarios. On demand only: zirakzigil supports one pinned Zig release at a time (docs/design.md).
+# With the defaults it checks the pin. To try a newer tree, set host_zig to a nightly: the tree is then the
+# commit of that nightly, because upstream build.zig needs the host std of the same commit.
 
 on:
   workflow_dispatch:
+    inputs:
+      host_zig:
+        description: Host Zig version (0.17.0 is the pin; master tries the newest tree)
+        default: 0.17.0
 
 permissions:
   contents: read
@@ -19,27 +24,45 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: master
-      # The tree must match the host nightly: upstream build.zig needs the host std of the same commit.
-      - name: Build zig-zv against upstream master
+          version: ${{ inputs.host_zig }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - name: Hook anchors resolve exactly once
+        id: hook
+        run: |
+          set -o pipefail
+          ref=$(zig version | sed -n 's/.*+//p')
+          git clone --quiet --filter=blob:none https://codeberg.org/ziglang/zig.git upstream
+          git -C upstream checkout --quiet "${ref:-$(awk '$1 == "tag" { print $2 }' compiler/ZIG_VERSION)}"
+          zig run tools/zv_hook.zig -- check compiler/hook/rules.zon upstream 2>&1 | tee canary.log
+      - name: Build zig-zv
         id: build
         run: |
           set -o pipefail
-          ZV_ZIG_REF=$(zig version | sed 's/.*+//') sh tools/build_zig_zv.sh 2>&1 | tee canary.log
+          ZV_DEBUG_AIR=1 ZV_ZIG_REF=$(zig version | sed -n 's/.*+//p') sh tools/build_zig_zv.sh 2>&1 | tee -a canary.log
+      - name: Coverage and oracle
+        id: oracle
+        run: |
+          set -o pipefail
+          tools/check_corpus.sh compiler/.work/zig-air/zig-out/bin/zig-zv-air 2>&1 | tee -a canary.log
+      - name: Cache scenarios
+        id: cache
+        run: |
+          set -o pipefail
+          tools/check_cache.sh compiler/.work/zig-air/zig-out/bin/zig-zv-air 2>&1 | tee -a canary.log
       - name: Open an issue on failure
-        if: failure() && steps.build.outcome == 'failure'
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          title="Canary: zig-zv no longer builds against Zig master"
+          title="Canary: zig-zv failed on Zig ${{ inputs.host_zig }}"
           if gh issue list --state open --search "in:title \"$title\"" --json number -q '.[].number' | grep -q .; then
             echo "an open canary issue already exists"
             exit 0
           fi
           {
-            echo "The weekly canary failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "The canary failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
-            echo "Last lines of the build log:"
+            echo "Last lines of the log:"
             echo
             echo '```'
             tail -n 40 canary.log
