@@ -43,6 +43,9 @@ pub const assurance = .{
     .accumulate = .verified,
     .accumulateWrong = .verified,
     .tri = .verified,
+    .highestBit = .verified,
+    .popcountBound = .verified,
+    .trailingZerosWrong = .verified,
 };
 
 // Calls through contracts.
@@ -319,4 +322,22 @@ pub fn tri(x: u8) u8 {
         r = 3;
     }
     return zv.ensures(r, r >= 1 and r <= 3 and (r == 1) == (x < 10));
+}
+
+// Bit counting.
+
+pub fn highestBit(x: u32) u8 {
+    zv.requires(x != 0);
+    const r: u8 = 31 - @as(u8, @clz(x));
+    return zv.ensures(r, r <= 31 and (x >> @intCast(r)) == 1);
+}
+
+pub fn popcountBound(x: u16) u8 {
+    const r: u8 = @popCount(x);
+    return zv.ensures(r, r <= 16 and (x == 0) == (r == 0));
+}
+
+pub fn trailingZerosWrong(x: u32) u8 {
+    const r: u8 = @ctz(x);
+    return zv.ensures(r, r < 32);
 }

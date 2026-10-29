@@ -53,7 +53,10 @@ pub fn discharge(gpa: Allocator, io: Io, arena: Allocator, v: *vc.Vc, opts: Opti
         const key: [2]Term = .{ ob.pc, ob.goal };
         if ((try seen.getOrPut(arena, key)).found_existing) continue;
         out.obligations += 1;
-        switch (try session.refute(arena, v.pool, ob.pc, ob.goal)) {
+        const asked = Io.Clock.awake.now(io);
+        const verdict = try session.refute(arena, v.pool, ob.pc, ob.goal);
+        if (opts.trace) |t| try t.print(";; {t} after {d} ms: {s}\n", .{ verdict, @divTrunc(asked.untilNow(io, .awake).toNanoseconds(), std.time.ns_per_ms), ob.text });
+        switch (verdict) {
             .unsat => try session.done(),
             .unknown => {
                 try session.done();
@@ -150,8 +153,8 @@ fn counterexample(arena: Allocator, session: *smt.Session, v: *vc.Vc, ob: vc.Obl
     return .{ .inputs = inputs.items, .locals = locals.items };
 }
 
-/// Prefers the plainest counterexample: each integer input takes the first of a few simple values
-/// (0, 1, 2, the extremes) that still violates the obligation.
+/// Prefers the plainest counterexample. An unsigned input takes the least value that still violates the
+/// obligation, found by bisection; a signed one the first of 0, 1, 2, 3, -1 and the extremes that does.
 fn shrink(arena: Allocator, session: *smt.Session, v: *vc.Vc) Error!void {
     const pool = v.pool;
     for (v.inputs()) |in| {
@@ -161,12 +164,19 @@ fn shrink(arena: Allocator, session: *smt.Session, v: *vc.Vc) Error!void {
             else => continue,
         };
         const bits = pool.bitsOf(t);
-        const candidates = [_]u256{ 0, 1, 2, 3, term.mask(bits), if (signed) (@as(u256, 1) << @intCast(bits - 1)) - 1 else 0, if (signed) @as(u256, 1) << @intCast(bits - 1) else 0 };
-        for (candidates, 0..) |c, k| {
-            if (k > 3 and in.kind == .slice) break;
-            if (k > 4 and c == 0) continue;
-            if (try session.pin(arena, pool, try pool.eq(t, try pool.bv(bits, c)))) break;
+        if (!signed) {
+            var lo: u256 = 0;
+            var hi: u256 = term.mask(bits);
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (try session.pin(arena, pool, try pool.cmp(.ule, t, try pool.bv(bits, mid)))) hi = mid else lo = mid + 1;
+            }
+            _ = try session.pin(arena, pool, try pool.eq(t, try pool.bv(bits, lo)));
+            continue;
         }
+        const half = @as(u256, 1) << @intCast(bits - 1);
+        const candidates = [_]u256{ 0, 1, 2, 3, term.mask(bits), half - 1, half };
+        for (candidates) |c| if (try session.pin(arena, pool, try pool.eq(t, try pool.bv(bits, c)))) break;
     }
     try session.remodel(arena);
 }

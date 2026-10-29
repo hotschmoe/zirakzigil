@@ -132,6 +132,24 @@ pub fn main(init: std.process.Init) !void {
 
 The step is `zig build assurance`, and it is attached to the default step, so a plain `zig build` reports the gate and fails on a gap. Claims that come from other packages (a dependency's `Slots` handle reached through your re-export, for example) are listed as foreign: their own package gates them. `tests/gate_fail/` is the negative test: a claim no law runs must fail the build and be named.
 
+## Proving `.verified` functions
+
+`.verified` means `zvc` proves the function's contracts and the absence of every safety panic ([phase2.md](phase2.md)). Write the contracts with `zv.requires`, `zv.ensures`, `zv.invariant` and `zv.decreases` (specifications that must not wrap use `zv.Int` behind `zv.ghost`), set the function to `.verified` in the manifest, and:
+
+1. Export its AIR with a zig-zv compiler, in Debug and with ghost code on: `tools/zvc_export.sh verify/ src/root.zig --only wire.checksum --only wire.tcp.SeqNumber`. Each `--only` names a container, as the root sees it, whose pub functions are exported.
+2. Check the pack in with the sources it came from: `verify/PINS` has one `SHA256  PATH` line per source file.
+3. Add the gate to `build.zig` and run it:
+
+```zig
+_ = zirakzigil.addVerifyGate(b, .{
+    .packs = &.{"verify/zmoltcp.zvp"},
+    .pins = "verify/PINS",
+    .src = "src",
+});
+```
+
+`zig build verify` builds `zvc` from this package, finds Z3 (`-Dz3=PATH`, `ZV_Z3` or `PATH`; `tools/install_z3.sh DEST` installs the pinned release) and fails when a `.verified` function is refuted, unproven, or missing from the pack, or when a pinned source changed since the export: a claim cannot outlive the code it was proved of, and a pack is cheap to regenerate but never trusted stale. Stock Zig runs the gate; only exporting needs the patched compiler.
+
 ## Borrowed slots: `zv.Slots`
 
 `zv.Pool` owns comptime-capacity storage and panics on a stale handle, which is right when a stale handle is a bug in the application. A *library* socket has the other contract: the caller hands it a slice of slots (`queries: []QuerySlot`), the capacity is a runtime value, and a stale handle is a normal outcome (the user cancelled, or read the result twice) that must come back as an error. `zv.Slots(T, Brand)` is that building block; `Pool` is unchanged.

@@ -62,6 +62,13 @@ pub inline fn decreases(measure: anytype) void {
     _ = measure;
 }
 
+/// A value that exists only in ghost builds: `T` there, `void` elsewhere. A ghost variable is declared
+/// `var count: zv.Ghost(u64) = if (zv.ghost) 0 else {};` and only touched under `if (zv.ghost)`, so a normal
+/// build neither stores nor computes it.
+pub fn Ghost(comptime T: type) type {
+    return if (ghost) T else void;
+}
+
 /// Ghost integer, for specifications that must not wrap. `zvc` reads it as a mathematical integer; run in a
 /// ghost build it is an `i128` and panics on overflow. It does not exist outside ghost builds, so use it
 /// behind `zv.ghost`: `zv.ensures(r, !zv.ghost or zv.Int.of(r).le(zv.Int.of(x)))`.
