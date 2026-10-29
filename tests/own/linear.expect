@@ -4,7 +4,7 @@ linear.advHiddenInOptional error
 linear.advLoopCarried unproven
 linear.advLoopCarriedLeak unproven
 linear.advStoreThroughPointer clean
-linear.advViaPointer unproven
+linear.advViaPointer error
 linear.badConsumeInLoop error
 linear.badDropParamPair error
 linear.badFieldLeak error

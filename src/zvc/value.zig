@@ -76,9 +76,6 @@ pub const Lazy = struct { base: []const u8, index: u32, value: Value };
 
 pub const error_bits = 16;
 
-/// The printed name of `zv.PointsTo` in a pack.
-pub const token_type = "zv.PointsTo__struct";
-
 /// A symbolic input worth printing in a counterexample.
 pub const Input = struct {
     name: []const u8,
@@ -143,7 +140,7 @@ pub const Ctx = struct {
 
     /// Whether `id` is `zv.PointsTo`: a permission token, linear and built only by its own operations.
     pub fn isToken(c: *const Ctx, id: schema.TypeId) bool {
-        return id != .none and std.mem.eql(u8, c.typeName(id), token_type);
+        return id != .none and std.mem.eql(u8, c.typeName(id), zv_air.tokens.type_name);
     }
 
     pub fn newToken(c: *Ctx) u32 {

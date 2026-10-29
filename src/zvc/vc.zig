@@ -104,10 +104,25 @@ pub const Summary = struct {
     pre: Term,
     post: Term,
     result: Value,
+    /// The pointer parameters whose pointee the function may change.
+    ptrs: []const PtrSummary = &.{},
     /// The callee as the program names it, and whether it is `.trusted`: its contract and its safety are assumed.
     callee: []const u8 = "",
     trusted: bool = false,
 };
+
+/// A pointer-to-struct parameter: the pointee at entry, the pointee at each return as a placeholder (`out`), and which
+/// fields the function may have changed. A field not in `touched` is what the caller had.
+pub const PtrSummary = struct {
+    index: usize,
+    ty: schema.TypeId,
+    entry: Value,
+    out: Value,
+    touched: []const u32,
+    all: bool,
+};
+
+const PtrParam = struct { index: usize, cell: u32, ty: schema.TypeId, entry: Value };
 
 /// How a run finds the summary of a function it calls.
 pub const Hooks = struct {
@@ -159,6 +174,10 @@ pub const Vc = struct {
     unsupported: ?Unsupported = null,
     loc: schema.LocId = .none,
     has_token: std.AutoHashMapUnmanaged(schema.TypeId, bool) = .empty,
+    ptr_params: std.ArrayList(PtrParam) = .empty,
+    /// The last instruction that finished, debug markers aside: a `return` of a constant follows its `zv.ensures`.
+    latest: ?*const Inst = null,
+    arg_cell: std.AutoHashMapUnmanaged(u32, u32) = .empty,
 
     pure: bool = false,
     pure_seen: bool = false,
@@ -229,21 +248,47 @@ pub const Vc = struct {
         };
     }
 
+    /// A single-item pointer to a struct: the one kind of pointer parameter a function may take. The pointee is a
+    /// cell of its own, so the function reads and writes it like a local, and the caller's summary says what changed.
+    fn pointsToStruct(v: *const Vc, ty: schema.TypeId) ?schema.TypeId {
+        const t = v.ctx.typeRec(ty);
+        if (t.kind != .pointer or t.flags.size != .one or t.child == .none) return null;
+        return if (v.ctx.typeRec(t.child).kind == .@"struct") t.child else null;
+    }
+
     fn runInner(v: *Vc) StepError!void {
         const pool = v.pool;
+        const params = v.pack.paramsOf(v.func);
+        for (v.pack.instsOf(v.func.insts)) |*inst| {
+            if (inst.tag != .arg) break;
+            if (v.pointsToStruct(inst.ty) == null) continue;
+            const cell: u32 = @intCast(v.cell_names.items.len);
+            try v.cell_names.append(v.arena(), null);
+            try v.cell_signed.append(v.arena(), false);
+            try v.arg_cell.put(v.arena(), inst.id, cell);
+        }
         var st: State = .{
             .pc = try pool.tru(),
             .cells = try v.arena().alloc(Value, v.cell_names.items.len),
             .names = null,
         };
         @memset(st.cells, .none);
-        const params = v.pack.paramsOf(v.func);
         for (v.pack.instsOf(v.func.insts)) |*inst| {
             if (inst.tag != .arg) break;
             const index = v.attrInt(inst, .index) orelse return v.ctx.unsupported("argument without an index", .{});
             const given = if (index < v.param_names.len) v.param_names[index] else "_";
             const name = if (std.mem.eql(u8, given, "_")) try std.fmt.allocPrint(v.arena(), "arg{d}", .{index}) else given;
             if (index >= params.len or params[index].ty != inst.ty) return v.ctx.unsupported("argument {d} is not a parameter of the declared signature (a comptime parameter)", .{index});
+            if (v.pointsToStruct(inst.ty)) |pointee| {
+                const cell = v.arg_cell.get(inst.id).?;
+                const entry = try v.ctx.symbolic(name, pointee, true);
+                st.cells[cell] = entry;
+                const val: Value = .{ .place = .{ .cell = cell, .path = &.{} } };
+                try v.param_values.append(v.arena(), val);
+                try v.ptr_params.append(v.arena(), .{ .index = index, .cell = cell, .ty = pointee, .entry = entry });
+                v.values[inst.id] = val;
+                continue;
+            }
             const val = try v.ctx.symbolic(name, params[index].ty, true);
             try v.param_values.append(v.arena(), val);
             v.values[inst.id] = val;
@@ -443,6 +488,10 @@ pub const Vc = struct {
         for (body) |*inst| {
             if (!v.alive(st)) return;
             try v.step(inst, st);
+            switch (inst.tag) {
+                .dbg_stmt, .dbg_empty_stmt, .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => {},
+                else => v.latest = inst,
+            }
         }
     }
 
@@ -721,7 +770,12 @@ pub const Vc = struct {
             .ret, .ret_safe => {
                 const val = try v.arg(inst, 0);
                 try v.useTokens(st, val, v.func.ret, false);
-                const site = v.siteOf(v.ops(inst)[0], val);
+                for (v.ptr_params.items) |p| try v.useTokens(st, st.cells[p.cell], p.ty, false);
+                var site = v.siteOf(v.ops(inst)[0], val);
+                // A value the compiler knew (`null`) is a constant operand, not the result of the `zv.ensures` that checked it.
+                if (site == null and v.ops(inst)[0].kind == .constant) if (v.latest) |p| if (p.tag == .dbg_inline_block) if (v.sites.get(p.id)) |s| if (v.sameConstant(s.value, val)) {
+                    site = .{ .ok = s.ok, .value = val };
+                };
                 try v.returns.append(v.arena(), .{ .state = try st.clone(v.arena()), .value = val, .site = site });
                 try v.kill(st);
             },
@@ -764,6 +818,17 @@ pub const Vc = struct {
         return null;
     }
 
+    /// Whether two constants are the same value (a null optional has no payload to compare).
+    fn sameConstant(v: *const Vc, a: Value, b: Value) bool {
+        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+        return switch (a) {
+            .none => true,
+            .scalar => |x| x == b.scalar,
+            .opt => |x| x.has == b.opt.has and (v.pool.isFalse(x.has) or v.sameConstant(x.payload, b.opt.payload)),
+            else => false,
+        };
+    }
+
     fn isConstant(v: *const Vc, val: Value) bool {
         return switch (val) {
             .none => true,
@@ -792,18 +857,13 @@ pub const Vc = struct {
     // again. Its fields are written only inside those operations, so no token is built, changed or copied out of
     // thin air: that is what lets a proof treat two tokens as disjoint memory.
 
-    const token_op_prefix = value.token_type ++ ".";
+    const TokenOp = zv_air.tokens.Op;
 
-    const TokenOp = enum { own, split, join, discard };
-
-    fn tokenOpOf(callee: []const u8) ?TokenOp {
-        if (!std.mem.startsWith(u8, callee, token_op_prefix)) return null;
-        return std.meta.stringToEnum(TokenOp, callee[token_op_prefix.len..]);
-    }
+    const tokenOpOf = zv_air.tokens.opOf;
 
     /// Whether the code being run is the body of an operation of `zv.PointsTo`, the only code that may build a token.
     fn insideTokenOp(v: *const Vc) bool {
-        for (v.inline_names.items) |name| if (std.mem.startsWith(u8, name, token_op_prefix)) return true;
+        for (v.inline_names.items) |name| if (zv_air.tokens.inside(name)) return true;
         return false;
     }
 
@@ -1305,14 +1365,60 @@ pub const Vc = struct {
         if (operands.len != summary.params.len) return v.ctx.unsupported("call to {s} with {d} arguments, expected {d}", .{ callee, operands.len, summary.params.len });
         for (operands) |o| try v.useTokens(st, try v.operand(o), v.operandType(o), true);
         var sub: term.Subst = .{ .pool = pool, .alloc = v.arena() };
-        for (summary.params, operands) |param, o| try v.bind(&sub, param, try v.operand(o), summary.lazy);
+        const PtrCall = struct { s: PtrSummary, place: value.Place, cur: Value };
+        var ptr_calls: std.ArrayList(PtrCall) = .empty;
+        for (summary.ptrs) |s| {
+            const a = try v.operand(operands[s.index]);
+            if (a != .place) return v.ctx.unsupported("a pointer argument that is not the address of a variable", .{});
+            for (ptr_calls.items) |q| if (q.place.cell == a.place.cell and overlap(q.place.path, a.place.path))
+                return v.ctx.unsupported("two pointer arguments to {s} that overlap", .{callee});
+            const cur = try v.read(st.cells[a.place.cell], a.place.path, s.ty);
+            if (cur != .obj) return v.ctx.unsupported("a pointer argument to a struct that was never set", .{});
+            try ptr_calls.append(v.arena(), .{ .s = s, .place = a.place, .cur = cur });
+            // What the callee changes, it was given: its tokens are the callee's, and it puts back the ones it keeps.
+            if (s.all) {
+                try v.useTokens(st, cur, s.ty, true);
+            } else for (s.touched) |f| {
+                const fty = v.fieldType(.{ .index = f, .owner = s.ty }) orelse continue;
+                if (try v.hasToken(fty)) try v.useTokens(st, try v.ctx.field(cur.obj, f, fty), fty, true);
+            }
+            try v.bind(&sub, s.entry, cur, summary.lazy);
+        }
+        for (summary.params, operands) |param, o| {
+            if (param == .place) continue;
+            try v.bind(&sub, param, try v.operand(o), summary.lazy);
+        }
         const result = try v.ctx.havoc("$ret", summary.result);
         try v.bind(&sub, summary.result, result, summary.lazy);
+        const outs = try v.arena().alloc(Value, ptr_calls.items.len);
+        for (outs, ptr_calls.items) |*out, pc| {
+            out.* = try v.ctx.havoc("$out", pc.s.out);
+            try v.bind(&sub, pc.s.out, out.*, summary.lazy);
+        }
         const pre = sub.apply(summary.pre) catch |err| return v.substFailed(err, callee);
         const post = sub.apply(summary.post) catch |err| return v.substFailed(err, callee);
         try v.oblige(st, inst, .precondition, "precondition of {s} may not hold", .{callee}, pre);
         st.pc = try pool.@"and"(st.pc, post);
+        for (outs, ptr_calls.items) |out, pc| {
+            var now = out;
+            if (!pc.s.all) {
+                now = pc.cur;
+                for (pc.s.touched) |f| {
+                    const fty = v.fieldType(.{ .index = f, .owner = pc.s.ty }) orelse continue;
+                    const like = try v.ctx.field(pc.cur.obj, f, fty);
+                    now = try v.ctx.withField(now.obj, f, try v.ctx.fieldShaped(out.obj, f, like));
+                }
+            }
+            st.cells[pc.place.cell] = try v.update(st.cells[pc.place.cell], pc.place.path, now);
+        }
         v.setResult(inst, result);
+    }
+
+    /// Whether one path into a cell is a prefix of the other: the two places share memory.
+    fn overlap(a: []const value.Step, b: []const value.Step) bool {
+        const n = @min(a.len, b.len);
+        for (a[0..n], b[0..n]) |x, y| if (!std.meta.eql(x, y)) return false;
+        return true;
     }
 
     fn substFailed(v: *Vc, err: term.Subst.Error, callee: []const u8) StepError {
@@ -1419,10 +1525,8 @@ pub const Vc = struct {
             try v.inline_names.append(v.arena(), callee);
             defer _ = v.inline_names.pop();
             try v.block(inst, st, body);
-            if (token_op) |op| switch (op) {
-                .split, .join, .discard => for (args[0..n]) |a| try v.useTokens(st, try v.operand(a), v.operandType(a), true),
-                .own => {},
-            };
+            if (token_op) |op| if (zv_air.tokens.consumes(op))
+                for (args[0..n]) |a| try v.useTokens(st, try v.operand(a), v.operandType(a), true);
             return;
         };
         if (v.pure and contract != .invariant and contract != .decreases) return;
@@ -1445,9 +1549,10 @@ pub const Vc = struct {
                 st.pc = try pool.@"and"(st.pc, (try v.operand(args[0])).scalar);
             },
             .ensures => {
-                if (n != 2) return v.ctx.unsupported("zv.ensures with {d} arguments", .{n});
-                const ok = (try v.operand(args[1])).scalar;
-                const val = try v.operand(args[0]);
+                // A void value is not an argument of the inlined call: `zv.ensures({}, ok)` has only the condition.
+                if (n != 2 and n != 1) return v.ctx.unsupported("zv.ensures with {d} arguments", .{n});
+                const ok = (try v.operand(args[n - 1])).scalar;
+                const val: Value = if (n == 2) try v.operand(args[0]) else .none;
                 if (nested) {
                     try v.oblige(st, inst, .postcondition, "postcondition of {s} may not hold", .{v.inline_names.getLast()}, ok);
                 } else {
@@ -1653,27 +1758,37 @@ pub const Vc = struct {
     }
 
     /// Cells written by a store inside `body`, loops included.
-    fn modifiedCells(v: *Vc, body: schema.Body, out: *std.AutoArrayHashMapUnmanaged(u32, void)) Error!void {
+    fn modifiedCells(v: *Vc, st: *const State, body: schema.Body, out: *std.AutoArrayHashMapUnmanaged(u32, void)) Error!void {
         for (v.pack.instsOf(body.insts)) |*i| {
             if (i.tag == .dbg_inline_block) if (v.attrStr(i, .callee)) |callee| if (try v.ghostOp(callee) != null) continue;
             switch (i.tag) {
                 .store, .store_safe => {
-                    const cell = v.cellOf(v.ops(i)[0]) orelse return v.ctx.unsupported("a store through an unknown pointer inside a loop", .{});
+                    const cell = v.cellOf(st, v.ops(i)[0]) orelse return v.ctx.unsupported("a store through an unknown pointer inside a loop", .{});
                     try out.put(v.arena(), cell, {});
                 },
                 .memset, .memset_safe, .memcpy, .memmove => return v.ctx.unsupported("{t} inside a loop", .{i.tag}),
                 else => {},
             }
-            for (v.pack.bodiesOf(i.*)) |b| try v.modifiedCells(b, out);
+            for (v.pack.bodiesOf(i.*)) |b| try v.modifiedCells(st, b, out);
         }
     }
 
-    fn cellOf(v: *Vc, o: schema.Operand) ?u32 {
+    /// The cell a pointer operand points into. A pointer read from a variable (a `*Self` parameter is copied into one) is
+    /// what the variable holds when the loop starts.
+    fn cellOf(v: *Vc, st: *const State, o: schema.Operand) ?u32 {
         var cur = o;
         while (cur.kind == .inst) {
             const i = v.by_id[cur.value] orelse return null;
             switch (i.tag) {
                 .alloc => return v.cell_of.get(i.id),
+                .arg => return v.arg_cell.get(i.id),
+                .load => {
+                    const holder = v.cellOf(st, v.ops(i)[0]) orelse return null;
+                    return switch (st.cells[holder]) {
+                        .place => |pl| pl.cell,
+                        else => null,
+                    };
+                },
                 .struct_field_ptr, .struct_field_ptr_index_0, .struct_field_ptr_index_1, .struct_field_ptr_index_2, .struct_field_ptr_index_3, .ptr_cast, .ptr_slice_len_ptr, .ptr_slice_ptr_ptr, .bit_cast => cur = v.ops(i)[0],
                 else => return null,
             }
@@ -1712,7 +1827,7 @@ pub const Vc = struct {
         if (v.pure) return v.ctx.unsupported("a loop before the head of the enclosing loop", .{});
         const body = v.pack.bodiesOf(inst.*)[0];
         var modified: std.AutoArrayHashMapUnmanaged(u32, void) = .empty;
-        try v.modifiedCells(body, &modified);
+        try v.modifiedCells(st, body, &modified);
 
         const has_head = v.containsHead(body);
         if (has_head) {
@@ -1789,19 +1904,38 @@ pub const Vc = struct {
     pub fn summarize(v: *Vc, name: []const u8) Error!Summary {
         const pool = v.pool;
         const result = try v.ctx.symbolic("$ret", v.func.ret, false);
+        const ptrs = try v.arena().alloc(PtrSummary, v.ptr_params.items.len);
+        for (ptrs, v.ptr_params.items, 0..) |*s, p, k| {
+            const out_name = try std.fmt.allocPrint(v.arena(), "$out{d}", .{k});
+            s.* = .{ .index = p.index, .ty = p.ty, .entry = p.entry, .out = try v.ctx.symbolic(out_name, p.ty, false), .touched = &.{}, .all = false };
+            var touched: std.ArrayList(u32) = .empty;
+            for (v.returns.items) |r| {
+                switch (r.state.cells[p.cell]) {
+                    .obj => |o| if (o.base != null and p.entry == .obj and p.entry.obj.base != null and std.mem.eql(u8, o.base.?, p.entry.obj.base.?)) {
+                        for (o.fields) |f| if (std.mem.indexOfScalar(u32, touched.items, f.index) == null) try touched.append(v.arena(), f.index);
+                    } else {
+                        s.all = true;
+                    },
+                    else => s.all = true,
+                }
+            }
+            s.touched = touched.items;
+        }
         var post = try pool.fls();
         var covered = v.returns.items.len != 0;
         for (v.returns.items) |r| {
+            var outs = try pool.tru();
+            for (ptrs, v.ptr_params.items) |s, p| outs = try pool.@"and"(outs, try v.agrees(s.out, r.state.cells[p.cell]));
             const site = r.site orelse {
                 if (!v.isConstant(r.value)) {
                     covered = false;
                     break;
                 }
-                post = try pool.@"or"(post, try v.agrees(result, r.value));
+                post = try pool.@"or"(post, try pool.@"and"(try v.agrees(result, r.value), outs));
                 continue;
             };
             const matches = try v.agrees(result, site.value);
-            post = try pool.@"or"(post, try pool.@"and"(matches, site.ok));
+            post = try pool.@"or"(post, try pool.@"and"(try pool.@"and"(matches, outs), site.ok));
         }
         return .{
             .name = name,
@@ -1810,6 +1944,7 @@ pub const Vc = struct {
             .pre = v.pre,
             .post = if (covered) post else try pool.tru(),
             .result = result,
+            .ptrs = ptrs,
         };
     }
 

@@ -19,6 +19,7 @@ $zvc --src tests/zvc --expect tests/zvc/soundness3.expect tests/zvc/soundness3.z
 # allocator is proved in full. Its obligations are 64-bit arithmetic over offsets, a few seconds each.
 $zvc --src tests/zvc --expect tests/zvc/tokens.expect tests/zvc/tokens.zvp
 $zvc --src examples --timeout 60000 --expect tests/zvc/bump.expect tests/zvc/bump.zvp
+$zvc --src tests/zvc --expect tests/zvc/pointers.expect tests/zvc/pointers.zvp
 
 # --only names whole dotted components: packBit does not select packBit2.
 $zvc --src tests/zvc --only soundness3.packBit --expect tests/zvc/soundness3.only.expect tests/zvc/soundness3.zvp
@@ -77,7 +78,7 @@ done
 $zvc --src tests/zvc --only soundness2.useLenBound --expect tests/zvc/soundness2.dup.expect tests/zvc/soundness2.zvp tests/zvc/dup/soundness2.zvp
 
 # The one source of tokens is a premise: named in the verdict, passed on to callers, counted against the ratchet.
-mint="$zvc --src examples --only bump.init tests/zvc/bump.zvp"
+mint="$zvc --src examples --only bump.Bump.init tests/zvc/bump.zvp"
 $mint --max-assume 1 >/dev/null
 if $mint --max-assume 0 >/dev/null; then
     echo "run_zvc: --max-assume 0 passed a proof that rests on zv.PointsTo.own" >&2

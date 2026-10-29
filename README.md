@@ -133,7 +133,7 @@ The prototype was first built on Zig 0.16.0. Porting it to 0.17 took four mechan
 
 ### What `zvc` understands today
 
-Integers of any width, bool, slices and arrays of integers, optionals, structs by value, locals in memory cells, `if`, `while` and `for` (loops are cut at `zv.invariant`), arithmetic, bit and shift operations, casts, and the safety checks Zig inserts (overflow, bounds, division, unwrap, `unreachable`, `@panic`). Anything else is reported **UNPROVEN** with its position and the reason, never silently accepted. Calls between `.verified` functions go through their contracts; loops can state a measure with `zv.decreases` and ghost `zv.Int` and `zv.Seq` write specifications that cannot wrap. A `zv.PointsTo` permission token is linear to `zvc`: forging, copying or reusing one is refused ([`docs/phase4.md`](docs/phase4.md)).  Details in [`docs/phase2.md`](docs/phase2.md).
+Integers of any width, bool, slices and arrays of integers, optionals, structs by value, locals in memory cells, `if`, `while` and `for` (loops are cut at `zv.invariant`), arithmetic, bit and shift operations, casts, and the safety checks Zig inserts (overflow, bounds, division, unwrap, `unreachable`, `@panic`). Anything else is reported **UNPROVEN** with its position and the reason, never silently accepted. Pointer-to-struct parameters (`*Self`) are in/out: the caller learns exactly the fields the callee may have changed. Calls between `.verified` functions go through their contracts; loops can state a measure with `zv.decreases` and ghost `zv.Int` and `zv.Seq` write specifications that cannot wrap. A `zv.PointsTo` permission token is linear to `zvc`: forging, copying or reusing one is refused ([`docs/phase4.md`](docs/phase4.md)).  Details in [`docs/phase2.md`](docs/phase2.md).
 
 ## Limits, honestly
 
@@ -153,7 +153,7 @@ Each phase ships value before the next one starts. Phases are ordered by depende
 | **1. AIR exporter** | One small compiler patch: per-function AIR as a versioned binary pack (JSON on request) | Every function in a pilot codebase exports and round-trips |
 | **2. `zvc` on AIR** | Port the spike: modular calls, structs, termination, ghost `Int` and `Seq` | Spike results reproduce from AIR, plus one real kernel verified |
 | **3. `zv-own`** | Linearity, allocator regions, pointer invalidation, pinned types | Catches seeded ownership bugs at a false-positive rate the team accepts. **Done** (0.17.11), hardened after review 1 (0.17.13), rebuilt by identity after review 2 (0.17.15), tags and review 3 (0.17.18) |
-| **4. Verified core** | `PointsTo` permission tokens, a verified allocator, proof agents in CI | The core is `.verified` and the `.trusted` count is falling. **M1 done** (0.17.17): `zv.PointsTo`, a bump allocator proved in bounds, aligned and disjoint, 23 pinned soundness verdicts; see [`docs/phase4.md`](docs/phase4.md) |
+| **4. Verified core** | `PointsTo` permission tokens, a verified allocator, proof agents in CI | The core is `.verified` and the `.trusted` count is falling. **M1 done** (0.17.17): `zv.PointsTo`, a bump allocator proved in bounds, aligned and disjoint, 23 pinned soundness verdicts. **M2 done** (0.17.19): `*Self` parameters in `zvc`, the allocator as methods, tokens checked by `zv-own`; see [`docs/phase4.md`](docs/phase4.md) |
 | **Parallel track F** | C backend plus CBMC proof harnesses | Needs no fork, so it can start any time |
 
 Phase 1 is the one decision that commits the project to maintaining a pinned compiler patch.
