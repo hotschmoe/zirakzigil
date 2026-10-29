@@ -1,0 +1,16 @@
+.{ .rules = .{
+    .{
+        .name = "export-call",
+        .file = "src/Zcu/PerThread.zig",
+        .anchor = .{ .text = "var air = try pt.analyzeFuncBodyInner(func_index, reason);" },
+        .position = .after,
+        .insert = "try @import(\"../zv_air/export.zig\").exportFunc(pt, func_index, &air);",
+    },
+    .{
+        .name = "cache-key",
+        .file = "src/Compilation.zig",
+        .anchor = .{ .text = "man.hash.add(zcu.error_limit);" },
+        .position = .after,
+        .insert = "@import(\"zv_air/export.zig\").hashEnv(comp.environ_map, &man.hash);",
+    },
+} }

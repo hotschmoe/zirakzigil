@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
     const ok = try run.all(command, rules.rules);
     try stdout.interface.flush();
     try stderr.interface.flush();
-    if (!ok) std.process.exit(1);
+    if (!ok or (command == .verify and run.warnings != 0)) std.process.exit(1);
 }
 
 fn usage() !void {
@@ -90,6 +90,7 @@ const Run = struct {
     root: []const u8,
     err: *Io.Writer,
     out: *Io.Writer,
+    warnings: usize = 0,
 
     const State = enum { pending, applied };
 
@@ -132,6 +133,7 @@ const Run = struct {
                 },
                 .check, .apply => {
                     const at = try run.resolve(rule, source);
+                    try run.warnSiblings(rule, source, at);
                     const offset = insertionOffset(rule, at);
                     try run.report(rule, if (command == .apply) "inserted" else "pending", source, offset);
                     if (command == .check) return source;
@@ -145,6 +147,7 @@ const Run = struct {
                     return stripped;
                 }
                 const at = try run.resolve(rule, stripped);
+                try run.warnSiblings(rule, stripped, at);
                 if (insertionOffset(rule, at) != found.hit.start)
                     return run.fail(rule, "inserted text is present but not at its anchor (the anchor now resolves to line {d}, the text is at line {d})", .{
                         lineOf(stripped, at.start),
@@ -153,6 +156,21 @@ const Run = struct {
                 try run.report(rule, "applied", source, found.hit.start);
                 return source;
             },
+        }
+    }
+
+    /// A hooked call that is also made elsewhere in the file may be a path the hook does not cover.
+    fn warnSiblings(run: *Run, rule: Rule, source: []const u8, hit: Hit) !void {
+        const callee = switch (rule.anchor) {
+            .fn_stmt => |a| switch (a.stmt) {
+                .calls => |name| name,
+                else => return,
+            },
+            else => return,
+        };
+        for (try otherCalls(run.arena, source, callee, hit)) |offset| {
+            run.warnings += 1;
+            try run.err.print("warning: rule '{s}' ({s}): {s} is also called at line {d} and is not hooked there\n", .{ rule.name, rule.file, callee, lineOf(source, offset) });
         }
     }
 
@@ -377,6 +395,22 @@ fn declHits(arena: Allocator, tree: *const Ast, source: []const u8, node: Ast.No
     else
         fnNamed(tree, node, name) != null;
     if (found) try hits.append(arena, stmtLines(tree, source, node));
+}
+
+/// Offsets of calls `callee(` outside `hit`, not counting its own declaration.
+fn otherCalls(arena: Allocator, source: []const u8, callee: []const u8, hit: Hit) ![]const usize {
+    const owned = try arena.dupeSentinel(u8, source, 0);
+    const tree = try arena.create(Ast);
+    tree.* = try .parse(arena, owned, .{});
+    var offsets: std.ArrayList(usize) = .empty;
+    var token: Ast.TokenIndex = 1;
+    while (token + 1 < tree.tokens.len) : (token += 1) {
+        if (tree.tokenTag(token) != .identifier or tree.tokenTag(token + 1) != .l_paren) continue;
+        if (tree.tokenTag(token - 1) == .keyword_fn or !std.mem.eql(u8, tree.tokenSlice(token), callee)) continue;
+        const offset = tree.tokenStart(token);
+        if (offset < hit.start or offset >= hit.end) try offsets.append(arena, offset);
+    }
+    return offsets.items;
 }
 
 fn fnNamed(tree: *const Ast, node: Ast.Node.Index, name: []const u8) ?struct { body: Ast.Node.Index } {

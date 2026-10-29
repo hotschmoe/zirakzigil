@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 const Stringify = std.json.Stringify;
 
 const Air = @import("../Air.zig");
+const Compilation = @import("../Compilation.zig");
 const InternPool = @import("../InternPool.zig");
 const Zcu = @import("../Zcu.zig");
 const adapter = @import("adapter.zig");
@@ -35,11 +36,25 @@ pub const Options = struct {
     }
 };
 
+/// The hook needs no `Compilation` field: the options come from the environment on every call,
+/// unless a build of the compiler has added `zv_air_options` (the flag-based hook).
+fn optionsOf(comp: *const Compilation) Options {
+    if (@hasField(Compilation, "zv_air_options")) return comp.zv_air_options;
+    return .fromEnviron(comp.environ_map);
+}
+
+/// The cache-key half of the hook: mixes the export options into the cache manifest.
+pub fn hashEnv(environ_map: anytype, hasher: anytype) void {
+    if (environ_map.get("ZV_AIR_TEST_NOHASH") != null) return; // measurement switch: behave as if the hook had no cache line
+    Options.fromEnviron(environ_map).hash(hasher);
+}
+
 pub fn exportFunc(pt: Zcu.PerThread, func_index: InternPool.Index, air: *const Air) Allocator.Error!void {
     const zcu = pt.zcu;
     const comp = zcu.comp;
-    const out_dir = comp.zv_air_options.out_dir orelse return;
-    if (!comp.zv_air_options.include_std and adapter.isToolchain(zcu, func_index)) return;
+    const options = optionsOf(comp);
+    const out_dir = options.out_dir orelse return;
+    if (!options.include_std and adapter.isToolchain(zcu, func_index)) return;
 
     var arena_state: std.heap.ArenaAllocator = .init(comp.gpa);
     defer arena_state.deinit();

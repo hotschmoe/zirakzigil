@@ -4,6 +4,10 @@
 #   ZV_STOCK=1 tools/build_zig_zv.sh   unpatched, same build flags -> compiler/.work/zig-stock/zig-out/bin/zig-stock
 # ZV_ZIG_UPSTREAM overrides the clone source (a URL or a local path); ZIG selects the host zig;
 # ZV_WORK moves the working directory (default compiler/.work; use a native filesystem under WSL).
+# ZV_HOOK=patch applies compiler/hook.patch with git apply; the default runs tools/zv_hook.zig on
+# ZV_RULES (default compiler/hook/rules.zon), built with ZV_HOOK_ZIG (default zig, which must be 0.17 or newer).
+# ZV_POST is a shell command run in the tree after the hook (adapter shims for other versions).
+# ZV_NO_BIN=1 only type-checks the compiler (-Dno-bin), for porting the adapter quickly.
 # ZV_ZIG_REF builds another upstream ref (branch, tag or commit hash) instead of the pin; the commit and
 # version checks are skipped for it.
 set -eu
@@ -51,7 +55,14 @@ git clean --quiet -fd -e zig-out -e .zig-cache
 
 if [ "$name" = zig-src ]; then
     cp -R "$compiler/src/zv_air" src/zv_air
-    git apply "$compiler/hook.patch"
+    if [ "${ZV_HOOK:-rules}" = patch ]; then
+        git apply "$compiler/hook.patch"
+    else
+        mkdir -p "$work"
+        "${ZV_HOOK_ZIG:-zig}" build-exe "$root/tools/zv_hook.zig" -femit-bin="$work/zv_hook"
+        "$work/zv_hook" apply "${ZV_RULES:-$compiler/hook/rules.zon}" .
+    fi
+    [ -z "${ZV_POST:-}" ] || sh -c "$ZV_POST"
 fi
 
 # Upstream declares an 8 GB RSS bound for the compiler step, and this step peaks just above it on
@@ -60,7 +71,7 @@ fi
 # passes the checks below. Any other error fails the script.
 log=$work/$name.build.log
 status=0
-"$host_zig" build -Dno-lib -Denable-llvm=false -Doptimize=ReleaseFast >"$log" 2>&1 || status=$?
+"$host_zig" build -Dno-lib -Denable-llvm=false -Doptimize=ReleaseFast ${ZV_NO_BIN:+-Dno-bin} >"$log" 2>&1 || status=$?
 cat "$log"
 if [ "$status" -ne 0 ]; then
     others=$(grep '^error:' "$log" | grep -v 'memory usage peaked at .* exceeding the declared upper bound' | grep -v 'the following build command' || true)
@@ -71,6 +82,10 @@ if [ "$status" -ne 0 ]; then
     echo "note: ignoring the declared max_rss overrun; verifying the binary" >&2
 fi
 
+if [ -n "${ZV_NO_BIN:-}" ]; then
+    echo "type-check passed"
+    exit 0
+fi
 exe=
 [ -f zig-out/bin/zig.exe ] && exe=.exe
 bin=zig-out/bin/$out$exe
@@ -89,7 +104,7 @@ if [ "$name" = zig-src ]; then
     return 42;
 }
 ' >"$smoke/answer.zig"
-    "$bin" build-obj -fno-emit-bin --zv-air-out "$smoke/out" "$smoke/answer.zig"
+    ZV_AIR_OUT="$smoke/out" "$bin" build-obj -fno-emit-bin "$smoke/answer.zig"
     ls "$smoke"/out/answer.*.json >/dev/null 2>&1 || { echo "error: smoke export produced no JSON" >&2; exit 1; }
 fi
 echo "built $tree/$bin"
