@@ -159,7 +159,7 @@ pub const ownership = .{ .remove = .invalidates };   // pointers handed out by g
 comptime { zv.requireOwnership(@This()); }
 ```
 
-1. Export the whole project, generics instantiated the way the assurance manifests witness them, with a zig-zv compiler: `ZVC_DEEP=1 tools/zvc_export.sh own/ src/root.zig --only wire --only 'socket.tcp.Socket(target.wire.ipv4, 4)' ...` (zmoltcp's `own/export.sh` is a complete example, including the pins).
+1. Export the whole project, generics instantiated the way the assurance manifests witness them, with a zig-zv compiler: `ZVC_DEEP=1 tools/zvc_export.sh own/ src/root.zig --only wire --only 'socket.tcp.Socket(target.wire.ipv4, 4)' ...` (zmoltcp's `own/export.sh` is a complete example, including the pins). A project that uses std's containers or allocators should export with `ZV_AIR_STD=1` as well: the pack then holds the bodies of the std functions it reaches (the script cuts it with `zv-air slice`; about four times the size of the project alone), and the checker reads what `append`, `put` or `getOrPut` do instead of relying on its table of them. Without it the table is used, and a container method that is not in it is counted in the footer.
 2. Check the pack in with `own/PINS`, as for `verify`.
 3. Add the gate:
 
@@ -173,7 +173,7 @@ _ = zirakzigil.addOwnershipGate(b, .{
 });
 ```
 
-`zig build own` fails on a finding (printed with `file:line:col`, the path taken and notes at the related places), on more unproven or trusted functions than allowed, and on a pinned source that changed since the export. A second gate with `.step = "own-seeded"`, `.expect = "..."` and `.files` pins the verdicts on mistakes seeded in the shape of the project's own API. Every run ends with what it assumed and did not check (calls into code with no model, linear values handed on). Stock Zig runs the gate; only exporting needs the patched compiler.
+`zig build own` fails on a finding (printed with `file:line:col`, the path taken and notes at the related places), on more unproven or trusted functions than allowed, and on a pinned source that changed since the export. A second gate with `.step = "own-seeded"`, `.expect = "..."` and `.files` pins the verdicts on mistakes seeded in the shape of the project's own API. Every run ends with what it assumed and did not check (calls into code with no model, linear values handed on, container methods with no model, operations on memory it cannot name, resizes by a length it cannot show to be non-zero). Stock Zig runs the gate; only exporting needs the patched compiler.
 
 ## Borrowed slots: `zv.Slots`
 

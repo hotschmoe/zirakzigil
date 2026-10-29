@@ -64,9 +64,12 @@ pub const Summary = struct {
     ret_same: ?u32 = null,
     /// A guess made while the function's own body is read (recursion), not something the body showed.
     assumed: bool = false,
+    /// Bit i: the function returns the result of a `realloc` or `remap` of parameter i, so the allocation is gone
+    /// when the result holds a payload.
+    moves: u64 = 0,
 
     pub fn eql(a: Summary, b: Summary) bool {
-        if (a.complete != b.complete or a.ret_alloc != b.ret_alloc or a.frees != b.frees or a.token_stores != b.token_stores) return false;
+        if (a.complete != b.complete or a.ret_alloc != b.ret_alloc or a.frees != b.frees or a.token_stores != b.token_stores or a.moves != b.moves) return false;
         if (a.ret.len != b.ret.len or a.kills.len != b.kills.len or a.stores.len != b.stores.len) return false;
         for (a.ret, b.ret) |x, y| if (x.param != y.param or x.stored != y.stored or x.interior != y.interior or !std.mem.eql(u32, x.path, y.path)) return false;
         for (a.kills, b.kills) |x, y| if (x.param != y.param or x.ends != y.ends or !std.mem.eql(u32, x.path, y.path)) return false;
@@ -403,6 +406,7 @@ const Run = struct {
     kills: std.ArrayList(Kill) = .empty,
     /// Parameters freed on every path that returns (a conditional free is not one the caller can rely on).
     frees_all: u64 = ~@as(u64, 0),
+    moves_all: u64 = ~@as(u64, 0),
     any_ret: bool = false,
     stores: std.ArrayList(Store) = .empty,
     ret_refs: std.ArrayList(RetRef) = .empty,
@@ -424,6 +428,8 @@ const Run = struct {
     diags: std.ArrayList(diag.Diag) = .empty,
     seen: std.StringHashMapUnmanaged(void) = .empty,
     stats: Stats = .{},
+    /// The (instruction, kind) pairs already counted in `stats`: a loop body runs several times.
+    tallied: std.AutoHashMapUnmanaged(u64, void) = .empty,
     quiet: u32 = 0,
     next_arg: u32 = 0,
     cur_loc: schema.LocId = .none,
@@ -482,7 +488,7 @@ const Run = struct {
             .name = try arena.dupe(u8, r.name),
             .diags = diags,
             .stats = r.stats,
-            .summary = .{ .complete = complete, .ret = try r.persistRefs(arena), .ret_alloc = r.ret_alloc, .kills = kills, .frees = if (r.any_ret) r.frees_all else 0, .stores = try r.persistStores(arena), .token_stores = r.token_stored, .ret_same = if (r.ret_same_conflict) null else r.ret_same },
+            .summary = .{ .complete = complete, .ret = try r.persistRefs(arena), .ret_alloc = r.ret_alloc, .kills = kills, .frees = if (r.any_ret) r.frees_all else 0, .stores = try r.persistStores(arena), .token_stores = r.token_stored, .moves = if (r.any_ret) r.moves_all else 0, .ret_same = if (r.ret_same_conflict) null else r.ret_same },
         };
     }
 
@@ -520,6 +526,13 @@ const Run = struct {
             trail = node;
         }
         return .{ .kind = d.kind, .loc = d.loc, .text = try arena.dupe(u8, d.text), .notes = copied, .trail = trail };
+    }
+
+    /// Counts an assumption once per instruction, however many times the loop around it is run.
+    fn tally(r: *Run, comptime field: []const u8, inst: *const Inst) Allocator.Error!void {
+        const kind: u64 = comptime @intCast(std.meta.fieldIndex(Stats, field).?);
+        const gop = try r.tallied.getOrPut(r.arena, (@as(u64, inst.id) << 8) | kind);
+        if (!gop.found_existing) @field(r.stats, field) += 1;
     }
 
     // Findings.
@@ -1277,7 +1290,7 @@ const Run = struct {
                 if (!gop.found_existing) gop.value_ptr.* = r.places.rec(pl).n;
             };
             if (kind != .cell and !val.toks.isEmpty()) {
-                r.stats.transfers += 1;
+                try r.tally("transfers", inst);
                 r.noteTokenStored(val);
                 try r.sink(st, inst, val, "stored into memory the caller owns", "");
             }
@@ -1295,7 +1308,7 @@ const Run = struct {
                 if (rec.kind == .buffer) try r.noteStores(try r.places.child(r.arena, rec.place, dom.elem_step), val);
             }
             if (!val.toks.isEmpty()) {
-                r.stats.transfers += 1;
+                try r.tally("transfers", inst);
                 r.noteTokenStored(val);
                 try r.sink(st, inst, val, "stored into memory the checker does not track", "");
             }
@@ -1410,7 +1423,7 @@ const Run = struct {
 
     fn isInsertion(callee: []const u8) bool {
         const dot = std.mem.lastIndexOfScalar(u8, callee, '.') orelse 0;
-        const method = callee[if (dot == 0) 0 else dot + 1 ..];
+        const method = callee[if (dot == 0) 0 else dot + 1..];
         const stores = [_][]const u8{ "append", "put", "insert", "add", "push", "enqueue", "getOrPut", "ensure", "resize", "reserve", "expand" };
         for (stores) |s| if (std.mem.startsWith(u8, method, s)) return true;
         return false;
@@ -1430,6 +1443,12 @@ const Run = struct {
             if (rec.kind == .param and rec.n < 64) freed_here |= @as(u64, 1) << @intCast(rec.n);
         }
         r.frees_all &= freed_here;
+        var moved_here: u64 = 0;
+        for (val.moved.ids) |o| {
+            const rec = r.owners.items[o];
+            if (rec.kind == .param and rec.n < 64) moved_here |= @as(u64, 1) << @intCast(rec.n);
+        }
+        r.moves_all &= moved_here;
         r.any_ret = true;
         try r.use(st, inst, val, "returned");
         if (val.place) |pl| {
@@ -1509,7 +1528,7 @@ const Run = struct {
         if (effect == .resize) {
             const at = spec.lenArg(declared);
             resize_frees = r.constantArg(ops, at, 0);
-            if (!resize_frees and !(at < n and ops[1 + at].kind == .constant)) r.stats.dynamic_len += 1;
+            if (!resize_frees and !(at < n and ops[1 + at].kind == .constant)) try r.tally("dynamic_len", inst);
         }
         // The argument a free names is not a use but the end of one.
         const freed: ?usize = switch (effect) {
@@ -1536,7 +1555,7 @@ const Run = struct {
             }
             if (!a.toks.isEmpty() and !r.ty.isPointer(aty)) {
                 try r.sink(st, inst, a, "passed on", callee);
-                try r.noteTokenPassed(a, i, known, body, declared);
+                try r.noteTokenPassed(inst, a, i, known, body, declared);
             }
             derived.owners = try derived.owners.merge(r.arena, a.owners);
         }
@@ -1544,8 +1563,8 @@ const Run = struct {
             st.alive = false;
             return;
         }
-        if (effect == .none and (known == null or body == null) and (r.ty.hasPointers(inst.ty) or anyPointerLike(r, arg_tys))) r.stats.unknown_calls += 1;
-        if (container_call and !model.modelled and body == null) r.stats.unmodelled += 1;
+        if (effect == .none and (known == null or body == null) and (r.ty.hasPointers(inst.ty) or anyPointerLike(r, arg_tys))) try r.tally("unknown_calls", inst);
+        if (container_call and !model.modelled and body == null) try r.tally("unmodelled", inst);
         var sub: u32 = 0;
         var res = try r.fresh(st, inst, inst.ty, &sub);
         const text = try std.fmt.allocPrint(r.arena, "`{s}`", .{declared});
@@ -1626,6 +1645,13 @@ const Run = struct {
         }
         if (effect == .none or effect == .reads or (container_call and effect == .invalidates)) {
             if (summary) |s| try r.applySummary(st, inst, s, args, skip_kills, known != null and r.isLibrary(known.?));
+            if (summary) |s| if (s.moves != 0) {
+                var moved: Set = res.moved;
+                for (args, 0..) |a, i| {
+                    if (i < 64 and s.moves & (@as(u64, 1) << @intCast(i)) != 0) try r.endAllocations(st, inst, a, text, &moved);
+                }
+                res.moved = moved;
+            };
             if (summary) |s| if (s.ret_same) |k| if (k < args.len) {
                 res.place = args[k].place;
             };
@@ -1723,7 +1749,7 @@ const Run = struct {
 
     /// A linear value went into a call: when the callee keeps it in memory the checker does not follow, that is a
     /// transfer. A callee of the project counted it in its own run; std and the callees without a body did not.
-    fn noteTokenPassed(r: *Run, a: Val, at: usize, known: ?Ref, body: ?Summary, declared: []const u8) Allocator.Error!void {
+    fn noteTokenPassed(r: *Run, inst: *const Inst, a: Val, at: usize, known: ?Ref, body: ?Summary, declared: []const u8) Allocator.Error!void {
         if (std.mem.startsWith(u8, declared, "zv.")) return;
         const bit: u64 = if (at < 64) @as(u64, 1) << @intCast(at) else 0;
         var stored = true;
@@ -1735,7 +1761,7 @@ const Run = struct {
             if (!r.isLibrary(known.?)) return;
         }
         if (!stored) return;
-        r.stats.transfers += 1;
+        try r.tally("transfers", inst);
         for (a.toks.ids) |t| if (r.param_of_tok.get(t)) |pi| if (pi < 64) {
             r.token_stored |= @as(u64, 1) << @intCast(pi);
         };
@@ -1946,7 +1972,7 @@ const Run = struct {
             if (k.param >= args.len) continue;
             const named = try r.targets(args[k.param], k.path);
             if (named.len == 0) {
-                r.stats.blind += 1;
+                try r.tally("blind", inst);
                 continue;
             }
             for (named) |place| {
@@ -2037,7 +2063,7 @@ const Run = struct {
     fn invalidate(r: *Run, st: *State, inst: *const Inst, obj: Val, what: []const u8, ends: bool) Error!void {
         const places = try r.targets(obj, &.{});
         if (places.len == 0) {
-            r.stats.blind += 1;
+            try r.tally("blind", inst);
             return;
         }
         for (places) |pl| try r.invalidateAt(st, inst, pl, what, ends);

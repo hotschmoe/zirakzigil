@@ -243,7 +243,9 @@ pub fn container(name: []const u8) Model {
     if (startsAny(method, &.{ "append", "put", "fetchPut", "insert", "add", "push", "enqueue", "addUnmanaged" })) return .{ .kill = .grow, .count = .insert1 };
 
     // Memory stays where it is: an element that moves or goes away is the only thing stale.
-    if (startsAny(method, &.{ "pop", "shrinkRetainingCapacity", "expandToCapacity", "lockPointers", "unlockPointers", "assertPointerLock", "setKey", "set" })) return .{};
+    // The length becomes the capacity.
+    if (std.mem.eql(u8, method, "expandToCapacity")) return .{ .count = .many_assume };
+    if (startsAny(method, &.{ "pop", "shrinkRetainingCapacity", "lockPointers", "unlockPointers", "assertPointerLock", "setKey", "set" })) return .{};
     // A hash map is open addressing: taking an entry out moves no other entry.
     if (fam == .hash and startsAny(method, &.{ "remove", "fetchRemove" })) return .{};
     if (startsAny(method, &.{ "orderedRemove", "swapRemove", "fetchSwapRemove", "fetchOrderedRemove", "removeByIndex", "remove", "fetchRemove", "clearRetainingCapacity", "sort", "swap", "reverse", "replaceRange" }))
@@ -254,9 +256,9 @@ pub fn container(name: []const u8) Model {
         return .{ .ptr = .storage };
     if (std.mem.eql(u8, method, "iterator")) return .{ .ptr = if (fam == .hash) .self else .storage };
     const reads = [_][]const u8{
-        "get",    "contains", "count",  "capacity", "clone", "format",  "hash",   "eql",  "isEmpty", "first", "last",
-        "peek",   "isSet",    "findFirst", "findLast", "at", "len",    "index",  "unmanaged", "toManaged", "moveToUnmanaged", "is",
-        "initCapacity", "init", "empty", "bitSet", "unset", "set", "setValue", "toggle",
+        "get",          "contains", "count",     "capacity", "clone", "format", "hash",     "eql",       "isEmpty",   "first",           "last",
+        "peek",         "isSet",    "findFirst", "findLast", "at",    "len",    "index",    "unmanaged", "toManaged", "moveToUnmanaged", "is",
+        "initCapacity", "init",     "empty",     "bitSet",   "unset", "set",    "setValue", "toggle",
     };
     if (startsAny(method, &reads)) return .{};
     return .{ .modelled = false, .kill = .grow, .count = .drop };

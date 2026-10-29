@@ -106,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
 
     var counts: [4]usize = @splat(0);
     for (rows.items) |row| {
-        counts[@intFromEnum(row.verdict)] += 1;
+        counts[@backingInt(row.verdict)] += 1;
         try printRow(out, &srcs, row, opts.summary or opts.effects);
         if (opts.effects) try printEffects(out, row);
         try out.flush();
@@ -199,6 +199,8 @@ fn printRow(out: *Io.Writer, srcs: *sources.Sources, row: Row, all: bool) !void 
 fn printEffects(out: *Io.Writer, row: Row) !void {
     const s = row.result.summary;
     try out.print("      effects: complete={} ret_alloc={} frees={x} token_stores={x}\n", .{ s.complete, s.ret_alloc, s.frees, s.token_stores });
+    const st = row.result.stats;
+    if (st.blind + st.unknown_calls + st.unmodelled + st.dynamic_len != 0) try out.print("      assumed: {d} unknown calls, {d} unmodelled, {d} blind, {d} dynamic lengths\n", .{ st.unknown_calls, st.unmodelled, st.blind, st.dynamic_len });
     for (s.kills) |k| try out.print("      kills param {d} path {any} ends={}\n", .{ k.param, k.path, k.ends });
     for (s.ret) |q| try out.print("      returns param {d} path {any} stored={}\n", .{ q.param, q.path, q.stored });
     for (s.stores) |q| try out.print("      stores param {d} into param {d} path {any}\n", .{ q.from, q.into, q.path });
@@ -235,7 +237,7 @@ fn compareExpected(io: Io, arena: Allocator, out: *Io.Writer, path: []const u8, 
         const want = std.meta.stringToEnum(Verdict, it.next() orelse "") orelse fatal("{s}: bad line `{s}`", .{ path, line });
         var got: ?Verdict = null;
         for (rows) |row| if (std.mem.eql(u8, row.name, name)) {
-            got = if (got) |g| @enumFromInt(@max(@intFromEnum(g), @intFromEnum(row.verdict))) else row.verdict;
+            got = if (got) |g| @fromBackingInt(@intCast(@max(@backingInt(g), @backingInt(row.verdict)))) else row.verdict;
         };
         const verdict = got orelse {
             try out.print("expected {s} {t}, but it was not checked at all\n", .{ name, want });

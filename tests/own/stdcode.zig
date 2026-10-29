@@ -522,6 +522,56 @@ pub fn badAtomicAfterFree(gpa: Allocator) !u32 {
     return @atomicLoad(u32, p, .acquire);
 }
 
+pub fn badCmpxchgAfterFree(gpa: Allocator) !bool {
+    const buf = try gpa.alloc(u32, 1);
+    buf[0] = 0;
+    const p = &buf[0];
+    gpa.free(buf);
+    return @cmpxchgStrong(u32, p, 0, 1, .seq_cst, .seq_cst) == null;
+}
+
+fn freeA(gpa: Allocator, buf: []u8, n: u32) void {
+    if (n == 0) {
+        gpa.free(buf);
+        return;
+    }
+    freeB(gpa, buf, n - 1);
+}
+
+fn freeB(gpa: Allocator, buf: []u8, n: u32) void {
+    freeA(gpa, buf, n);
+}
+
+pub fn badMutualFree(gpa: Allocator) !u8 {
+    const buf = try gpa.alloc(u8, 4);
+    buf[0] = 1;
+    freeA(gpa, buf, 2);
+    return buf[0];
+}
+
+fn growTo(gpa: Allocator, buf: []u8, n: usize) ![]u8 {
+    return gpa.realloc(buf, n);
+}
+
+pub fn okGrowWrapper(gpa: Allocator) !u8 {
+    const buf = try gpa.alloc(u8, 4);
+    const bigger = growTo(gpa, buf, 8) catch |e| {
+        gpa.free(buf);
+        return e;
+    };
+    defer gpa.free(bigger);
+    bigger[7] = 1;
+    return bigger[7];
+}
+
+pub fn badGrowWrapperUse(gpa: Allocator) !u8 {
+    const buf = try gpa.alloc(u8, 4);
+    buf[0] = 1;
+    const bigger = try growTo(gpa, buf, 8);
+    defer gpa.free(bigger);
+    return buf[0];
+}
+
 pub fn badAdoptTwice(gpa: Allocator) !void {
     const buf = try gpa.alloc(u8, 4);
     var list: std.ArrayList(u8) = .fromOwnedSlice(buf);
@@ -536,6 +586,25 @@ pub fn badInternerPointerAcrossIntern(gpa: Allocator) !usize {
     const first = &table.names.items[0];
     _ = try table.intern(gpa, "beta");
     return first.len;
+}
+
+// A mistake the checker does not see: the result of `remap` says whether the memory moved, and nothing here looks.
+pub fn gapRemapIgnored(gpa: Allocator) !void {
+    const buf = try gpa.alloc(u8, 4);
+    _ = gpa.remap(buf, 4096);
+    gpa.free(buf);
+}
+
+// A correct program the checker reports: `toOwnedSliceAssert` moves the buffer out of the list without freeing it,
+// and the checker takes the result to be the list's storage, which `deinit` then ends.
+pub fn fpOwnedAssertThenDeinit(gpa: Allocator) !u8 {
+    var list: std.ArrayList(u8) = .empty;
+    try list.append(gpa, 3);
+    try list.shrinkAndFreePrecise(gpa, 1);
+    const owned = list.toOwnedSliceAssert();
+    list.deinit(gpa);
+    defer gpa.free(owned);
+    return owned[0];
 }
 
 // A mistake the checker does not see: a function that frees only when it has something to free is not known to

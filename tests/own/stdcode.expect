@@ -1,5 +1,7 @@
 # Ordinary allocator-heavy code over std containers (tests/own/stdcode.zig): ok* must stay clean, bad* are mistakes.
 # gapConditionalFree is a mistake the checker does not see: freeIfSome frees on one path only, so no caller may rely on it.
+# fpOwnedAssertThenDeinit is correct and reported: toOwnedSliceAssert moves the buffer out without freeing it (a known false positive).
+# gapRemapIgnored is a mistake the checker does not see: the result of remap says whether the memory moved, and nothing looks.
 stdcode.Interner.deinit clean
 stdcode.Interner.intern clean
 stdcode.Interner.name clean
@@ -9,10 +11,13 @@ stdcode.Slab.get clean
 stdcode.Slab.release clean
 stdcode.badAdoptTwice error
 stdcode.badAtomicAfterFree error
+stdcode.badCmpxchgAfterFree error
 stdcode.badGetOrPutPtrAcrossPut error
+stdcode.badGrowWrapperUse error
 stdcode.badInternerPointerAcrossIntern error
 stdcode.badIntrusiveAfterDestroy error
 stdcode.badKeysAcrossPut error
+stdcode.badMutualFree error
 stdcode.badMutualHeld error
 stdcode.badRemapUse error
 stdcode.badSlabPointerAcrossAcquire error
@@ -24,9 +29,14 @@ stdcode.badValuePtrAcrossPut error
 stdcode.classOf clean
 stdcode.countA clean
 stdcode.countB clean
+stdcode.fpOwnedAssertThenDeinit error
+stdcode.freeA clean
+stdcode.freeB clean
 stdcode.freeIfSome clean
 stdcode.freeNode clean
 stdcode.gapConditionalFree clean
+stdcode.gapRemapIgnored clean
+stdcode.growTo clean
 stdcode.itemOf clean
 stdcode.okAdjacency clean
 stdcode.okAdopt clean
@@ -36,6 +46,7 @@ stdcode.okBumpValues clean
 stdcode.okCache clean
 stdcode.okCloneBoth clean
 stdcode.okDedupe clean
+stdcode.okGrowWrapper clean
 stdcode.okHandoff clean
 stdcode.okHeldWithinReserved clean
 stdcode.okIndexInsteadOfPointer clean

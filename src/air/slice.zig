@@ -13,10 +13,10 @@ pub const library = [_][]const u8{ "std", "ubsan_rt", "compiler_rt" };
 
 /// Callees that are not followed: panics (noreturn, never read) and the parts of std that talk to the system.
 const skipped = [_][]const u8{
-    "debug.FullPanic", "debug.panic",  "debug.defaultPanic", "debug.dumpStack", "debug.print", "debug.lockStdErr", "debug.unlockStdErr",
-    "debug.SelfInfo",  "debug.Dwarf",  "Io.",                "fmt.",            "os.",          "posix.",           "fs.",
-    "Progress.",       "process.",     "testing.",           "Thread.",         "log.",         "lang.",            "builtin.",
-    "start.",          "c.",           "crypto.",            "tty.",            "Target.",      "zig.",             "compress.",
+    "debug.FullPanic", "debug.panic", "debug.defaultPanic", "debug.dumpStack", "debug.print", "debug.lockStdErr", "debug.unlockStdErr",
+    "debug.SelfInfo",  "debug.Dwarf", "Io.",                "fmt.",            "os.",         "posix.",           "fs.",
+    "Progress.",       "process.",    "testing.",           "Thread.",         "log.",        "lang.",            "builtin.",
+    "start.",          "c.",          "crypto.",            "tty.",            "Target.",     "zig.",             "compress.",
 };
 
 const Slicer = struct {
@@ -72,9 +72,9 @@ const Slicer = struct {
         const rec = s.p.t.consts[id];
         s.markType(rec.ty);
         switch (rec.kind) {
-            .enum_literal, .enum_tag, .@"error", .text => s.markStr(@enumFromInt(rec.a)),
-            .func => s.markCallee(@enumFromInt(rec.a)),
-            .type => s.markType(@enumFromInt(rec.a)),
+            .enum_literal, .enum_tag, .@"error", .text => s.markStr(@fromBackingInt(@intCast(rec.a))),
+            .func => s.markCallee(@fromBackingInt(@intCast(rec.a))),
+            .type => s.markType(@fromBackingInt(@intCast(rec.a))),
             else => {},
         }
     }
@@ -85,8 +85,8 @@ const Slicer = struct {
             s.markLoc(inst.loc);
             for (s.p.operandsOf(inst)) |o| if (o.kind == .constant) s.markConst(o.value);
             for (s.p.attrsOf(inst)) |a| switch (a.key.kind()) {
-                .str => s.markStr(@enumFromInt(a.value)),
-                .callee => s.markCallee(@enumFromInt(a.value)),
+                .str => s.markStr(@fromBackingInt(@intCast(a.value))),
+                .callee => s.markCallee(@fromBackingInt(@intCast(a.value))),
                 else => {},
             };
             for (s.p.bodiesOf(inst)) |b| {
@@ -100,10 +100,10 @@ const Slicer = struct {
     /// Adds the functions that the instructions call, by name: every instance of a name is kept.
     fn collectCallees(s: *Slicer, range: Range, by_name: *const std.StringHashMapUnmanaged(std.ArrayList(u32)), queue: *std.ArrayList(u32)) Allocator.Error!void {
         for (s.p.instsOf(range)) |inst| {
-            for (s.p.attrsOf(inst)) |a| if (a.key == .callee) try s.enqueue(s.p.calleeName(@enumFromInt(a.value)), by_name, queue);
+            for (s.p.attrsOf(inst)) |a| if (a.key == .callee) try s.enqueue(s.p.calleeName(@fromBackingInt(@intCast(a.value))), by_name, queue);
             for (s.p.operandsOf(inst)) |o| if (o.kind == .constant) {
                 const c = s.p.t.consts[o.value];
-                if (c.kind == .func) try s.enqueue(s.p.calleeName(@enumFromInt(c.a)), by_name, queue);
+                if (c.kind == .func) try s.enqueue(s.p.calleeName(@fromBackingInt(@intCast(c.a))), by_name, queue);
             };
             for (s.p.bodiesOf(inst)) |b| try s.collectCallees(b.insts, by_name, queue);
         }
@@ -136,7 +136,7 @@ fn remap(comptime T: type, used: []const bool, arena: Allocator) Allocator.Error
     const out = try arena.alloc(T, used.len);
     var next: u32 = 0;
     for (used, out) |u, *slot| {
-        slot.* = @enumFromInt(next);
+        slot.* = @fromBackingInt(@intCast(next));
         if (u) next += 1;
     }
     return out;
@@ -183,7 +183,7 @@ pub fn slice(gpa: Allocator, p: schema.Pack) Allocator.Error![]align(8) u8 {
         s.markFile(f.file);
         s.markType(f.ret);
         for (p.paramsOf(f)) |q| s.markType(q.ty);
-        for (p.calleeRefsOf(f)) |ref| s.markCallee(@enumFromInt(ref.callee));
+        for (p.calleeRefsOf(f)) |ref| s.markCallee(@fromBackingInt(@intCast(ref.callee)));
         s.markInsts(f.insts);
     };
 
@@ -198,7 +198,7 @@ pub fn slice(gpa: Allocator, p: schema.Pack) Allocator.Error![]align(8) u8 {
     var blob: std.ArrayList(u8) = .empty;
     var str_index: std.ArrayList(schema.StrEntry) = .empty;
     for (s.str_used, 0..) |u, i| if (u) {
-        const text = p.str(@enumFromInt(i));
+        const text = p.str(@fromBackingInt(@intCast(i)));
         try str_index.append(arena, .{ .off = @intCast(blob.items.len), .len = @intCast(text.len) });
         try blob.appendSlice(arena, text);
     };
