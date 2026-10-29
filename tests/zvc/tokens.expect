@@ -1,0 +1,25 @@
+# name verdict. A verdict changing here is reviewed as a soundness or completeness change of zvc.
+# Controls (proved): take, give, giveBoth2, roundTrip, leak, twoMints. Everything else must not be proved.
+tokens.copyThenGive refuted
+tokens.forgeAgain unproven
+tokens.forgeField unproven
+tokens.forgeLiteral unproven
+tokens.forgeViaChecked unproven
+tokens.give proved
+tokens.giveBoth refuted
+tokens.giveBoth2 proved
+tokens.giveTwice refuted
+tokens.joinGap refuted
+tokens.leak proved
+tokens.loopConsume unproven
+tokens.maybeGive refuted
+tokens.readAfterGive refuted
+tokens.returnConsumed refuted
+tokens.roundTrip proved
+tokens.splitTwice refuted
+tokens.take proved
+tokens.takeKeepsOld refuted
+tokens.takeMisaligned refuted
+tokens.takeOutside refuted
+tokens.takeStuck refuted
+tokens.twoMints proved

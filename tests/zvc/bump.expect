@@ -1,0 +1,8 @@
+# name verdict. examples/bump.zig: the bump allocator, every function proved, under the premise of the one zv.PointsTo.own in init.
+bump.alloc proved
+bump.carve proved
+bump.free proved
+bump.init proved
+bump.padTo proved
+bump.pair proved
+bump.reset proved

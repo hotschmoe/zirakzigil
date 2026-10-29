@@ -465,6 +465,52 @@ pub const PinCheck = struct {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 3d. PointsTo: permission tokens for raw memory (docs/phase4.md)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The right to use the bytes `[lo, hi)` of one region of memory, owned by whoever holds the value. It exists
+/// only in ghost builds (`void` elsewhere), so a field of this type costs nothing in production. A token is
+/// linear: `split`, `join` and `discard` consume theirs, a function that takes one by value consumes it, and
+/// a consumed token may not be used again. `zvc` proves that for the function it verifies (a use of a consumed
+/// token is refuted), and it refuses a token built any other way than by the operations below: a token that
+/// is not forged, not copied and not dropped is what lets a proof treat two tokens as disjoint memory.
+pub const PointsTo = if (ghost) struct {
+    lo: usize,
+    hi: usize,
+
+    const Self = @This();
+
+    pub const Pair = struct { head: Self, tail: Self };
+
+    /// The permission for all of `buf`. This is the one trusted source of tokens: the caller states that
+    /// nothing else uses these bytes, and `zvc` names every call as a premise (`assuming ... at file:line`).
+    pub inline fn own(buf: []const u8) Self {
+        return .{ .lo = 0, .hi = buf.len };
+    }
+
+    /// `[lo, cut)` and `[cut, hi)`: disjoint, and together exactly what `self` was. `cut` is a position in the
+    /// region, not a length, so that no arithmetic is needed to say where the cut is.
+    pub inline fn split(self: Self, cut: usize) Pair {
+        requires(self.lo <= cut and cut <= self.hi);
+        return .{
+            .head = .{ .lo = self.lo, .hi = cut },
+            .tail = .{ .lo = cut, .hi = self.hi },
+        };
+    }
+
+    /// The inverse of `split`: two permissions that meet make one.
+    pub inline fn join(head: Self, tail: Self) Self {
+        requires(head.hi == tail.lo);
+        return .{ .lo = head.lo, .hi = tail.hi };
+    }
+
+    /// Gives the permission up for good: the bytes can never be used through it again.
+    pub inline fn discard(self: Self) void {
+        _ = self;
+    }
+} else void;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 4. Governance: assurance manifest + laws
 // ─────────────────────────────────────────────────────────────────────────────
 

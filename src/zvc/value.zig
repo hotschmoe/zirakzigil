@@ -11,10 +11,15 @@ const Term = term.Term;
 const Sort = term.Sort;
 const Pool = term.Pool;
 
+/// A field of `owner`, a struct type: the type is how a store into a place that holds nothing yet knows what it builds.
+pub const FieldStep = struct { index: u32, owner: schema.TypeId };
+
 pub const Step = union(enum) {
-    field: u32,
+    field: FieldStep,
     slice_len,
     slice_ptr,
+    /// The payload of an optional.
+    payload,
 };
 
 /// A pointer to part of a memory cell.
@@ -38,6 +43,8 @@ pub const Obj = struct {
     fields: []const Field,
     /// The struct type, when known: it names the fields.
     ty: schema.TypeId = .none,
+    /// The identity of a `zv.PointsTo` token (see `Ctx.isToken`); 0 for everything else.
+    token: u32 = 0,
 };
 
 /// Finds the declared name of field `index` of a struct type, from wherever the source is.
@@ -69,6 +76,9 @@ pub const Lazy = struct { base: []const u8, index: u32, value: Value };
 
 pub const error_bits = 16;
 
+/// The printed name of `zv.PointsTo` in a pack.
+pub const token_type = "zv.PointsTo__struct";
+
 /// A symbolic input worth printing in a counterexample.
 pub const Input = struct {
     name: []const u8,
@@ -92,6 +102,9 @@ pub const Ctx = struct {
     /// Prefixed to the name of every input variable, so functions sharing a pool never share a variable.
     prefix: []const u8 = "",
     field_names: ?FieldNames = null,
+    /// Tokens named so far, by the variable that stands for them: a token read twice is one token.
+    token_names: std.StringHashMapUnmanaged(u32) = .empty,
+    tokens: u32 = 0,
 
     pub fn unsupported(c: *Ctx, comptime fmt: []const u8, args: anytype) error{Unsupported} {
         c.reason = std.fmt.allocPrint(c.arena, fmt, args) catch "out of memory";
@@ -126,6 +139,23 @@ pub const Ctx = struct {
 
     pub fn typeName(c: *const Ctx, id: schema.TypeId) []const u8 {
         return c.pack.typeName(id);
+    }
+
+    /// Whether `id` is `zv.PointsTo`: a permission token, linear and built only by its own operations.
+    pub fn isToken(c: *const Ctx, id: schema.TypeId) bool {
+        return id != .none and std.mem.eql(u8, c.typeName(id), token_type);
+    }
+
+    pub fn newToken(c: *Ctx) u32 {
+        c.tokens += 1;
+        return c.tokens;
+    }
+
+    /// The token that the variable `name` stands for.
+    fn tokenNamed(c: *Ctx, name: []const u8) Allocator.Error!u32 {
+        const entry = try c.token_names.getOrPut(c.arena, name);
+        if (!entry.found_existing) entry.value_ptr.* = c.newToken();
+        return entry.value_ptr.*;
     }
 
     pub fn create(c: *Ctx, comptime T: type, v: T) Allocator.Error!*const T {
@@ -186,7 +216,7 @@ pub const Ctx = struct {
                 const payload: Value = if (c.typeRec(t.child).kind == .void) .none else try c.symbolicShown(try std.fmt.allocPrint(c.arena, "{s}.val", .{name}), try std.fmt.allocPrint(c.arena, "{s}.val", .{shown}), t.child, record);
                 return .{ .eu = try c.create(Eu, .{ .is_err = is_err, .err = err, .payload = payload }) };
             },
-            .@"struct" => return .{ .obj = try c.create(Obj, .{ .base = name, .fields = &.{}, .ty = id }) },
+            .@"struct" => return .{ .obj = try c.create(Obj, .{ .base = name, .fields = &.{}, .ty = id, .token = if (c.isToken(id)) try c.tokenNamed(name) else 0 }) },
             .void => return .none,
             else => return c.unsupported("type {s} ({t})", .{ c.typeName(id), t.kind }),
         }
@@ -205,10 +235,10 @@ pub const Ctx = struct {
             } },
             .array => |a| return .{ .array = .{ .mem = try p.fresh(name, p.sortOf(a.mem)), .len = a.len } },
             .elem_ptr, .place => return c.unsupported("a pointer changes inside a loop", .{}),
-            .obj => {
+            .obj => |o| {
                 const fresh_name = try std.fmt.allocPrint(c.arena, "{s}!{d}", .{ name, p.fresh_count });
                 p.fresh_count += 1;
-                return .{ .obj = try c.create(Obj, .{ .base = fresh_name, .fields = &.{} }) };
+                return .{ .obj = try c.create(Obj, .{ .base = fresh_name, .fields = &.{}, .token = if (o.token != 0) try c.tokenNamed(fresh_name) else 0 }) };
             },
             .opt => |o| return .{ .opt = try c.create(Opt, .{ .has = try p.fresh(name, .bool), .payload = try c.havoc(name, o.payload) }) },
             .eu => |e| return .{ .eu = try c.create(Eu, .{
@@ -262,7 +292,7 @@ pub const Ctx = struct {
             n += 1;
         }
         if (!placed) fields[n] = .{ .index = index, .value = v };
-        return .{ .obj = try c.create(Obj, .{ .base = o.base, .fields = fields, .ty = o.ty }) };
+        return .{ .obj = try c.create(Obj, .{ .base = o.base, .fields = fields, .ty = o.ty, .token = o.token }) };
     }
 
     fn find(_: *Ctx, o: *const Obj, index: u32) ?usize {
@@ -300,6 +330,7 @@ pub const Ctx = struct {
             .obj => |x| {
                 const y = b.obj;
                 if (x == y) return a;
+                if (x.token != y.token) return c.unsupported("a join of different tokens", .{});
                 const same_base = if (x.base) |xb| (if (y.base) |yb| std.mem.eql(u8, xb, yb) else false) else y.base == null;
                 if (!same_base) return c.unsupported("a join of structs with different origins", .{});
                 var fields: std.ArrayList(Field) = .empty;
@@ -312,7 +343,7 @@ pub const Ctx = struct {
                     const yv = try c.fieldLike(y, i, x);
                     try fields.append(c.arena, .{ .index = i, .value = try c.merge(cond, xv, yv) });
                 }
-                return .{ .obj = try c.create(Obj, .{ .base = x.base, .fields = fields.items, .ty = x.ty }) };
+                return .{ .obj = try c.create(Obj, .{ .base = x.base, .fields = fields.items, .ty = x.ty, .token = x.token }) };
             },
             .opt => |x| return .{ .opt = try c.create(Opt, .{
                 .has = try p.ite(cond, x.has, b.opt.has),
@@ -346,7 +377,7 @@ pub const Ctx = struct {
                 .has = try c.named(try std.fmt.allocPrint(c.arena, "{s}.has", .{name}), .bool),
                 .payload = try c.havocNamed(try std.fmt.allocPrint(c.arena, "{s}.val", .{name}), o.payload),
             }) },
-            .obj => return .{ .obj = try c.create(Obj, .{ .base = name, .fields = &.{} }) },
+            .obj => |o| return .{ .obj = try c.create(Obj, .{ .base = name, .fields = &.{}, .token = if (o.token != 0) try c.tokenNamed(name) else 0 }) },
             else => return c.unsupported("a join where one struct lacks a field of this kind", .{}),
         }
     }
