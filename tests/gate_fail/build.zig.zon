@@ -1,0 +1,10 @@
+.{
+    .name = .gate_fail,
+    .version = "0.0.0",
+    .fingerprint = 0x9f749e78e7160f69,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .zirakzigil = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tools" },
+}

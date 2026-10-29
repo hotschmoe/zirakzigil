@@ -41,6 +41,84 @@ pub fn addTestMatrix(b: *std.Build, options: TestMatrixOptions) *std.Build.Step 
     return step;
 }
 
+pub const AssuranceGateOptions = struct {
+    /// The consumer's report executable (see `zv.report`); it receives the evidence as arguments.
+    report: *std.Build.Step.Compile,
+    /// Directory holding the library source, instrumented as a whole.
+    src: std.Build.LazyPath,
+    /// Root file of the library, relative to `src`.
+    root: []const u8 = "root.zig",
+    /// The name scenario files import the library by.
+    lib_name: []const u8,
+    /// Extra imports for the library (everything except `zv`, which is added).
+    imports: []const std.Build.Module.Import = &.{},
+    /// Test roots inside `src`, run as the `laws` suite.
+    laws: []const []const u8 = &.{},
+    /// Test roots outside `src` that drive the library end to end, run as the `scenarios` suite.
+    scenarios: []const std.Build.LazyPath = &.{},
+};
+
+/// Adds the `assurance` step and makes the default `zig build` run it. A
+/// generated copy of `src` has a `zv.cover` hit planted in every function; the
+/// law and scenario roots run against that copy, and the report fails the build
+/// if any function the manifest classifies above `.trusted` was never executed.
+/// Unit tests in `src` are not evidence: only the roots named here are run.
+pub fn addAssuranceGate(b: *std.Build, options: AssuranceGateOptions) *std.Build.Step {
+    const dep = b.dependencyFromBuildZig(@This(), .{ .ghost = false });
+    return gate(b, options, dep.module("zv"), dep.path("src/gate/instrument.zig"));
+}
+
+fn gate(b: *std.Build, options: AssuranceGateOptions, zv: *std.Build.Module, instrument_source: std.Build.LazyPath) *std.Build.Step {
+    const instrument = b.addExecutable(.{ .name = "zv-instrument", .root_module = b.createModule(.{
+        .root_source_file = instrument_source,
+        .target = b.graph.host,
+    }) });
+    const plant = b.addRunArtifact(instrument);
+    plant.addDirectoryArg(options.src);
+    const tree = plant.addOutputDirectoryArg("src");
+    const map = plant.addOutputFileArg("cover.map");
+    _ = plant.addDepFileOutputArg("cover.d");
+    for (options.laws) |path| plant.addArg(path);
+
+    const lib = b.createModule(.{
+        .root_source_file = tree.path(b, options.root),
+        .target = b.graph.host,
+        .imports = options.imports,
+    });
+    lib.addImport("zv", zv);
+
+    const check = b.addRunArtifact(options.report);
+    check.addArg("--map");
+    check.addFileArg(map);
+    for (options.laws) |path| {
+        const root = b.createModule(.{ .root_source_file = tree.path(b, path), .target = b.graph.host, .imports = options.imports });
+        root.addImport("zv", zv);
+        addSuite(b, check, "laws", root);
+    }
+    for (options.scenarios) |path| {
+        const root = b.createModule(.{ .root_source_file = path, .target = b.graph.host });
+        root.addImport(options.lib_name, lib);
+        root.addImport("zv", zv);
+        addSuite(b, check, "scenarios", root);
+    }
+
+    const step = b.step("assurance", "Check every classified function was executed by a law or scenario");
+    step.dependOn(&check.step);
+    b.getInstallStep().dependOn(step);
+    return step;
+}
+
+fn addSuite(b: *std.Build, check: *std.Build.Step.Run, name: []const u8, root: *std.Build.Module) void {
+    const tests = b.addTest(.{ .name = name, .root_module = root });
+    const run = b.addRunArtifact(tests);
+    run.stdio = .infer_from_args;
+    run.expectExitCode(0); // hits go to stdout; a failing test keeps its stderr
+    run.addCheck(.{ .expect_stderr_match = "passed" });
+    check.addArg("--suite");
+    check.addArg(name);
+    check.addFileArg(run.captureStdOut(.{}));
+}
+
 const Wire = *const fn (b: *std.Build, root: *std.Build.Module, ghost: bool) void;
 
 /// Each ghost setting is a distinct dependency instance, so its `zv` module
@@ -164,20 +242,18 @@ pub fn build(b: *std.Build) void {
         neg.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
 
-    // The Phase 0 gate measurement, demonstrated on the examples.
-    const assurance = b.step("assurance", "Print the per-module assurance table for the examples");
+    // The Phase 0 gate on the examples: their laws and scenario tests are the evidence.
     const report = b.addExecutable(.{ .name = "assurance", .root_module = b.createModule(.{
         .root_source_file = b.path("examples/assurance.zig"),
         .target = b.graph.host,
-        .imports = &.{
-            .{ .name = "zv", .module = local },
-            .{ .name = "search", .module = example_modules[0] },
-            .{ .name = "ledger", .module = example_modules[1] },
-            .{ .name = "regress", .module = example_modules[2] },
-            .{ .name = "queries", .module = example_modules[3] },
-        },
+        .imports = &.{.{ .name = "zv", .module = local }},
     }) });
-    assurance.dependOn(&b.addRunArtifact(report).step);
+    _ = gate(b, .{
+        .report = report,
+        .src = b.path("examples"),
+        .lib_name = "examples",
+        .laws = &.{ "search.zig", "ledger.zig", "regress.zig", "queries.zig" },
+    }, zv, b.path("src/gate/instrument.zig"));
 
     // Freestanding gate: zv must not grow an OS dependency.
     const freestanding = b.step("freestanding", "Cross-compile zv for freestanding aarch64 and riscv64");
@@ -194,6 +270,16 @@ pub fn build(b: *std.Build) void {
         }
     }
     test_step.dependOn(freestanding);
+
+    // The gate must reject a claim no law or scenario executes, and say which one.
+    const gate_fail = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "assurance" });
+    gate_fail.setName("gate rejects an unexecuted claim");
+    gate_fail.setCwd(b.path("tests/gate_fail"));
+    gate_fail.has_side_effects = true;
+    gate_fail.addCheck(.{ .expect_term = .{ .exited = 1 } });
+    gate_fail.addCheck(.{ .expect_stdout_match = "root.forgotten: classified .tested, executed by no suite" });
+    gate_fail.addCheck(.{ .expect_stderr_match = "Build Summary" });
+    test_step.dependOn(&gate_fail.step);
 
     // Downstream-consumer check: a separate project that depends on this one by path.
     const consumer = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test", "assurance", b.fmt("-Dghost={}", .{ghost}), b.fmt("-Doptimize={t}", .{optimize}) });

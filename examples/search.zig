@@ -96,6 +96,7 @@ test "lowerBound" {
 
 test "withdraw / clampedAdd / scale" {
     try std.testing.expectEqual(@as(u64, 3), withdraw(10, 7));
+    try std.testing.expectEqual(@as(u64, 3), withdrawNaive(10, 7)); // tests cannot see the underflow
     try std.testing.expectEqual(@as(u32, 100), clampedAdd(90, 20, 100));
     try std.testing.expectEqual(@as(u32, 30), clampedAdd(10, 20, 100));
     const s = scale(.lit(1000), .lit(50));

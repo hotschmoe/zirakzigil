@@ -83,29 +83,54 @@ The alternative considered for type constructors was exempting them. It is simpl
 
 ## Measuring the gate
 
-`zv.assuranceCounts(M)` returns `zv.Counts` (verified, checked, tested, trusted, governed, unwitnessed, external) for one module; `zv.manifest.audit(M, floor)` also returns the first problem instead of failing the build. `zv.report` prints the table and exits non-zero if a module has no manifest, an unclassified function, or a level under its floor. A consumer adds one line per module:
+`zv.assuranceCounts(M)` returns `zv.Counts` (verified, checked, tested, trusted, governed, unwitnessed, external) for one module; `zv.manifest.audit(M, floor)` also returns the first problem and every classified function as a `Claim`. A manifest is a claim; the gate is the evidence for it.
 
-```zig
-// tools/assurance.zig
-pub fn main(init: std.process.Init) !void {
-    try zv.report.run(init.io, .{
-        .{ "ring_buffer", lib.storage.ring_buffer },
-        .{ "tcp", lib.wire.tcp, .checked }, // optional per-module floor
-    }, .tested);
-}
+### What `.tested` means
+
+A function classified `.tested` (or above) must be **executed by a law or a scenario**. Unit tests do not count, the suites that do count are named in `build.zig`, and the build fails, listing the function, when a claim has no evidence:
+
+```
+module                    fns verified checked tested trusted      laws scenarios unproven  status
+wire.tcp                   23        0       3     20       0        23        22        0  ok
+rpl                        21        0       0     21       0        21         0        0  ok
+...
+unproven claims (write a law or scenario that runs them, or lower the claim to .trusted with a code owner):
+  rpl.TrickleTimer.poll: classified .tested, executed by no suite
 ```
 
+How the evidence is produced, and why it cannot be written by hand:
+
+1. `zirakzigil.addAssuranceGate` runs `src/gate/instrument.zig` over your source directory. It writes a copy into the build cache in which **every function body starts with a `zv.cover.hit(id)` call and every `test` block is removed**, except in the evidence files you name. The repository is never modified, and the tool rejects source that mentions the hit function, so a contributor cannot forge a hit.
+2. The evidence roots are built against that copy and run: `.laws` are files inside the source directory (they keep their `test` blocks), `.scenarios` are files outside it that import the library by name and drive it end to end (`examples/`, for instance). Their stdout is captured; a law or scenario that fails fails the build with its own message.
+3. `zv.report.run` walks the manifest from your root module, so a module cannot dodge the gate by not being listed, joins every claim to the instrumented function of the same qualified name (`wire.tcp.Repr.parse`), and fails when a `.tested`, `.checked` or `.verified` claim names a function that no suite executed or that does not exist. `.trusted` claims are exempt, counted, and still need a code owner.
+
+A unit test that exercises a function therefore cannot raise its level; a law or scenario that runs it can, and that is the point: the owner decides what counts as evidence by choosing the roots. Execution is evidence that a law *reaches* the function, not that it *judges* the result. Keep laws as specifications (RFC and reference semantics), and use mutation spot checks to see they bite; `docs/phase0.md` records one.
+
+Wiring, in the consumer's `build.zig`:
+
 ```zig
-// build.zig
 const report = b.addExecutable(.{ .name = "assurance", .root_module = b.createModule(.{
     .root_source_file = b.path("tools/assurance.zig"),
     .target = b.graph.host,
     .imports = &.{ .{ .name = "zv", .module = zv }, .{ .name = "mylib", .module = lib } },
 }) });
-b.step("assurance", "Per-module assurance table").dependOn(&b.addRunArtifact(report).step);
+_ = zirakzigil.addAssuranceGate(b, .{
+    .report = report,
+    .src = b.path("src"),            // instrumented as a whole
+    .lib_name = "mylib",             // what scenario files import
+    .laws = &.{"laws.zig"},          // evidence roots inside src; their tests are kept
+    .scenarios = &.{b.path("examples/echo.zig")}, // evidence roots outside src
+});
 ```
 
-Do not list a re-exporting root next to its children: the table would count them twice. The root's own `requireAssurance` already gates the whole tree.
+```zig
+// tools/assurance.zig
+pub fn main(init: std.process.Init) !void {
+    try zv.report.run(init, @import("mylib"), .tested);
+}
+```
+
+The step is `zig build assurance`, and it is attached to the default step, so a plain `zig build` reports the gate and fails on a gap. Claims that come from other packages (a dependency's `Slots` handle reached through your re-export, for example) are listed as foreign: their own package gates them. `tests/gate_fail/` is the negative test: a claim no law runs must fail the build and be named.
 
 ## Borrowed slots: `zv.Slots`
 

@@ -75,13 +75,16 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 | `src/manifest.zig` | Assurance manifests: `requireAssurance`, `assuranceCounts`, `audit` |
 | `src/laws.zig` | Executable laws: seeded `checkLaws` (with `replay`), fuzzer-driven `fuzzLaws`, `Bytes(max)`, pinned counterexamples replayed first |
 | `src/pinned.zig` | The `pub const pinned` corpus: literal-to-argument coercion with compile errors, paste-ready entry printer, fuzz-input encoder |
-| `src/report.zig` | `zv.report`: per-module assurance table for `zig build assurance` |
+| `src/report.zig` | `zv.report`: the Phase 0 gate. Walks a root module's manifests, joins every claim to the coverage evidence and fails the build on a claim no law or scenario executed |
+| `src/cover.zig` | `zv.cover.hit`, the execution probe the gate plants in a generated copy of the source (never written by hand) |
+| `src/gate/instrument.zig` | The build-time tool that makes that copy: a hit in every function body, every unit test removed except in the evidence files |
 | `examples/search.zig` | Functions with contracts. Two contain planted bugs (`midpointNaive`, `withdrawNaive`) |
 | `examples/ledger.zig` | Accounts in a branded pool, money as linear tokens, laws checked as properties |
 | `examples/regress.zig` | The regression workflow: a failed law's printed entry pinned, bug fixed, case kept forever |
 | `examples/queries.zig` | zmoltcp's DNS query-table pattern on `zv.Slots`, with a model-based law and one scenario test |
-| `examples/assurance.zig` | The one-line-per-module opt-in to the assurance report |
-| `tests/consumer/` | A downstream project depending on this package by path; built by `zig build test` |
+| `examples/assurance.zig` | The report entry point for the examples: one root, the walk finds the modules |
+| `tests/consumer/` | A downstream project depending on this package by path; built by `zig build test`, including its own assurance gate |
+| `tests/gate_fail/` | A library whose manifest claims a function no law runs: `zig build test` requires its gate to fail and name it |
 | `tests/freestanding/` | Smoke object cross-compiled for aarch64 and riscv64 freestanding |
 | `tests/should_panic/` | Contributor mistakes that must panic in safe builds |
 | `tests/compile_fail/cases.txt` | Contributor mistakes that must be rejected at compile time |
@@ -101,7 +104,7 @@ zig build test                          # unit, example and law tests, freestand
 zig build test -Doptimize=ReleaseFast   # contracts compile out
 zig build test -Dghost=true             # ghost (verification-only) code compiled in
 zig build matrix                        # every optimize mode x ghost off/on, plus freestanding and tests/consumer (what CI runs)
-zig build assurance                     # per-module assurance table for the examples
+zig build assurance                     # the Phase 0 gate on the examples: every classified function must be executed by a law or scenario
 zig build freestanding                  # zv for aarch64 / riscv64 freestanding, Debug and ReleaseSafe
 zig build test --fuzz                   # laws under the real fuzzer (Linux/macOS only; not implemented on Windows)
 zig build test --fuzz=100K              # the same, stopping after 100K iterations (what CI runs)
@@ -111,7 +114,7 @@ pip install z3-solver
 python3 tools/zvc.py examples/search.zig   # expect 4 verified, 2 rejected, exit code 1
 ```
 
-To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, one `.{ "name", module }` line per module in the assurance report. Your own `zig build matrix` is one call to `zirakzigil.addTestMatrix`; see "Build matrix" there.
+To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, `zirakzigil.addAssuranceGate` for the Phase 0 gate (a root module and the names of your law and scenario files). Your own `zig build matrix` is one call to `zirakzigil.addTestMatrix`; see "Build matrix" there.
 
 ## Results (Zig 0.17.0, 2026-10-28)
 
@@ -143,7 +146,7 @@ Each phase ships value before the next one starts. Phases are ordered by depende
 
 | Phase | Scope | Exit gate |
 | --- | --- | --- |
-| **0. Adopt the comptime and runtime layers** (no fork) | `zv` contracts, `Ranged`, `Pool`, `Linear`; manifests; laws and fuzzing in CI | Every module has a manifest at floor `.tested` or higher |
+| **0. Adopt the comptime and runtime layers** (no fork) | `zv` contracts, `Ranged`, `Pool`, `Linear`; manifests; laws and fuzzing in CI | Every module has a manifest at floor `.tested` or higher, where `.tested` is measured: a law or scenario executes the function. **Met on the pilot** (zmoltcp 0.5.0: 549 of 549 classified functions evidenced; 185 had no evidence before); see [`docs/phase0-report.md`](docs/phase0-report.md) |
 | **1. AIR exporter** | One small compiler patch: per-function AIR as versioned JSON in ghost builds | Every function in a pilot codebase exports and round-trips |
 | **2. `zvc` on AIR** | Port the spike: modular calls, structs, termination, ghost `Int` and `Seq` | Spike results reproduce from AIR, plus one real kernel verified |
 | **3. `zv-own`** | Linearity, allocator regions, pointer invalidation, pinned types | Catches seeded ownership bugs at a false-positive rate the team accepts |

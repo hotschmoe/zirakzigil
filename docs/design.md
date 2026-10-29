@@ -213,7 +213,7 @@ A normal build applies the comptime layer and erases contracts in ReleaseFast. T
 | --- | --- | --- | --- |
 | `.verified` | Contracts proved by `zvc` | `zvc` succeeds on every change | Anyone; it can only be lowered by a code owner |
 | `.checked` | Contracts present, executed in safe builds | Tests and fuzzing pass with contracts on | Anyone |
-| `.tested` | Covered by tests or laws only | Tests pass | Anyone, above the module floor |
+| `.tested` | Executed by a law or scenario in the evidence suites (unit tests do not count) | The assurance gate: `zig build assurance` fails on any claim no suite executed | Anyone, above the module floor |
 | `.trusted` | Reviewed by a person, no machine check | CODEOWNERS approval; counted and ratcheted | Code owners only |
 
 ### Ghost and permission types, without new syntax
