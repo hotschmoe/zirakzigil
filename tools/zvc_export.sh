@@ -46,12 +46,14 @@ trap 'rm -rf "$work"' EXIT
 printf 'pub const ghost: bool = true;\n' >"$work/zv_options.zig"
 printf 'const target = @import("target");\npub const items = .{ %s };\n' "${items:-target}" >"$work/selection.zig"
 
+air_root=air_all
+[ -z "${ZVC_DEEP:-}" ] || air_root=air_deep
 stem=$(basename "$file" .zig)
 index=$work/$stem
 mkdir -p "$index"
 # shellcheck disable=SC2086
 ZV_AIR_OUT=$index "$zv" test -fno-emit-bin -target "$target" -mcpu baseline $lib \
-    --dep target --dep selection -Mroot="$root/tools/air_all.zig" \
+    --dep target --dep selection -Mroot="$root/tools/$air_root.zig" \
     --dep zv$deps -Mtarget="$file"$dep_modules \
     --dep target -Mselection="$work/selection.zig" \
     --dep zv_options -Mzv="$root/src/zv.zig" \
