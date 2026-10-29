@@ -34,11 +34,18 @@ pub const Types = struct {
         return if (id == .none) .void else t.rec(id).kind;
     }
 
-    /// `zv.Linear(T)`: a value that must be consumed exactly once.
+    /// `zv.Linear(T)` or `zv.PointsTo`: a value that must be consumed exactly once.
     pub fn isLinear(t: Types, id: schema.TypeId) bool {
         if (id == .none) return false;
         const r = t.rec(id);
-        return r.kind == .@"struct" and std.mem.startsWith(u8, t.pack.str(r.name), "zv.Linear(");
+        if (r.kind != .@"struct") return false;
+        const printed = t.pack.str(r.name);
+        return std.mem.startsWith(u8, printed, "zv.Linear(") or std.mem.eql(u8, printed, zv_air.tokens.type_name);
+    }
+
+    /// `zv.PointsTo` itself, not a struct holding one.
+    pub fn isToken(t: Types, id: schema.TypeId) bool {
+        return id != .none and t.rec(id).kind == .@"struct" and std.mem.eql(u8, t.pack.str(t.rec(id).name), zv_air.tokens.type_name);
     }
 
     /// A struct that holds a `zv.PinCheck` by value: its address is part of what it is, so it must not be copied.

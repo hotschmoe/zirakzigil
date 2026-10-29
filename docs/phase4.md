@@ -1,12 +1,15 @@
 # Phase 4: permission tokens and a verified core
 
-Phase 4 is the Verus part of the plan: raw-memory code is verified by pairing the memory with a linear ghost token, so the solver never reasons about aliasing, only about small arithmetic goals. M1 (0.17.17) builds the token, the rules `zvc` applies to it, and a bump allocator over a fixed byte buffer that `zvc` proves. The exit gate of the phase is "the core is `.verified` and the `.trusted` count is falling"; this document says what M1 reaches of it and what the rest costs.
+Phase 4 is the Verus part of the plan: raw-memory code is verified by pairing the memory with a linear ghost token, so the solver never reasons about aliasing, only about small arithmetic goals. M1 (0.17.17) built the token, the rules `zvc` applies to it, and a bump allocator over a fixed byte buffer that `zvc` proves; M2 (0.17.19) makes the allocator a method on `*Bump`, with its token in a field, and has `zv-own` check tokens in code `zvc` does not verify. The exit gate of the phase is "the core is `.verified` and the `.trusted` count is falling"; this document says what M1 reaches of it and what the rest costs.
 
 ```
 zv.PointsTo                          src/zv.zig       the token, ghost-only (void in production)
-examples/bump.zig                    the allocator    7 functions .verified, a checked shell, 2 laws
+src/air/tokens.zig                   the names of the token and its operations, shared by zvc and zv-own
+examples/bump.zig                    the allocator    7 methods .verified, a checked shell, 2 laws
 tests/zvc/tokens.zig                 23 verdicts      what zvc must refuse about tokens, and their controls
-tools/run_zvc.sh                     the suite        tokens.expect, bump.expect
+tests/zvc/pointers.zig               *Self cases      what a call may rely on of a pointee, aliasing, tokens in a field
+tests/own/tokens.zig                 zv-own cases     dropped, copied, reused tokens in code zvc does not verify
+tools/run_zvc.sh, tools/run_own.sh   the suites       tokens.expect, pointers.expect, bump.expect
 ```
 
 ## The token
@@ -28,19 +31,25 @@ Specifications talk about positions, not lengths. `split` takes the position of 
 
 ### Threading
 
-`zvc` follows no pointer parameters (docs/phase2.md), so M1 is written in the style the fragment allows: the allocator is a value that goes in and comes out, and so is every token.
+The allocator is a method on `*Bump`, and its token is a field of it. A method takes the token out of the field, cuts it, and puts the rest back before it returns; the head goes to the block it hands out.
 
 ```zig
-pub const Bump = struct { cap: usize, next: usize, free: zv.PointsTo };         // free: [next, cap)
+pub const Bump = struct {
+    cap: usize,
+    next: usize,
+    spare: zv.PointsTo,                                  // [next, cap)
+    pub fn alloc(self: *Bump, len: usize, alignment: usize) ?Block
+    pub fn free(self: *Bump, blk: Block) void           // joins the block's token back into spare
+    pub fn reset(self: *Bump, used: zv.PointsTo) void
+};
 pub const Block = struct { base: usize, off: usize, end: usize, perm: zv.PointsTo };  // perm: [base, end)
-pub fn alloc(b: Bump, len: usize, alignment: usize) Result    // Result = { bump: Bump, block: ?Block }
-pub fn free(b: Bump, blk: Block) Bump
-pub fn reset(b: Bump, used: zv.PointsTo) Bump
 ```
 
-`alloc` takes the allocator and gives back a new one; the token inside `b.free` is cut in two (`split(end)`): the head goes to the block, the tail to the new allocator. A block's token covers its alignment padding too (`base` is where the allocator was), so every token ever handed out is a piece of one contiguous tiling of `[0, next)`. That is what makes `reset` and `free` checkable: `reset` takes `used`, the join of every outstanding block (`[0, next)`), which is the proof that nobody holds a block any more; `free` of the last block joins its token back to `b.free`, and `join` requires that they meet.
+A block's token covers its alignment padding too (`base` is where the allocator was), so every token ever handed out is a piece of one contiguous tiling of `[0, next)`. That is what makes `reset` and `free` checkable: `reset` takes `used`, the join of every outstanding block (`[0, next)`), which is the proof that nobody holds a block any more; `free` of the last block joins its token back to `spare`, and `join` requires that they meet.
 
-Ghost expressions in the same source use the idiom of `zv.Int`: `const parts = if (zv.ghost) b.free.split(end) else {};` and `.free = if (zv.ghost) parts.tail else {}`. Specifications read token fields behind `!zv.ghost or ...`. In a normal build every token disappears.
+Specifications of a method name the state before and after: `const old = self.*;` at the top, `granted(old, len, alignment, self.*, blk)` in `zv.ensures`. A copy of a struct that holds a token is the same token, so `old.spare` is not usable after `self.spare` was cut, and the specification reads only the plain fields of `old` (`old.next`, `old.cap`).
+
+Ghost expressions use the idiom of `zv.Int`: `const parts = if (zv.ghost) self.spare.split(end) else {};` and `self.spare = if (zv.ghost) parts.tail else {};`. Specifications read token fields behind `!zv.ghost or ...`. In a normal build every token disappears.
 
 A specification may not read a token it already passed on, as in Verus: `roundTrip` copies `p.lo` and `p.hi` before `split(p)` and compares the result with the copies.
 
@@ -65,6 +74,17 @@ What this proves of the allocator, with the property and the way it is stated:
 | completeness | `alloc` refuses only a request that does not fit with the padding it needs (`refused`) |
 | a failed second request undoes the first | `pair` frees the first block, and proves the allocator is as it was |
 
+### Pointer parameters (M2)
+
+A parameter `p: *T` where `T` is a struct is a cell of its own: the function reads and writes it like a local, and its summary says how a caller may think of it afterwards.
+
+- **Summary.** At entry the pointee is a symbolic struct. At every return, `zvc` equates a placeholder for the pointee after the call (`$out`) with the value the cell has there, field by field (the fields that were written, and the ones that were read), and it records which top-level fields the function may have changed on any path. A loop that stores through the pointer, or a callee whose result is not the pointee it started from, counts as changing all of them.
+- **Call.** The argument must be the address of a variable or of a field of one. The callee's entry pointee is bound to what the caller has there; afterwards the fields it may have changed are replaced by the callee's `$out` fields, and every other field is what the caller had, so a callee that sneaks in a write beyond its contract costs the caller exactly that knowledge (`useSneaky`, `useLoopWrites`: refuted). Two pointer arguments to the same variable, or to one and to a field of it, are outside the fragment (`callSame`, `callSameField`); two fields, or two variables, are two places (`callFieldsApart`). The callee is verified on the assumption that its pointer parameters do not alias, as `noalias` says.
+- **Tokens in the pointee.** The token in a field the callee may change is the callee's for the call: the caller's copies of it are consumed (`holdAcrossCall` refuted), and the callee must put a live token back in the field before it returns (`dropSpare`, `readSpareTwice` refuted: a token taken out of the struct and consumed is not there for the caller). A field the callee does not touch keeps its token and its identity. `forgeSpare` (a token literal stored through the pointer) is outside the fragment as before.
+- **Not in the fragment.** Pointers to anything but a struct (`*u32`), pointer arguments that are not an address of a variable, and the two-pointer overlap above. A `return` of a constant that the compiler folded out of the `zv.ensures` that checked it (`null`) is tied to that `zv.ensures` again: without it `alloc` promised nothing on its refusal path.
+
+Verification of `bump.zig` as methods takes about 16 s, as before (`alloc` 9.4 s, `pair` 6.4 s).
+
 ### Soundness cases
 
 `tests/zvc/tokens.zig`, verdicts in `tokens.expect`. Everything not listed as a control must stay unproved.
@@ -84,37 +104,38 @@ What this proves of the allocator, with the property and the way it is stated:
 
 Found by these cases while building: the dead set of a path was a slice that pointed into a stack temporary, and `takeKeepsOld` was `proved` until that was fixed (a regression pin now). Unrelated to tokens but needed by the allocator, and fixed in passing: a function that returns a call's result or a parameter, whole (`return carve(...)`, `.bump = b`), promised nothing about the fields it did not set explicitly; `agrees` now equates the result with the fields that were read from it. No pinned verdict of the earlier suites changed, the checked-in packs are byte-identical when exported again, and zmoltcp still proves its 7 functions.
 
-## What `zv-own` must check (a later round)
+## What `zv-own` checks (0.17.19)
 
-`src/own` is not touched in M1. `zvc` enforces linearity on the functions it verifies, which is what its proofs need. It does not cover a token in a function that is only `.checked`: the shell `Arena` moves tokens into and out of fields, and nothing but the runtime tests sees a mistake there. What `zv-own` has to add, in the order of cost:
+`zvc` enforces linearity on the functions it verifies, which is what its proofs need. It does not cover a token in a function that is only `.checked`: the shell `Arena` moves tokens into and out of fields. `zv-own` now treats `zv.PointsTo` as a linear value, with the names shared with `zvc` through `src/air/tokens.zig` (the type, the operations, which of them consume):
 
-1. Recognise `zv.PointsTo` the way it recognises `zv.Linear`: a value of that type, or a struct, optional or error union holding one, is consumed or handed on exactly once on every path. `holdsLinear` gets the type (its name is `zv.PointsTo__struct` in a pack, as in `value.token_type` of `zvc`). `own` is a source, `split`/`join`/`discard` and a by-value parameter are sinks. This finds a dropped token (a leak that `zvc` proves harmless) and a copy that is used twice in unverified code.
-2. A token read out of memory the function does not own (`self.used` through `*Arena`) is today "outside the fragment" for `Linear`. The shell needs it, so the rule becomes: a field of `*Self` holding a token may be replaced (`self.used = self.used.join(x)` consumes the old value and stores a new one), not copied out and kept.
-3. Borrowing, `*const PointsTo`: read-only, cannot be consumed, which `zv-own` already has for `*const Linear(T)`. `zvc` would need a pointer-to-struct parameter first (M2).
-4. The token as a contract of the type: `zv.PointsTo` is `void` in production, so the check runs on ghost-build packs only. The manifest gate has to say so (`zv.requireOwnership` with a note that ownership of tokens is checked on the ghost export).
+- `own` makes a token; `split` and `join` consume their arguments and make new ones; `discard` and passing a token by value to a call consume it. Their bodies are not run. A token that is not consumed or handed on on some path (`badDrop`, `badDropHalf`, `badLeakOnBranch`, `badDropHolder`), consumed twice (`badSplitTwice`, `badCopyBothUsed`, `badJoinReuse`, `advCopyViaStruct`), read after it was consumed (`badUseAfterConsume`: a field of a consumed token), consumed in a loop (`badConsumeInLoop`) or returned after it was consumed (`badReturnAndConsume`) is a finding.
+- A token in memory the function does not own (`self.t` through a `*Self`): a read takes it out, a write puts one back. A token taken out and not put back is a finding (`badTakenNotPutBack`: `self.t.discard()`; `badReadTwice`), and the replacement `self.t = self.t.join(more)` is clean (`okReplaceInPlace`, `okReplaceDirect`). This replaces "a linear value read out of memory this function does not own" for a value that is itself a `zv.Linear` or a `zv.PointsTo`; `linear.advViaPointer` was unproven and is now an error (it takes the token out and consumes it with nothing put back).
+- Limits, pinned: overwriting a token in the caller's memory without taking it out first looks like an initialization and is counted (`gapOverwriteLive`, "handed to memory it does not follow"); a copy of a whole struct that holds a token read out of memory the function does not own is unproven (`advWholeStructRead`), so the verified methods of `bump.zig`, which spell `sound(self.*)`, are unproven for `zv-own` and proved for `zvc`.
 
-Open questions for the integration: (a) do both checkers run on the same ghost pack (`zvc_export.sh` already exports with ghost on) or does `zv-own` need a production pack for the shell? (b) a token inside a container the checker does not follow (`ArrayList(Block)`) is "handed to memory it does not follow"; for tokens that should be an error, not a count. (c) the by-value-parameter-is-a-move rule is the same in both tools, so one table (`src/zvc/value.zig`'s `token_type` and the operation names) should be shared through `zv_air` rather than written twice.
+`tests/own/tokens.zig` pins 13 clean verdicts (two are helpers, one is the gap above), 13 findings and 1 unproven, run on both packs by `tools/run_own.sh`; zmoltcp stays at 986 functions, 0 findings.
+
+Open questions: (a) a token inside a container the checker does not follow (`ArrayList(Block)`) is "handed to memory it does not follow"; for tokens that should be an error, not a count. (b) The whole-struct read of the second limit would need a ghost-read notion (a copy that cannot be consumed) shared with `zvc`'s `old = self.*`.
 
 ## What stays `.trusted`, and why
 
 | Item | Count | Why it is not proved |
 | --- | --- | --- |
-| `zv.PointsTo.own` | 1 premise in `bump.init`, named in every verdict that rests on it (`assuming zv.assume at examples/bump.zig:94`) and counted by `--max-assume` | "nothing else uses these bytes" is a fact about the caller; Zig does not check aliasing. Verus has the same boundary, in the creation of a `PPtr` from an allocation. `run_zvc.sh` pins that `--max-assume 0` refuses it |
+| `zv.PointsTo.own` | 1 premise in `Bump.init`, named in every verdict that rests on it (`assuming zv.assume at examples/bump.zig:96`) and counted by `--max-assume` | "nothing else uses these bytes" is a fact about the caller; Zig does not check aliasing. Verus has the same boundary, in the creation of a `PPtr` from an allocation. `run_zvc.sh` pins that `--max-assume 0` refuses it |
 | the rules of `zvc` above | the trusted base of the token | they are code, pinned by 23 verdicts; a verdict that changes is reviewed as a soundness change |
 | offset to slice in `Arena` (`@alignCast(self.region[blk.off..blk.end])`) | 1 shell, `.checked` | the base address alignment is a type (`[]align(64) u8`), the cast is checked in safe builds and by `blocks_hold` on real addresses. `zvc` cannot return a slice yet |
 | memory from the system, the `align(64)` of a stack array | outside the code | the trusted edge of the design (FFI, syscalls) |
 | Z3 | | as for every proof |
 
-M1 numbers: 7 `.verified` functions (`init`, `padTo`, `carve`, `alloc`, `free`, `reset`, `pair`), 3 `.checked` (`Arena`), 2 laws, 0 `.trusted` functions, 1 premise. The repository's `.trusted` count was 0 and stays 0, so the "falling" half of the exit gate is not measured by M1; the first measurement is the pilot below.
+M2 numbers: 7 `.verified` methods of `Bump` (`init`, `padTo`, `carve`, `alloc`, `free`, `reset`, `pair`), 3 `.checked` (`Arena`), 2 laws, 0 `.trusted` functions, 1 premise. The repository's `.trusted` count was 0 and stays 0, so the "falling" half of the exit gate is not measured by M1; the first measurement is the pilot below.
 
-## Limits found building M1
+## Limits found building M1 and M2
 
-- **Solver time.** 14 s for the file, of which `alloc` 6.5 s and `pair` 7 s. The cost is 64-bit identities of modular arithmetic in the obligations (`next + pad + len <= cap` from two guards). Positions instead of lengths and a helper per bit trick (`padTo`) took it from 46 s to 14 s; `run_zvc.sh` gives this pack `--timeout 60000` (the default is 10 s per obligation). Trying `smt.bv.solver=2` (Z3's integer translation) first made `carve` 100 times faster and crashed Z3 on a query with arrays in the existing suite, so it was not adopted; a portfolio that runs it only on array-free queries is a candidate.
-- **No pointer parameters** (`*Self`, `*Arena`): the state goes in and out as a value. M2.
+- **Solver time.** 16 s for the file, of which `alloc` 9.4 s and `pair` 6.4 s. The cost is 64-bit identities of modular arithmetic in the obligations (`next + pad + len <= cap` from two guards). Positions instead of lengths and a helper per bit trick (`padTo`) took it from 46 s to 14 s; `run_zvc.sh` gives this pack `--timeout 60000` (the default is 10 s per obligation). Trying `smt.bv.solver=2` (Z3's integer translation) first made `carve` 100 times faster and crashed Z3 on a query with arrays in the existing suite, so it was not adopted; a portfolio that runs it only on array-free queries is a candidate.
+- **Pointer parameters are structs only**, and a callee is verified on the assumption that its pointers do not alias; `*u32`, `*[N]T` and pointers to pointers are outside the fragment.
 - **A `zv.requires` cannot contain an operation that has an overflow check**, because the check is an obligation that comes first; specs use `-%` and `+%` after a guard (`isPow2`, `refused`).
 - **No region identity.** Tokens of two allocators of the same shape are interchangeable to `zvc`; an allocator instance is distinguished only by the values the proof has about it. A cross-allocator `free` is caught only when the offsets disagree. M4 below.
 - **`reset` takes every token back.** The shell holds them (`used`), a client holding raw slices does not. A revoke-all `reset` needs an epoch.
-- **A dropped token is proved harmless** and reported by nothing until `zv-own` knows the type.
+- **A dropped token is proved harmless** by `zvc`; `zv-own` reports it.
 - **Minting twice from one buffer** is two premises, not an error.
 
 ## Milestones
@@ -122,11 +143,10 @@ M1 numbers: 7 `.verified` functions (`init`, `padTo`, `carve`, `alloc`, `free`, 
 | | Scope | Gate |
 | --- | --- | --- |
 | **M1** (0.17.17) | `PointsTo` over byte ranges, linearity and forging rules in `zvc`, bump allocator proved, soundness cases | this document |
-| **M2** | `zvc` takes `*Self` and `*const T` parameters (in/out summaries: the final value of the pointee is a new result variable, bound at the call), so allocators are written as `fn alloc(self: *Bump, ...)`; a fixed-size block pool (free list threaded through the blocks) | `blocks.zig` proved; `Arena` verified rather than checked |
+| **M2** (0.17.19) | `zvc` takes `*Self` and `*const T` parameters (in/out summaries), the allocator is a set of methods on `*Bump` with its token in a field, `zv-own` checks tokens (shared names, tokens through `*Self`) | done. Not done: the fixed-size block pool (it needs the typed token of M3 for its free list, or arrays of tokens, which `zvc` does not have) |
 | **M3** | typed `PointsTo(T)` with a value and an initialization flag: `write(perm, ptr, v)` needs the permission and sets the value, `read` needs it initialized; `Tracked(T)` for ghost parameters; frame: a function that does not take a token cannot change its memory | a raw-pointer ring buffer proved with its read/write laws |
 | **M4** | region identity and epochs: a token belongs to one allocator instance; `reset` bumps the epoch and revokes outstanding tokens without collecting them | cross-allocator misuse refuted; shell needs no `used` |
-| **M5** | `zv-own` knows `PointsTo` (previous section); CI runs both on the ghost pack | tokens in `.checked` code are linear too |
-| **M6** | proof agents in CI (below) on the core | the pilot in the next section |
+| **M5** | proof agents in CI (below) on the core | the pilot in the next section |
 
 ## Proof agents in CI (not built)
 

@@ -318,3 +318,7 @@ A union with known variants is stored and read one place per variant (`union_ini
 - A scalar that remembers where it was read without the epoch: a value read, then its field written, then the old value tested, refined the memory with a stale fact.
 - A fact kept as a value in the memory: a refinement then looked like a write of the callee, and the summary said the function wrote the field.
 - Reporting a kill of an already invalidated block as a finding (the saved scanner): a loop that ends the same block in two rounds, and a weak write that leaves the old name next to the new one, made false double frees (`realish.internAll`); it is counted.
+
+## Tokens (0.17.19)
+
+`zv.PointsTo` is a linear value for `zv-own` too, with the same rules as `zv.Linear` plus one for tokens in memory the caller owns (a read takes the token out, a write puts one back, and a token taken out and not put back is a finding). The names of the type and its operations come from `src/air/tokens.zig`, shared with `zvc`. Cases in `tests/own/tokens.zig`; the account of what is and is not followed is in [phase4.md](phase4.md). One verdict of the earlier corpus changed: `linear.advViaPointer` (a `Linear` read out of `*Tok` and consumed) was unproven and is an error.

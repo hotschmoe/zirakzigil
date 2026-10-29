@@ -1583,14 +1583,17 @@ pub const Run = struct {
                 const gop = try r.tok_cells.getOrPut(r.arena, t);
                 if (!gop.found_existing) gop.value_ptr.* = r.places.rec(pl).n;
             };
+            var written = val;
             if (kind != .cell and !val.toks.isEmpty()) {
                 try r.tally("transfers", inst);
                 r.noteTokenStored(val);
                 try r.sink(st, inst, val, "stored into memory the caller owns", "");
+                // The place holds a token again, one the caller owns: not one this function can consume.
+                written.toks = .empty;
             }
             // Poison is not a fresh object: what ended stays ended.
             const before = r.objAt(st, pl);
-            try r.writeVal(st, pl, val, val_ty);
+            try r.writeVal(st, pl, written, val_ty);
             if (undef) {
                 var k: usize = 0;
                 while (k < st.mem.count()) {
@@ -1636,8 +1639,16 @@ pub const Run = struct {
         if (ptr.place) |pl| {
             try r.objectAlive(st, inst, pl);
             out = try r.readVal(st, pl, ty);
-            if (r.places.rec(pl).kind != .cell and r.ty.hasTokens(ty))
-                return r.unsupported(inst, "a linear value read out of memory this function does not own", .{});
+            if (r.places.rec(pl).kind != .cell and r.ty.hasTokens(ty)) {
+                // A token in memory the caller owns is taken out by a read and must be put back by a write: the place then
+                // holds the token this function made of the read, and a second read finds it consumed.
+                if (!r.ty.isLinear(ty)) return r.unsupported(inst, "a struct holding a linear value is read out of memory this function does not own", .{});
+                if (out.toks.isEmpty()) {
+                    var sub: u32 = 0;
+                    out = try r.fresh(st, inst, ty, &sub);
+                    try r.writeVal(st, pl, out, ty);
+                }
+            }
             const wrapped = r.ty.kind(ty) == .optional or r.ty.kind(ty) == .error_union;
             if (out.src == null and r.ty.kind(r.ty.payload(ty)) == .@"struct") out.src = pl;
             if (wrapped) out.from = pl;
@@ -2239,6 +2250,11 @@ pub const Run = struct {
         try r.snapshot(inst, st, val);
         // Handing the value to the caller ends the function's ownership of its tokens.
         st.live = try st.live.minus(r.arena, val.toks);
+        for (st.mem.keys(), st.mem.values()) |key, held| {
+            if (r.places.rec(key).kind == .cell or held.toks.isEmpty() or held.toks.meets(st.live)) continue;
+            const made = try r.created(held.toks.ids[0]);
+            try r.report(st, .leak, inst.loc, try r.noteList(&.{made}), "linear value `{s}` was taken out of memory the caller owns and is not put back", .{r.tokenName(held.toks.ids[0])});
+        }
         for (st.live.ids) |t| {
             const made = try r.created(t);
             try r.report(st, .leak, inst.loc, try r.noteList(&.{made}), "linear value `{s}` is not consumed on this path", .{r.tokenName(t)});
@@ -2395,6 +2411,8 @@ pub const Run = struct {
                     else => 3,
                 };
                 var p = r.arg(inst, 0);
+                if (p.place) |pl| if (r.ty.kind(r.operandType(r.v.ops(inst)[0])) == .pointer and r.ty.isToken(r.ty.rec(r.operandType(r.v.ops(inst)[0])).child))
+                    try r.use(st, inst, try r.peekFlat(st, pl), "read");
                 if (p.place) |pl| {
                     p.place = r.up_of.get(pl) orelse try r.places.child(r.arena, pl, field);
                     if (r.up_of.contains(pl)) return r.set(inst, p);
@@ -2504,7 +2522,10 @@ pub const Run = struct {
                 r.set(inst, out);
             },
 
-            .block, .dbg_inline_block => try r.block(inst, st),
+            .dbg_inline_block => if (r.v.attrStr(inst, .callee)) |callee| {
+                if (zv_air.tokens.opOf(callee)) |op| try r.tokenOp(st, inst, op, callee) else try r.block(inst, st);
+            } else try r.block(inst, st),
+            .block => try r.block(inst, st),
             .loop => try r.loop(inst, st),
             .br => {
                 const target = r.v.attr(inst, .target) orelse return r.unsupported(inst, "br without a target", .{});
@@ -2630,6 +2651,20 @@ pub const Run = struct {
     fn isContainer(r: *Run, ty: schema.TypeId) bool {
         var buf: [512]u8 = undefined;
         return r.ty.kind(ty) == .@"struct" and spec.family(spec.stripped(&buf, r.ty.name(ty))) != null;
+    }
+
+    /// An operation of `zv.PointsTo`: its body is not run. The arguments it consumes are sunk, and what it makes is new tokens.
+    fn tokenOp(r: *Run, st: *State, inst: *const Inst, op: zv_air.tokens.Op, callee: []const u8) Error!void {
+        const bodies = r.v.bodies(inst);
+        if (bodies.len != 1) return r.unsupported(inst, "a block with {d} bodies", .{bodies.len});
+        for (r.v.insts(bodies[0])) |*opening| {
+            if (opening.tag != .dbg_arg_inline) break;
+            const val = r.operand(r.v.ops(opening)[0]);
+            try r.use(st, inst, val, "passed to a token operation");
+            if (zv_air.tokens.consumes(op)) try r.sink(st, inst, val, "passed on", callee);
+        }
+        var sub: u32 = 0;
+        r.set(inst, try r.fresh(st, inst, inst.ty, &sub));
     }
 
     fn block(r: *Run, inst: *const Inst, st: *State) Error!void {

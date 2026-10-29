@@ -1,0 +1,24 @@
+# name verdict. Pointer-to-struct parameters and the tokens in their fields. A verdict changing here is reviewed as a soundness or completeness change of zvc.
+# Controls (proved): setNext, useSet, keepsCap, take, forward, readOnly, useReadOnly, same, loopWrites, callApart, callFieldsApart, sneaky.
+pointers.R.callApart proved
+pointers.R.callFieldsApart proved
+pointers.R.callSame unproven
+pointers.R.callSameField unproven
+pointers.R.claimsCap refuted
+pointers.R.dropSpare refuted
+pointers.R.forgeSpare unproven
+pointers.R.forward proved
+pointers.R.holdAcrossCall refuted
+pointers.R.intPointee unproven
+pointers.R.keepsCap proved
+pointers.R.loopWrites proved
+pointers.R.readOnly proved
+pointers.R.readSpareTwice refuted
+pointers.R.same proved
+pointers.R.setNext proved
+pointers.R.sneaky proved
+pointers.R.take proved
+pointers.R.useLoopWrites refuted
+pointers.R.useReadOnly proved
+pointers.R.useSet proved
+pointers.R.useSneaky refuted
