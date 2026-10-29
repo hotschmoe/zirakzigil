@@ -13,6 +13,9 @@ pub const Entry = struct {
     level: Level,
 };
 
+/// One line of a manifest as written: the qualified name and the enum literal after it.
+pub const RawEntry = struct { name: []const u8, tag: []const u8 };
+
 pub const Source = struct {
     text: [:0]const u8,
     tree: Ast,
@@ -37,6 +40,15 @@ pub const Source = struct {
 
     /// Every `assurance` declaration with the levels it lists, named by enclosing scopes.
     pub fn entries(s: *const Source, arena: Allocator) Allocator.Error![]const Entry {
+        const raw = try s.rawEntries(arena, "assurance");
+        const out = try arena.alloc(Entry, raw.len);
+        for (out, raw) |*slot, e| slot.* = .{ .name = e.name, .level = std.meta.stringToEnum(Level, e.tag) orelse .other };
+        return out;
+    }
+
+    /// Every declaration called `decl_name` (`assurance`, `ownership`) with the enum literals it lists, named by
+    /// enclosing scopes.
+    pub fn rawEntries(s: *const Source, arena: Allocator, decl_name: []const u8) Allocator.Error![]const RawEntry {
         const tree = &s.tree;
         var scopes: std.ArrayList(Scope) = .empty;
         var manifests: std.ArrayList(Ast.Node.Index) = .empty;
@@ -55,7 +67,7 @@ pub const Source = struct {
                     const decl = tree.fullVarDecl(node).?;
                     const name = tree.tokenSlice(decl.ast.mut_token + 1);
                     const init_node = decl.ast.init_node.unwrap() orelse continue;
-                    if (std.mem.eql(u8, name, "assurance")) {
+                    if (std.mem.eql(u8, name, decl_name)) {
                         try manifests.append(arena, init_node);
                     } else if (tree.fullContainerDecl(&buf, init_node) != null) {
                         const start, const end = spanOf(tree, init_node);
@@ -65,7 +77,7 @@ pub const Source = struct {
                 else => {},
             }
         }
-        var out: std.ArrayList(Entry) = .empty;
+        var out: std.ArrayList(RawEntry) = .empty;
         for (manifests.items) |init_node| {
             const start, _ = spanOf(tree, init_node);
             var prefix: std.ArrayList(u8) = .empty;
@@ -86,7 +98,7 @@ pub const Source = struct {
         return out.items;
     }
 
-    fn walkManifest(s: *const Source, arena: Allocator, node: Ast.Node.Index, prefix: []const u8, out: *std.ArrayList(Entry)) Allocator.Error!void {
+    fn walkManifest(s: *const Source, arena: Allocator, node: Ast.Node.Index, prefix: []const u8, out: *std.ArrayList(RawEntry)) Allocator.Error!void {
         const tree = &s.tree;
         var buf: [2]Ast.Node.Index = undefined;
         const init = tree.fullStructInit(&buf, node) orelse return;
@@ -94,8 +106,7 @@ pub const Source = struct {
             const name = tree.tokenSlice(tree.firstToken(field) - 2);
             const qualified = try std.fmt.allocPrint(arena, "{s}.{s}", .{ prefix, name });
             if (tree.nodeTag(field) == .enum_literal) {
-                const level = std.meta.stringToEnum(Level, tree.tokenSlice(tree.nodeMainToken(field))) orelse .other;
-                try out.append(arena, .{ .name = qualified, .level = level });
+                try out.append(arena, .{ .name = qualified, .tag = tree.tokenSlice(tree.nodeMainToken(field)) });
             } else try s.walkManifest(arena, field, qualified, out);
         }
     }

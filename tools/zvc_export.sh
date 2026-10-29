@@ -24,7 +24,7 @@ file=$2
 shift 2
 items=
 deps=
-dep_modules=
+dep_list=
 while [ $# -gt 0 ]; do
     [ $# -ge 2 ] || { echo "usage: $0 OUT_DIR FILE.zig [--only PATH]... [--dep NAME=FILE.zig]..." >&2; exit 2; }
     case $1 in
@@ -33,11 +33,19 @@ while [ $# -gt 0 ]; do
             name=${2%%=*}
             path=${2#*=}
             deps="$deps --dep $name"
-            dep_modules="$dep_modules --dep zv -M$name=$path"
+            dep_list="$dep_list $name=$path"
             ;;
         *) echo "usage: $0 OUT_DIR FILE.zig [--only PATH]... [--dep NAME=FILE.zig]..." >&2; exit 2 ;;
     esac
     shift 2
+done
+# Every extra module sees zv and every other extra module.
+dep_modules=
+for entry in $dep_list; do
+    name=${entry%%=*}
+    others=
+    for other in $dep_list; do [ "${other%%=*}" = "$name" ] || others="$others --dep ${other%%=*}"; done
+    dep_modules="$dep_modules --dep zv$others -M$entry"
 done
 mkdir -p "$out"
 out=$(cd "$out" && { pwd -W 2>/dev/null || pwd; })
@@ -46,12 +54,14 @@ trap 'rm -rf "$work"' EXIT
 printf 'pub const ghost: bool = true;\n' >"$work/zv_options.zig"
 printf 'const target = @import("target");\npub const items = .{ %s };\n' "${items:-target}" >"$work/selection.zig"
 
+air_root=air_all
+[ -z "${ZVC_DEEP:-}" ] || air_root=air_deep
 stem=$(basename "$file" .zig)
 index=$work/$stem
 mkdir -p "$index"
 # shellcheck disable=SC2086
 ZV_AIR_OUT=$index "$zv" test -fno-emit-bin -target "$target" -mcpu baseline $lib \
-    --dep target --dep selection -Mroot="$root/tools/air_all.zig" \
+    --dep target --dep selection -Mroot="$root/tools/$air_root.zig" \
     --dep zv$deps -Mtarget="$file"$dep_modules \
     --dep target -Mselection="$work/selection.zig" \
     --dep zv_options -Mzv="$root/src/zv.zig" \

@@ -8,6 +8,7 @@
 //!     --expect FILE              lines `NAME clean|error|unproven`; exit 0 iff every verdict equals the pinned one
 //!     --pins FILE                lines `SHA256 PATH`: the sources the packs were exported from; any difference is an error
 //!     --max-unproven N           fail when more than N functions are unproven
+//!     --max-trusted N            fail when more than N functions are declared `.trusted` in an `ownership` manifest
 //!     --summary                  one line per function, clean ones too
 //!     --dump                     the AIR of the selected functions as text, and stop
 //! Exit status: 0 when no function has a finding (or matches --expect), 1 otherwise, 2 for bad usage.
@@ -23,8 +24,9 @@ const schema = zv_air.schema;
 const check = @import("check.zig");
 const diag = @import("diag.zig");
 const dump = @import("dump.zig");
+const spec = @import("spec.zig");
 
-const Verdict = enum { clean, @"error", unproven };
+const Verdict = enum { clean, @"error", unproven, trusted };
 
 const Options = struct {
     paths: []const []const u8 = &.{},
@@ -34,6 +36,7 @@ const Options = struct {
     expect: ?[]const u8 = null,
     pins: ?[]const u8 = null,
     max_unproven: ?usize = null,
+    max_trusted: ?usize = null,
     summary: bool = false,
     dump: bool = false,
 };
@@ -61,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout = Io.File.stdout().writer(io, &stdout_buffer);
+    var stdout = Io.File.stdout().writerStreaming(io, &stdout_buffer);
     const out = &stdout.interface;
     const opts = parseArgs(arena, try init.minimal.args.toSlice(arena)) orelse return usage();
 
@@ -78,6 +81,9 @@ pub fn main(init: std.process.Init) !void {
     var names_ctx: Names = .{ .srcs = &srcs, .arena = arena };
     prog.param_names = .{ .context = &names_ctx, .lookup = Names.lookup };
 
+    var trusted: std.StringHashMapUnmanaged(void) = .empty;
+    var unread: usize = 0;
+    try readManifests(arena, &srcs, packs.items, &prog, &trusted, &unread);
     var rows: std.ArrayList(Row) = .empty;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     for (packs.items) |pack| for (pack.t.funcs) |f| {
@@ -92,22 +98,26 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         const result = try prog.analyze(.{ .pack = pack, .func = f });
-        const verdict: Verdict = if (result.errors() != 0) .@"error" else if (result.unsupported()) .unproven else .clean;
+        const verdict: Verdict = if (trusted.contains(name)) .trusted else if (result.errors() != 0) .@"error" else if (result.unsupported()) .unproven else .clean;
         try rows.append(arena, .{ .name = name, .verdict = verdict, .result = result, .pack = pack });
     };
     if (opts.dump) return out.flush();
 
-    var counts: [3]usize = @splat(0);
+    var counts: [4]usize = @splat(0);
     for (rows.items) |row| {
         counts[@intFromEnum(row.verdict)] += 1;
         try printRow(out, &srcs, row, opts.summary);
         try out.flush();
     }
-    try out.print("\nzv-own: {d} clean, {d} with findings, {d} unproven\n", .{ counts[0], counts[1], counts[2] });
+    try out.print("\nzv-own: {d} clean, {d} with findings, {d} unproven, {d} trusted\n", .{ counts[0], counts[1], counts[2], counts[3] });
     var ok = counts[1] == 0 and counts[2] == 0;
     if (opts.expect) |path| ok = try compareExpected(io, arena, out, path, rows.items);
     if (opts.max_unproven) |limit| if (counts[2] > limit) {
         try out.print("zv-own: more unproven functions than the {d} allowed\n", .{limit});
+        ok = false;
+    };
+    if (opts.max_trusted) |limit| if (counts[3] > limit) {
+        try out.print("zv-own: more trusted functions than the {d} allowed\n", .{limit});
         ok = false;
     };
     var unknown: u32 = 0;
@@ -116,6 +126,7 @@ pub fn main(init: std.process.Init) !void {
         unknown += row.result.stats.unknown_calls;
         transfers += row.result.stats.transfers;
     }
+    if (unread != 0) try out.print("zv-own: {d} source files were not found: their ownership manifests were not read\n", .{unread});
     try out.print("zv-own: assumed, not checked: {d} calls to functions outside the packs, {d} linear values handed to memory it does not follow\n", .{ unknown, transfers });
     try out.flush();
     if (!ok) std.process.exit(1);
@@ -140,8 +151,9 @@ fn printRow(out: *Io.Writer, srcs: *sources.Sources, row: Row, all: bool) !void 
         .clean => "clean    ",
         .@"error" => "FINDINGS ",
         .unproven => "UNPROVEN ",
+        .trusted => "TRUSTED  ",
     };
-    if (row.verdict == .clean and !all) return;
+    if ((row.verdict == .clean or row.verdict == .trusted) and !all) return;
     try out.print("{s}{s}\n", .{ label, row.name });
     for (row.result.diags) |d| {
         try printWhere(out, srcs, row.pack, d.loc);
@@ -301,6 +313,8 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
                 o.expect = v;
             } else if (std.mem.eql(u8, a, "--pins")) {
                 o.pins = v;
+            } else if (std.mem.eql(u8, a, "--max-trusted")) {
+                o.max_trusted = std.fmt.parseInt(usize, v, 10) catch return null;
             } else if (std.mem.eql(u8, a, "--max-unproven")) {
                 o.max_unproven = std.fmt.parseInt(usize, v, 10) catch return null;
             } else if (std.mem.eql(u8, a, "--module")) {
@@ -317,7 +331,7 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only TEXT] [--files PREFIX] [--expect FILE] [--pins FILE] [--max-unproven N] [--summary] [--dump] PACK|INDEX_DIR...\n", .{});
+    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only TEXT] [--files PREFIX] [--expect FILE] [--pins FILE] [--max-unproven N] [--max-trusted N] [--summary] [--dump] PACK|INDEX_DIR...\n", .{});
     std.process.exit(2);
 }
 
@@ -341,4 +355,38 @@ fn loadPath(gpa: Allocator, io: Io, arena: Allocator, path: []const u8, out: *st
         l.pack.validate() catch fatal("{s}: invalid pack", .{path});
         try out.append(arena, l);
     }
+}
+
+/// Reads the `ownership` manifest of every source file the packs' functions come from: the effects a project gives
+/// its own types (`.get = .reads`, `.remove = .invalidates`) and the functions it declares `.trusted`.
+/// A source file that cannot be found has its manifest unread; the count is reported, never hidden.
+fn readManifests(
+    arena: Allocator,
+    srcs: *sources.Sources,
+    packs: []const *const schema.Pack,
+    prog: *check.Program,
+    trusted: *std.StringHashMapUnmanaged(void),
+    unread: *usize,
+) !void {
+    var seen: std.AutoHashMapUnmanaged(*sources.Loaded, void) = .empty;
+    var missing: std.StringHashMapUnmanaged(void) = .empty;
+    for (packs) |pack| for (pack.t.funcs) |f| {
+        const loaded = (try srcs.forFile(pack, f.file)) orelse {
+            const rec = pack.t.files[@backingInt(f.file)];
+            const key = try std.fmt.allocPrint(arena, "{s}:{s}", .{ pack.str(rec.module), pack.str(rec.path) });
+            if (!(try missing.getOrPut(arena, key)).found_existing) {
+                const mod = pack.str(rec.module);
+                if (!std.mem.eql(u8, mod, "root") and !std.mem.eql(u8, mod, "")) unread.* += 1;
+            }
+            continue;
+        };
+        if ((try seen.getOrPut(arena, loaded)).found_existing) continue;
+        for (try loaded.src.rawEntries(arena, "ownership")) |e| {
+            if (std.mem.eql(u8, e.tag, "trusted")) {
+                try trusted.put(arena, e.name, {});
+            } else if (spec.Effect.fromTag(e.tag)) |effect| {
+                try prog.annotations.put(arena, e.name, effect);
+            }
+        }
+    };
 }

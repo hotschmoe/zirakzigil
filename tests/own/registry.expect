@@ -1,0 +1,10 @@
+# The ownership manifest of Registry makes `remove` invalidate; Plain has none, and the checker cannot know.
+registry.Plain.get clean
+registry.Plain.remove clean
+registry.Registry.add clean
+registry.Registry.get clean
+registry.Registry.remove clean
+registry.badRegistryStale error
+registry.gapPlainStale clean
+registry.okRegistryOtherSlot clean
+registry.okRegistryUse clean

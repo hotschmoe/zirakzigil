@@ -73,3 +73,51 @@ FINDINGS double_consume.main
 ## Schema v3
 
 `zv-own` needs to know which structs hold a `Linear`, so the pack gained a `fields` table (`schema.FieldRec`: owner type, index, name, type). The compiler exports the fields of the types a function uses by value, and of what they hold by value: those are the types whose layout the function's own analysis resolved, so the table does not depend on which other functions the compile analyzed. A type without records has no known fields (empty, or only ever behind a pointer); two types the pack cannot tell apart by their printed name that disagree on a field are marked `conflict` and read as unknown. Readers accept schema 2 (no table) and 3; `tests/zvc/*.zvp` were exported again and `zvc` is unchanged.
+
+## M2: allocator regions, pointer invalidation, stack escapes
+
+### What the checker follows
+
+Besides linear tokens, a value carries the **owners** its pointers depend on. An owner is born where the AIR shows it and ends where an operation ends it; using a value that depends on an ended owner is a finding.
+
+| Owner | Born at | Ends at | Finding |
+| --- | --- | --- | --- |
+| an allocation | a call that allocates: `mem.Allocator.alloc/create/dupe/realloc`, `fmt.allocPrint`, `toOwnedSlice`, any function with an allocator parameter whose result points somewhere, a function whose summary says it returns an allocation | `free`, `destroy`, `realloc`, `toOwnedSlice`; the arena it came from is deinitialized or reset | use after free, double free |
+| a pool slot | `zv.Pool.alloc`, `zv.Slots.alloc` (the handle is the owner) | `free` of that handle | stale handle, double free, pointer from `get(h)` used after `free(h)` |
+| the storage behind a field | every load of a pointer or slice out of memory (`list.items`) | an invalidating operation on the object: `append`, `put`, `orderedRemove`, `resize`, `clearAndFree`, `deinit`, ... | use after invalidation |
+| an object | `arena.allocator()` and kin | `deinit` | use of the object or of what it handed out |
+| a stack slot | `alloc` | the function returns | pointer to a local returned, stored into memory that outlives it, or put into a container that keeps it |
+
+**Inference, not annotation.** The allocator flow is read off the calls: a result that comes from a function with a `mem.Allocator` argument is an allocation from it (and from the arena behind that allocator, so `arena.deinit()` ends it); a function in the packs is read for what it does (its **summary**: which parameters its result depends on and below which field, which places it invalidates, which parameters it frees, whether it returns an allocation), so a user helper that frees or reallocates needs no word either. std's containers and allocators and `zv.Pool`/`zv.Slots` are a table in `src/own/spec.zig`. What remains is a project's own invalidation rule: one line in the `ownership` manifest of the type.
+
+```zig
+pub const Registry = struct {
+    pub const ownership = .{ .remove = .invalidates };   // pointers handed out by get() are stale after remove()
+    comptime { zv.requireOwnership(Registry); }          // a typo or an unknown kind is a compile error
+    ...
+};
+```
+
+Kinds: `.invalidates`, `.ends`, `.resets`, `.releases`, `.reads`, `.handle`, `.free`, and `.trusted`, which exempts a function from the check and counts it (`--max-trusted`, `max_trusted` of the gate). `tests/own/registry.zig` shows the effect: with the line `badRegistryStale` is a finding, without it (`gapPlainStale`) the checker cannot know and says clean. That is the annotation burden of a project-specific rule: one line per method, and none for code that only uses std, allocators and the pools of zv.
+
+### Precision decisions (each one came from a false positive on real code)
+
+- A pointer into the buffer of a field is `list.items`-shaped: it depends on that field's storage, not on the stack slot that holds the container, and not on the whole object (`Buf(place)` is per field, so appending to `v.relied` does not stale a pointer into `v.arena_state`).
+- A struct returned by value from a callee that holds pointers is a copy of what was stored: its pointers lead elsewhere, so it does not depend on the container it was copied from.
+- `appendSlice` copies elements: a pointer to a local array passed to it does not escape.
+- A pointer to a local stored into a container that outlives the call is only an escape if it is still there when the function returns: `put(&ctx)` followed by `remove` is the registry-for-the-duration-of-a-call idiom, and a `try` that failed stored nothing.
+- A call through a function pointer is a call to a function nothing is known of; it is counted in the assumptions, not refused.
+- `reset` ends what the arena handed out, not the arena; a second `reset` is not a use after deinit.
+
+### What is not followed (printed at the end of every run, never silent)
+
+- Calls to functions outside the packs with no entry in the table are assumed to neither invalidate nor keep their arguments. The count is printed.
+- A pointer converted to an integer and back (`ptr_from_int`) is `UNPROVEN`.
+- A pointer to a local that a callee stores somewhere the caller cannot see (a global, a field behind another pointer) is not seen: a summary does not yet record stores into parameters.
+- A pointer read in one iteration and used in a later one is revived when the same load runs again, so a stale copy kept across iterations of the same site is not seen; it is reported when the pointer is used on the iteration that follows the invalidation.
+- Heap leaks (an allocation neither freed nor handed on) are the debug allocator's job, not this checker's.
+- A pointer into a container that goes into a struct field of a different local is followed by value only through the places the checker names; deeper aliasing (two pointers to one object) is not tracked.
+
+### Running it on code that is not a test (false positives found and removed)
+
+The first run over `src/air`, `src/zvc` and `src/own` of this repository (612 functions of real, allocator-heavy Zig, exported with `ZVC_DEEP=1 tools/zvc_export.sh`) reported 23 findings and 9 unproven functions; every finding was a false positive (one was the registry idiom, which the code does on purpose and which is now recognized), and the changes above removed them. After them: 0 findings, 0 unproven on all 612, and `tests/own/memory.zig` still reports its 46 seeded mistakes (80 cases pinned in `tests/own/memory.expect`).
