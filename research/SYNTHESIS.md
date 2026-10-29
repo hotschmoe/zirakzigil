@@ -21,7 +21,13 @@ Pinning to a release stays the operating model. What changes is how small the fo
 | Tripwires | canary smoke test (1 function) | `shapes.snapshot` (comptime), `norm --strict`, a golden-corpus diff, and a coverage assertion (corpus: 27 functions, about 1083 instructions, 0 unsupported) | A, B |
 | Independent oracle | none | a stock `-Dlog=debug` compiler plus `air_text` (Track D), run weekly in the canary and compared with the hook's JSON | D |
 
-Every row is backed by a run. The 0.17 output of A's hook and of B's normalizer is byte-identical to today's exporter on the corpus and `examples/search.zig`. B also matched on all of zmoltcp: 6194 functions and 619,706 instructions. The Linux canary passed on both branches against the nightly.
+This paragraph has been corrected after review (REVIEW.md F4), so that each claim names its run:
+
+- **Track A:** the 0.17 export is byte-identical to today's exporter on the corpus (27 functions). On `examples/search.zig` only 2 functions were compared, via `zig-zv test`.
+- **Track B:** byte-identical on the corpus, on `search.zig` (9 functions, all pub functions reached through `tools/air_all.zig`), and on zmoltcp (6194 functions, 619,706 instructions).
+- **Track D:** its parser matches the hook on 24 of 27 corpus functions, and on only 5 of 13 `search.zig` files (std callees included).
+- **Canary:** the Linux runs passed on both branches against the nightly.
+- **Not measured:** case E, design rule 4 (binaries identical to stock), the nonce under 0.17/0.18 `zig build`, and the snapshot in CI.
 
 ## What the two upgrade paths measured
 
@@ -81,13 +87,37 @@ The reference class is Kani, Verus, Creusot and Charon on rustc. All of them pin
    - add a structured form next to printer-formatted `val` strings;
    - expose `branch_hints` and flags;
    - stop embedding InternPool ids in generated names (A saw `__func_828` vs `__func_831`).
-4. **Possible upstream contribution (D):** one header line in `Air.Print` (file, declaration line, module, return type) would make the stock debug dump nearly enough on its own. Any upstream PR must follow Zig's contribution policy, which needs checking before anyone drafts it. A human should own that decision.
+4. **Upstream is closed:** one header line in `Air.Print` (file, declaration line, module, return type) would make the stock dump nearly enough, but Zig's Strict No LLM / No AI Policy rules out an AI-assisted contribution (see the review outcome).
 5. **Local tree hygiene:** `C:\Users\hotschmoe\zr\zig-0.18-dev` is a partial clone with a possibly damaged pack. Re-clone it fully before using it again.
 
-## Adoption plan (pending review)
+## Review outcome (REVIEW.md, Grok 4.7, adversarial)
 
-1. Adversarial review of this design by a different model family.
-2. Merge A (rules, 2-line hook, nonce) into master, plus the coverage assertion in the canary.
-3. Merge B (reflection dump and normalizer). Keep `adapter.zig` as the CI oracle until a golden v1 corpus is committed, then retire it.
-4. Add D's `air_text` plus `golden.sh` to the weekly canary as the independent oracle.
-5. Update the fork policy in docs/design.md: rules instead of a diff, version knowledge outside the compiler, and the four tripwires.
+I verified the load-bearing findings myself before accepting them.
+
+| Finding | Severity | Accepted | Consequence |
+| --- | --- | --- | --- |
+| F1. The nonce is a salt. Every exporting `zig build` misses the whole cache, incremental mode never calls it, and it hashes options even when export is off | High | yes (verified in `export.zig`: `options.hash` runs before the `out_dir` check) | Replace it with **restore-on-hit**: store the JSON in the cache artifact directory and copy it out on a hit. Measure on 0.18 `zig build`, `--watch` and `-fincremental`, including deleting the out dir |
+| F2. Doc-comment shapes already disagree with the code (`save_err_return_trace_index`: Sema writes `ty_pl` at Sema.zig:6084, `typeOf` ignores `data` at Air.zig:1826), and the snapshot repair step copies the parser's output back into itself | High | yes | **Reflection is shelved.** The hand adapter stays as the production decoder. Its compile errors on renames are the loud failure we want |
+| F3. The Track D "oracle" never looks at the hook: `golden.sh` compares the parser with its own earlier output | High | yes (verified) | Wire a real comparison of hook JSON against the parsed dump on the same file (tag set, instruction count, `loc`, with an allowlist). The weekly debug build comes only after one measured `ubuntu-latest` run of RSS and disk |
+| F4. Overclaims in this file | Medium | yes | corrected above |
+| F5. Pin-and-port with the hand adapter was cheaper on the one real AIR break (40 lines vs 97). Upstreaming is closed | Medium | yes | Zig's README (0.18-dev, lines 487-493) has a **Strict No LLM / No AI Policy**: no LLMs for issues, patches or bug-tracker comments. We will not contribute to Zig upstream, and we will not suggest it |
+| F6. The riskiest adoption step was merging the nonce first | High | yes | resequenced below |
+
+The review could not break:
+- `ZV_AIR_OUT` passing through `zig build` (no environment whitelist);
+- the printer and the hook being separate decoders;
+- both anchors typechecking on the nightly;
+- "no AIR tag changes between 0.17.0 and ae9a8acc7";
+- `-fno-emit-bin` bypassing the cache.
+
+## Revised adoption plan
+
+1. **Measure before any merge.** Prototype restore-on-hit. Then:
+   - run it on 0.18 `zig build`, `--watch` and `-fincremental`, including the delete-and-rebuild case;
+   - run the rule 4 comparison (stock vs patched binaries, export off and on);
+   - make hook hashing a no-op when export is off.
+2. **Merge Track A's mechanism**: `zv_hook` rules, environment-only options, the 2 anchors, plus restore-on-hit. These parts of A weren't contested.
+3. **Canary gets the coverage assertion** (corpus: 27 functions, about 1083 instructions, 0 unsupported) and the real hook-vs-dump comparison, run on the hook compiler it already builds.
+4. **Keep `adapter.zig` and the pin.** Port per release, assisted by the canary.
+5. **Next research item:** a generator that emits an explicit adapter switch from Sema `addInst` sites, `Air.typeOf` and the Liveness operand arms. Its output is checked against those switches in the same compile, so the result is the hand adapter, regenerated. Reflection over doc comments is recorded as a dead end for production use.
+6. **Update the fork policy in docs/design.md only after steps 1-3 have run.** Rule 4 stays.
