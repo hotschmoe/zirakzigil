@@ -68,6 +68,43 @@ pub fn addAssuranceGate(b: *std.Build, options: AssuranceGateOptions) *std.Build
     return gate(b, options, dep.module("zv"), dep.path("src/gate/instrument.zig"));
 }
 
+pub const VerifyGateOptions = struct {
+    /// Checked-in AIR packs (`tools/zvc_export.sh`), relative to the project root.
+    packs: []const []const u8,
+    /// The sources the packs were exported from, one `SHA256  PATH` line each, relative to the project root.
+    pins: []const u8,
+    /// Where the packs' module-relative source paths resolve, relative to the project root.
+    src: []const u8 = "src",
+    /// Pinned verdicts, one `NAME proved|refuted|unproven` per line. Without it every function must be proved.
+    expect: ?[]const u8 = null,
+    /// Refuse a loop that states no `zv.decreases`.
+    total: bool = false,
+};
+
+/// Adds the `verify` step: `zvc` proves every function the sources' assurance manifests mark `.verified`
+/// from the checked-in AIR packs, and fails when one is refuted, unproven, missing from the packs, or when a
+/// pinned source changed since the packs were exported. Z3 is found through `-Dz3=PATH`, `ZV_Z3` or `PATH`.
+pub fn addVerifyGate(b: *std.Build, options: VerifyGateOptions) *std.Build.Step {
+    const dep = b.dependencyFromBuildZig(@This(), .{ .ghost = false });
+    const zvc = b.addExecutable(.{ .name = "zvc", .root_module = b.createModule(.{
+        .root_source_file = dep.path("src/zvc/main.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .imports = &.{.{ .name = "zv_air", .module = dep.module("zv_air") }},
+    }) });
+    const run = b.addRunArtifact(zvc);
+    run.setCwd(b.path("."));
+    run.has_side_effects = true;
+    run.addArgs(&.{ "--pins", options.pins, "--src", options.src });
+    if (options.expect) |path| run.addArgs(&.{ "--expect", path });
+    if (options.total) run.addArg("--total");
+    if (b.option([]const u8, "z3", "Path of the Z3 executable for `zig build verify`")) |path| run.addArgs(&.{ "--z3", path });
+    run.addArgs(options.packs);
+    const step = b.step("verify", "Prove every .verified function from the checked-in AIR packs");
+    step.dependOn(&run.step);
+    return step;
+}
+
 fn gate(b: *std.Build, options: AssuranceGateOptions, zv: *std.Build.Module, instrument_source: std.Build.LazyPath) *std.Build.Step {
     const instrument = b.addExecutable(.{ .name = "zv-instrument", .root_module = b.createModule(.{
         .root_source_file = instrument_source,

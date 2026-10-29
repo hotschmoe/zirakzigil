@@ -169,7 +169,16 @@ fn checkPins(io: Io, arena: Allocator, path: []const u8) !void {
         const file = std.mem.trimStart(u8, it.rest(), " \t*");
         const bytes = Io.Dir.cwd().readFileAlloc(io, file, arena, .limited(64 << 20)) catch |err| fatal("{s}: {t}", .{ file, err });
         var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        // Line ends are not content: a checkout that converts them must not look like an edit.
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        var lines_of_file = std.mem.splitScalar(u8, bytes, '\n');
+        var first = true;
+        while (lines_of_file.next()) |l| {
+            if (!first) hasher.update("\n");
+            first = false;
+            hasher.update(std.mem.trimEnd(u8, l, "\r"));
+        }
+        hasher.final(&digest);
         const got = std.fmt.bytesToHex(digest, .lower);
         if (!std.ascii.eqlIgnoreCase(&got, want)) {
             std.debug.print("zvc: {s} changed since the packs were exported\n", .{file});

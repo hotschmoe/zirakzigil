@@ -49,6 +49,10 @@ pub const Op = enum {
     ule,
     slt,
     sle,
+    /// The product fits: unsigned; signed without overflow above; signed without overflow below.
+    umul_ok,
+    smul_hi_ok,
+    smul_lo_ok,
     zext,
     sext,
     extract,
@@ -404,6 +408,13 @@ pub const Pool = struct {
         return p.app2(op, .bool, a, b);
     }
 
+    /// Predicates of the solver's own overflow detection, which is far cheaper than a double-width product.
+    pub fn mulFits(p: *Pool, op: Op, a: Term, b: Term) Allocator.Error!Term {
+        assert(p.bitsOf(a) == p.bitsOf(b));
+        if (p.bvValue(a) == 0 or p.bvValue(b) == 0) return p.tru();
+        return p.app2(op, .bool, a, b);
+    }
+
     pub fn bnot(p: *Pool, a: Term) Allocator.Error!Term {
         const bits = p.bitsOf(a);
         if (p.bvValue(a)) |x| return p.bv(bits, ~x);
@@ -476,6 +487,7 @@ pub const Pool = struct {
             .neg => p.neg(args[0]),
             .bnot => p.bnot(args[0]),
             .ult, .ule, .slt, .sle => p.cmp(a.op, args[0], args[1]),
+            .umul_ok, .smul_hi_ok, .smul_lo_ok => p.mulFits(a.op, args[0], args[1]),
             .zext => p.zext(args[0], p.bitsOf(args[0]) + a.p),
             .sext => p.sext(args[0], p.bitsOf(args[0]) + a.p),
             .extract => p.extract(args[0], a.p, a.q),

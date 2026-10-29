@@ -588,6 +588,7 @@ pub const Vc = struct {
                     }, a, b));
                 }
             },
+            .clz, .ctz, .popcount => try v.bitCount(inst),
             .not => {
                 const a = try v.scalarArg(inst, 0);
                 v.setScalar(inst, if (pool.sortOf(a) == .bool) try pool.not(a) else try pool.bnot(a));
@@ -799,7 +800,11 @@ pub const Vc = struct {
     fn noOverflow(v: *Vc, op: term.Op, a: Term, b: Term, info: value.IntInfo) Allocator.Error!Term {
         const pool = v.pool;
         const w = info.bits;
-        const wide: u16 = if (op == .mul) 2 * w else w + 1;
+        if (op == .mul) {
+            if (!info.signed) return pool.mulFits(.umul_ok, a, b);
+            return pool.@"and"(try pool.mulFits(.smul_hi_ok, a, b), try pool.mulFits(.smul_lo_ok, a, b));
+        }
+        const wide: u16 = w + 1;
         const ext = struct {
             fn f(p: *Pool, t: Term, to: u16, s: bool) Allocator.Error!Term {
                 return if (s) p.sext(t, to) else p.zext(t, to);
@@ -848,6 +853,26 @@ pub const Vc = struct {
             },
             else => unreachable,
         }
+    }
+
+    /// Leading zeros, trailing zeros and set bits, one bit at a time: later bits override earlier ones.
+    fn bitCount(v: *Vc, inst: *const Inst) Error!void {
+        const pool = v.pool;
+        const a = try v.scalarArg(inst, 0);
+        const width = pool.bitsOf(a);
+        const out = (try v.intTypeOf(inst.ty)).bits;
+        const one = try pool.bv(1, 1);
+        var r = if (inst.tag == .popcount) try pool.bv(out, 0) else try pool.bv(out, width);
+        for (0..width) |step_| {
+            const i: u16 = @intCast(if (inst.tag == .ctz) width - 1 - step_ else step_);
+            const set = try pool.eq(try pool.extract(a, i, i), one);
+            switch (inst.tag) {
+                .clz => r = try pool.ite(set, try pool.bv(out, width - 1 - i), r),
+                .ctz => r = try pool.ite(set, try pool.bv(out, i), r),
+                else => r = try pool.bin(.add, r, try pool.zext(try pool.extract(a, i, i), out)),
+            }
+        }
+        v.setScalar(inst, r);
     }
 
     fn shift(v: *Vc, inst: *const Inst, st: *State) StepError!void {

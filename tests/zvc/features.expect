@@ -35,3 +35,6 @@ features.useSumSliceTail proved
 features.accumulate proved
 features.accumulateWrong refuted
 features.tri proved
+features.highestBit proved
+features.popcountBound proved
+features.trailingZerosWrong refuted
