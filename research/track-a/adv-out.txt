@@ -1,0 +1,49 @@
+### decoy
+  patch      applied silently | call: PerThread.zig:2302 in analyzeFuncBodyTraced | hash: Compilation.zig:3374 in addNonIncrementalStuffToCacheManifest
+  full.text  FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 2 times, expected exactly 1
+  full.ast   applied WITH WARNING: warning: rule 'export-call' (src/Zcu/PerThread.zig): analyzeFuncBodyInner is also called at line 2301 and is not hooked there | call: PerThread.zig:2334 in analyzeFuncBody | hash: Compilation.zig:3361 in addNonIncrementalStuffToCacheManifest
+  min.text   FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 2 times, expected exactly 1
+  min.ast    applied WITH WARNING: warning: rule 'export-call' (src/Zcu/PerThread.zig): analyzeFuncBodyInner is also called at line 2301 and is not hooked there | call: PerThread.zig:2334 in analyzeFuncBody | hash: Compilation.zig:3357 in addNonIncrementalStuffToCacheManifest
+  rules      FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 2 times, expected exactly 1
+### extract
+  patch      FAIL(loud): error: patch failed: src/Zcu/PerThread.zig:2297
+  full.text  applied | call: PerThread.zig:4597 in analyzeFuncBodyHelper | hash: Compilation.zig:3375 in addNonIncrementalStuffToCacheManifest
+  full.ast   FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+  min.text   applied | call: PerThread.zig:4597 in analyzeFuncBodyHelper | hash: Compilation.zig:3371 in addNonIncrementalStuffToCacheManifest
+  min.ast    FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+  rules      applied | call: PerThread.zig:4597 in analyzeFuncBodyHelper | hash: Compilation.zig:3357 in addNonIncrementalStuffToCacheManifest
+### wrapper
+  patch      FAIL(loud): error: patch failed: src/Zcu/PerThread.zig:2297
+  full.text  FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+  full.ast   FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+  min.text   FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+  min.ast    FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+  rules      FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+### rename_fn
+  patch      applied silently | call: PerThread.zig:2298 in analyzeFuncBodyImpl | hash: Compilation.zig:3374 in addNonIncrementalStuffToCacheManifest
+  full.text  applied | call: PerThread.zig:2298 in analyzeFuncBodyImpl | hash: Compilation.zig:3375 in addNonIncrementalStuffToCacheManifest
+  full.ast   FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+  min.text   applied | call: PerThread.zig:2298 in analyzeFuncBodyImpl | hash: Compilation.zig:3371 in addNonIncrementalStuffToCacheManifest
+  min.ast    FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+  rules      applied | call: PerThread.zig:2298 in analyzeFuncBodyImpl | hash: Compilation.zig:3357 in addNonIncrementalStuffToCacheManifest
+### rename_var
+  patch      FAIL(loud): error: patch failed: src/Zcu/PerThread.zig:2297
+  full.text  FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+  full.ast   applied | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3361 in addNonIncrementalStuffToCacheManifest
+  min.text   FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+  min.ast    applied | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3357 in addNonIncrementalStuffToCacheManifest
+  rules      FAIL(loud): error: rule 'export-call' (src/Zcu/PerThread.zig): anchor matched 0 times, expected exactly 1
+### cache_nested
+  patch      FAIL(loud): error: patch failed: src/Compilation.zig:3369
+  full.text  applied | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3376 in addNonIncrementalStuffToCacheManifest
+  full.ast   applied | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3361 in addNonIncrementalStuffToCacheManifest
+  min.text   applied | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3372 in addNonIncrementalStuffToCacheManifest
+  min.ast    applied | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3357 in addNonIncrementalStuffToCacheManifest
+  rules      applied | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3357 in addNonIncrementalStuffToCacheManifest
+### bypass
+  patch      applied silently | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3374 in addNonIncrementalStuffToCacheManifest
+  full.text  applied | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3375 in addNonIncrementalStuffToCacheManifest
+  full.ast   applied WITH WARNING: warning: rule 'export-call' (src/Zcu/PerThread.zig): analyzeFuncBodyInner is also called at line 4596 and is not hooked there | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3361 in addNonIncrementalStuffToCacheManifest
+  min.text   applied | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3371 in addNonIncrementalStuffToCacheManifest
+  min.ast    applied WITH WARNING: warning: rule 'export-call' (src/Zcu/PerThread.zig): analyzeFuncBodyInner is also called at line 4596 and is not hooked there | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3357 in addNonIncrementalStuffToCacheManifest
+  rules      applied WITH WARNING: warning: rule 'export-call' (src/Zcu/PerThread.zig): analyzeFuncBodyInner is also called at line 4596 and is not hooked there | call: PerThread.zig:2298 in analyzeFuncBody | hash: Compilation.zig:3357 in addNonIncrementalStuffToCacheManifest
