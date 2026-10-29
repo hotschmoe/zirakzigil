@@ -13,10 +13,15 @@ pub const Effect = enum {
     none,
     /// The result is a new allocation from the `mem.Allocator` in argument 0.
     alloc,
+    /// The result is a new allocation owned by the object in argument 0 (`MemoryPool.create`): it ends with it.
+    alloc_in,
     /// The result is a new handle: it stands for a slot of the pool in argument 0 and dies when freed.
     handle,
     /// Frees the allocation (or the handle) in argument 1.
     free,
+    /// Frees the handle in argument 1, or fails with `error.StaleHandle` when it is already gone: a second free is
+    /// a mistake only where the error is propagated.
+    cancel,
     /// Frees the allocation in argument 1 if it succeeds and returns a new one (`realloc`, `remap`).
     realloc,
     /// Frees the allocation in argument 1 when the new length is zero; otherwise leaves it where it is.
@@ -94,9 +99,10 @@ pub fn lookup(name: []const u8) Effect {
     if (afterPrefix(name, "heap.FixedBufferAllocator.")) |m| return object(m, "allocator", "", "reset");
     if (afterPrefix(name, "heap.GeneralPurposeAllocator.")) |m| return object(m, "allocator", "deinit", "");
 
+    if (afterPrefix(name, "heap.memory_pool.")) |m| return memoryPool(m);
     if (afterPrefix(name, "zv.Pool.")) |m| return pool(m);
-    if (afterPrefix(name, "zv.Slots.")) |m| return pool(m);
-    if (afterPrefix(name, "slots.Slots.")) |m| return pool(m);
+    if (afterPrefix(name, "zv.Slots.")) |m| return slots(m);
+    if (afterPrefix(name, "slots.Slots.")) |m| return slots(m);
 
     if (family(name) != null) return .container;
     return .none;
@@ -123,6 +129,18 @@ fn object(m: []const u8, allocator_name: []const u8, end_name: []const u8, reset
     return .none;
 }
 
+/// `std.heap.MemoryPool`: every item it hands out ends with the pool.
+fn memoryPool(m: []const u8) Effect {
+    const dot = std.mem.lastIndexOfScalar(u8, m, '.') orelse return .none;
+    const method = m[dot + 1 ..];
+    if (std.mem.indexOfScalar(u8, m[0..dot], '.') != null) return .none;
+    if (std.mem.eql(u8, method, "create")) return .alloc_in;
+    if (std.mem.eql(u8, method, "destroy")) return .free;
+    if (std.mem.eql(u8, method, "deinit")) return .ends;
+    if (std.mem.eql(u8, method, "reset")) return .resets;
+    return .none;
+}
+
 /// `zv.Pool` and `zv.Slots`: a handle is a copyable name for a slot; freeing it ends every pointer taken through it.
 fn pool(m: []const u8) Effect {
     if (std.mem.eql(u8, m, "isLive")) return .query;
@@ -131,7 +149,13 @@ fn pool(m: []const u8) Effect {
     return .none;
 }
 
-pub const Family = enum { list, multi, hash, array_hash, other };
+/// `zv.Slots`: a handle names a slot, and freeing a stale one is an error the caller may mean to ignore.
+fn slots(m: []const u8) Effect {
+    const e = pool(m);
+    return if (e == .free) .cancel else e;
+}
+
+pub const Family = enum { list, multi, hash, array_hash, deque, writer, other };
 
 /// The container family a declared name belongs to: `array_list.Aligned.append` is a list.
 pub fn family(name: []const u8) ?Family {
@@ -142,6 +166,8 @@ pub fn family(name: []const u8) ?Family {
         .{ "array_hash_map.", .array_hash },
         .{ "priority_queue.", .other },
         .{ "priority_dequeue.", .other },
+        .{ "deque.", .deque },
+        .{ "Io.Writer.Allocating.", .writer },
         .{ "segmented_list.", .other },
         .{ "bit_set.DynamicBitSet", .other },
     };
@@ -163,19 +189,12 @@ pub const Count = enum {
     many,
     /// Some number of elements more, into room that is there.
     many_assume,
+    /// One element fewer (at most): the count cannot be more than it was, less one.
+    remove1,
     /// `ensureTotalCapacity(n)`.
     total,
     /// `ensureUnusedCapacity(n)`.
     unused,
-};
-
-/// What an operation does to pointers into the container.
-pub const Kill = enum {
-    none,
-    /// Elements move or go away (`orderedRemove`, `insert`): pointers to them are stale.
-    shift,
-    /// The storage may be reallocated: every pointer into it is stale.
-    grow,
 };
 
 /// What a result points into.
@@ -192,19 +211,30 @@ pub const Ptr = enum {
 
 pub const Model = struct {
     effect: Effect = .reads,
-    kill: Kill = .none,
+    /// The storage may be reallocated: every pointer into it is stale unless room is proven.
+    grow: bool = false,
+    /// Elements move or are overwritten in place (`insert`, a sift): pointers to them are stale whatever the room.
+    shift: bool = false,
+    /// Which elements move depends on the data (a heap sifts): a pointer to one may be stale, and is only counted.
+    shift_maybe: bool = false,
     count: Count = .keep,
     ptr: Ptr = .none,
     /// The first argument's allocation becomes the container's (`fromOwnedSlice`).
     adopts: bool = false,
+    /// The container starts with room for the count in the last integer argument (`initCapacity`).
+    seeds: bool = false,
+    /// The storage goes to the result as it is and the container is empty (`toOwnedSliceAssert`, `move`).
+    moves: bool = false,
     /// False for a method nobody wrote down: assumed to invalidate, and counted.
     modelled: bool = true,
 };
 
+const unmodelled: Model = .{ .modelled = false, .grow = true, .count = .drop };
+
 /// The documented semantics of a container method, by name. Exact for the methods listed and loud for the rest.
 pub fn container(name: []const u8) Model {
-    const fam = family(name) orelse return .{ .modelled = false, .kill = .grow, .count = .drop };
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return .{ .modelled = false, .kill = .grow, .count = .drop };
+    const fam = family(name) orelse return unmodelled;
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return unmodelled;
     const method = name[dot + 1 ..];
     const head = name[0..dot];
     const prefix_len = switch (fam) {
@@ -212,56 +242,72 @@ pub fn container(name: []const u8) Model {
         .multi => "multi_array_list.".len,
         .hash => "hash_map.".len,
         .array_hash => "array_hash_map.".len,
-        .other => 0,
+        .deque, .writer, .other => 0,
     };
     // A helper type of the container (an iterator, a slice view, the index header).
-    const nested = fam != .other and head.len > prefix_len and std.mem.count(u8, head[prefix_len..], ".") >= 1;
+    const nested = fam != .other and fam != .deque and fam != .writer and head.len > prefix_len and std.mem.count(u8, head[prefix_len..], ".") >= 1;
     if (nested) {
         if (std.mem.eql(u8, method, "deinit")) return .{ .effect = .ends };
         return .{ .ptr = .content };
     }
     if (std.mem.eql(u8, method, "deinit")) return .{ .effect = .ends };
-    if (std.mem.startsWith(u8, method, "toOwnedSliceAssert")) return .{ .ptr = .storage, .count = .drop };
+    // A growing writer: its buffer leaves it whole in `toArrayList`, and as a new block in `toOwnedSlice`.
+    if (fam == .writer) {
+        if (std.mem.startsWith(u8, method, "toOwnedSlice")) return .{ .effect = .releases, .count = .drop };
+        if (std.mem.eql(u8, method, "toArrayList")) return .{ .moves = true, .count = .drop };
+        if (startsAny(method, &.{ "init", "initCapacity", "fromArrayList" })) return .{ .seeds = true, .count = .drop };
+        return .{};
+    }
+    if (std.mem.startsWith(u8, method, "toOwnedSliceAssert")) return .{ .moves = true, .count = .drop };
     if (std.mem.startsWith(u8, method, "toOwned")) return .{ .effect = .releases, .count = .drop };
     if (std.mem.startsWith(u8, method, "fromOwnedSlice")) return .{ .adopts = true, .count = .drop };
     // The storage moves to the result and the container is empty; pointers into it stay good.
-    if (startsAny(method, &.{ "moveToUnmanaged", "toManaged", "move", "promote" })) return .{ .ptr = .storage, .count = .drop };
+    if (startsAny(method, &.{ "moveToUnmanaged", "toManaged", "move", "promote" })) return .{ .moves = true, .count = .drop };
+    if (startsAny(method, &.{ "initCapacity", "initBuffer" })) return .{ .seeds = true, .count = .drop };
 
+    // A heap moves some elements on every insertion or removal, which ones depends on the data.
+    const ordered = fam == .other;
     const many_names = [_][]const u8{ "addMany", "appendSlice", "appendNTimes", "appendUnalignedSlice", "appendMany", "insertSlice", "replaceRange", "putAll", "addAll", "resize", "insertMany", "print" };
     const many = startsAny(method, &many_names);
+    const inserts = startsAny(method, &.{ "insert", "replaceRange", "push", "add", "enqueue", "update" });
+    const shifts = inserts and startsAny(method, &.{ "insert", "replaceRange" }) and !ordered;
+    const sifts = inserts and ordered;
     // `Bounded` variants fail instead of growing, like the ones that assume room.
     if (std.mem.indexOf(u8, method, "AssumeCapacity") != null or std.mem.indexOf(u8, method, "Bounded") != null) {
         const ptr: Ptr = if (startsAny(method, &.{ "addOne", "addMany", "getOrPut" })) .storage else .none;
-        const shift = startsAny(method, &.{ "insert", "replaceRange" });
-        return .{ .kill = if (shift) .shift else .none, .count = if (many) .many_assume else .insert1_assume, .ptr = ptr };
+        return .{ .shift = shifts, .shift_maybe = sifts, .count = if (many) .many_assume else .insert1_assume, .ptr = ptr };
     }
-    if (startsAny(method, &.{"ensureTotalCapacity"})) return .{ .kill = .grow, .count = .total };
-    if (startsAny(method, &.{"ensureUnusedCapacity"})) return .{ .kill = .grow, .count = .unused };
-    if (startsAny(method, &.{ "setCapacity", "shrinkAndFree", "clearAndFree", "shrinkToLen", "rehash", "reIndex" })) return .{ .kill = .grow, .count = .drop };
-    if (startsAny(method, &.{ "addOne", "addMany", "getOrPut" })) return .{ .kill = .grow, .count = if (many) .many else .insert1, .ptr = .storage };
-    if (many) return .{ .kill = .grow, .count = .many };
-    if (startsAny(method, &.{ "append", "put", "fetchPut", "insert", "add", "push", "enqueue", "addUnmanaged" })) return .{ .kill = .grow, .count = .insert1 };
+    if (startsAny(method, &.{"ensureTotalCapacity"})) return .{ .grow = true, .count = .total };
+    if (startsAny(method, &.{"ensureUnusedCapacity"})) return .{ .grow = true, .count = .unused };
+    if (startsAny(method, &.{ "setCapacity", "shrinkAndFree", "clearAndFree", "shrinkToLen", "rehash", "reIndex" })) return .{ .grow = true, .count = .drop };
+    if (startsAny(method, &.{ "addOne", "addMany", "getOrPut" })) return .{ .grow = true, .count = if (many) .many else .insert1, .ptr = .storage };
+    if (many) return .{ .grow = true, .shift = shifts, .shift_maybe = sifts, .count = .many };
+    if (startsAny(method, &.{ "append", "put", "fetchPut", "insert", "add", "push", "enqueue", "addUnmanaged", "update" })) return .{ .grow = true, .shift = shifts, .shift_maybe = sifts, .count = .insert1 };
 
     // Memory stays where it is: an element that moves or goes away is the only thing stale.
     // The length becomes the capacity.
     if (std.mem.eql(u8, method, "expandToCapacity")) return .{ .count = .many_assume };
-    if (startsAny(method, &.{ "pop", "shrinkRetainingCapacity", "lockPointers", "unlockPointers", "assertPointerLock", "setKey", "set" })) return .{};
+    // A heap sifts on removal; a list drops its last element and moves nothing.
+    if (ordered and startsAny(method, &.{ "pop", "remove" })) return .{ .shift_maybe = true, .count = .remove1 };
+    if (startsAny(method, &.{"pop"})) return .{ .count = .remove1 };
+    if (startsAny(method, &.{ "shrinkRetainingCapacity", "lockPointers", "unlockPointers", "assertPointerLock", "setKey", "set" })) return .{};
     // A hash map is open addressing: taking an entry out moves no other entry.
-    if (fam == .hash and startsAny(method, &.{ "remove", "fetchRemove" })) return .{};
-    if (startsAny(method, &.{ "orderedRemove", "swapRemove", "fetchSwapRemove", "fetchOrderedRemove", "removeByIndex", "remove", "fetchRemove", "clearRetainingCapacity", "sort", "swap", "reverse", "replaceRange" }))
-        return .{ .kill = .shift };
+    if (fam == .hash and startsAny(method, &.{ "remove", "fetchRemove" })) return .{ .count = .remove1 };
+    if (startsAny(method, &.{ "orderedRemove", "swapRemove", "fetchSwapRemove", "fetchOrderedRemove", "removeByIndex", "remove", "fetchRemove" }))
+        return .{ .shift = true, .count = .remove1 };
+    if (startsAny(method, &.{ "clearRetainingCapacity", "sort", "swap", "reverse", "replaceRange" })) return .{ .shift = true };
 
     // Reads: what points into the storage, and what only looks.
-    if (startsAny(method, &.{ "getPtr", "getKeyPtr", "getEntry", "keyIterator", "valueIterator", "slice", "items", "keys", "values", "allocatedSlice", "unusedCapacitySlice", "getLastPtr", "lastPtr", "unusedCapacity" }))
+    if (startsAny(method, &.{ "getPtr", "getKeyPtr", "getEntry", "keyIterator", "valueIterator", "slice", "items", "keys", "values", "allocatedSlice", "unusedCapacitySlice", "getLastPtr", "lastPtr", "unusedCapacity", "frontPtr", "backPtr", "atPtr", "getPtrAt" }))
         return .{ .ptr = .storage };
     if (std.mem.eql(u8, method, "iterator")) return .{ .ptr = if (fam == .hash) .self else .storage };
     const reads = [_][]const u8{
-        "get",          "contains", "count",     "capacity", "clone", "format", "hash",     "eql",       "isEmpty",   "first",           "last",
-        "peek",         "isSet",    "findFirst", "findLast", "at",    "len",    "index",    "unmanaged", "toManaged", "moveToUnmanaged", "is",
-        "initCapacity", "init",     "empty",     "bitSet",   "unset", "set",    "setValue", "toggle",
+        "get",     "contains", "count",     "capacity", "clone", "format", "hash",   "eql",       "isEmpty",   "first",           "last",
+        "peek",    "isSet",    "findFirst", "findLast", "at",    "len",    "index",  "unmanaged", "toManaged", "moveToUnmanaged", "is",
+        "init",    "empty",    "bitSet",    "unset",    "set",   "setValue", "toggle",
     };
     if (startsAny(method, &reads)) return .{};
-    return .{ .modelled = false, .kill = .grow, .count = .drop };
+    return unmodelled;
 }
 
 /// Whether a container method takes elements out (a registry entry put in for the duration of a call is gone after it).

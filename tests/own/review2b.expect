@@ -1,0 +1,34 @@
+# The second-wave probes of the second adversarial review. badDequeReuse reads a popped slot of a ring that is not overwritten
+# by the pushes after it: not demonstrated to be a bug, clean.
+review2b.badAliasParams error
+review2b.badArenaResetCopy error
+review2b.badArrayHashShift error
+review2b.badBufPrint error
+review2b.badDeferReturn error
+review2b.badDequeReuse clean
+review2b.badDerefCopy error
+review2b.badFieldCopy error
+review2b.badFieldRet error
+review2b.badFieldStoreRet error
+review2b.badInsertAssume error
+review2b.badInsertWithin error
+review2b.badLastAfterSwap error
+review2b.badLoopStale error
+review2b.badMultiShift error
+review2b.badOptionalDestroy error
+review2b.badOrderedRemoveShift error
+review2b.badPoolCopy error
+review2b.badPoolCopyUse error
+review2b.badPoolUse error
+review2b.badReallocUse error
+review2b.badSliceRet error
+review2b.ctrlArenaReset error
+review2b.ctrlHashGrow error
+review2b.ctrlStoreOut error
+review2b.ctrlStoreThenFree error
+review2b.deinitCopy clean
+review2b.freeBoth clean
+review2b.okHashWithin clean
+review2b.okRoomAppend clean
+review2b.sliceOf clean
+review2b.stolen error

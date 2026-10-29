@@ -1,0 +1,4 @@
+fp_zls6.Ast.Parser.deinit clean
+fp_zls6.Ast.Parser.parse clean
+fp_zls6.Ast.deinit clean
+fp_zls6.Ast.init clean

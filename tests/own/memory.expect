@@ -63,7 +63,7 @@ memory.drop clean
 memory.firstOf clean
 memory.fpCorrelatedBranches error
 memory.gapConditionalFreeInHelper clean
-memory.gapDoubleFreeOfElement clean
+memory.gapDoubleFreeOfElement error
 memory.grow clean
 memory.maybeFree clean
 memory.okAllocFree clean
