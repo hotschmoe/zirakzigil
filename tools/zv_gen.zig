@@ -157,7 +157,8 @@ fn rewrite(arena: Allocator, text: []const u8) !?[]const u8 {
             i += 1;
         }
     }
-    const z = try arena.dupeZ(u8, out.items);
+    const z = try arena.allocSentinel(u8, out.items.len, 0);
+    @memcpy(z, out.items);
     var tokenizer = std.zig.Tokenizer.init(z);
     var prev: std.zig.Token.Tag = .invalid;
     while (true) {
