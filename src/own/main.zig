@@ -260,6 +260,7 @@ fn printDesc(out: *Io.Writer, d: check.Desc) !void {
         .fresh => |k| try out.print(" [fresh {d}{s}]", .{ k, tag }),
         .gone => try out.print(" [gone{s}]", .{tag}),
         .con => |c| try out.print(" [constant {d}]", .{c}),
+        .scalar => |x| try out.print(" [scalar of param {d} {any}]", .{ x.param, x.path }),
     }
 }
 

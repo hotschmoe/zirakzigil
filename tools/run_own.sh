@@ -25,7 +25,7 @@ for dir in tests/own tests/own/std; do
     $own --module target=tests/own --expect tests/own/stdcode.expect $dir/stdcode.zvp
     $own --module target=tests/own --expect tests/own/switchloop.expect $dir/switchloop.zvp
     $own --module target=tests/own --expect tests/own/tokens.expect $dir/tokens.zvp
-    for suite in review2 review2b real fp_zls fp_zls2 fp_zls3 fp_zls4 fp_zls5 fp_zls6 fp_zls7 fp_idioms fp_loops fp_tags fp_tags2 review3 review3b; do
+    for suite in review2 review2b real fp_zls fp_zls2 fp_zls3 fp_zls4 fp_zls5 fp_zls6 fp_zls7 fp_idioms fp_loops fp_tags fp_tags2 review3 review3b review4; do
         $own --module target=tests/own --expect tests/own/$suite.expect $dir/$suite.zvp
     done
 done
@@ -67,5 +67,13 @@ counted tests/own/std/real.zvp savedScannerAdvances "[1-9][0-9]* uses of a point
 for dir in tests/own tests/own/std; do
     for c in review3.badVarIndex review3.badConstIndex review3.badKeepFirst review3.badPrevBuf review3.badOwnOrFree review3b.badSavedElem review3b.badGrowPast; do
         counted $dir/${c%%.*}.zvp "${c#*.}" "[1-9][0-9]* ends that may not have happened to the block"
+    done
+done
+
+# Review 4: bugs whose tag the run cannot read (an unreadable write, an unknown mode, a pointer called, a by-value free on some
+# paths, the loop site) stay undecided, and the footer of the function says so.
+for dir in tests/own tests/own/std; do
+    for c in badMemsetKind badFnPtr badSoftParam badOwnOrFree badKeepFirst; do
+        counted $dir/review4.zvp "review4.$c" "[1-9][0-9]* ends that may not have happened to the block"
     done
 done

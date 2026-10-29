@@ -239,12 +239,7 @@ pub fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
 fn forgetScalars(r: *Run, st: *State, args: []const Val, tys: []const schema.TypeId) Allocator.Error!void {
     for (args, tys) |a, t| {
         if (!r.ty.isPointer(t)) continue;
-        const pl = a.place orelse continue;
-        st.forget(&r.places, pl);
-        if (r.pointerRooted(pl)) try st.touched.put(r.arena, pl, {});
-        for (st.mem.keys(), st.mem.values()) |key, *v| if (r.places.contains(pl, key)) {
-            v.con = null;
-        };
+        if (a.place) |pl| try r.clobber(st, pl);
     }
 }
 
@@ -1029,6 +1024,13 @@ fn gateOf(r: *Run, st: *State, when: []const check.Cond, args: []const Val, tys:
             if ((k == c.value) != c.eq) return null;
             continue;
         }
+        // One of two constants: the end can happen if either of them says so, and then it is as certain as a branch is.
+        if (seen.pair) |p| {
+            const first = (p[0] == c.value) == c.eq;
+            const second = (p[1] == c.value) == c.eq;
+            if (!first and !second) return null;
+            continue;
+        }
         tag = tag or c.slot.path.len != 0;
         const at = seen.at orelse {
             lost = true;
@@ -1043,14 +1045,15 @@ fn gateOf(r: *Run, st: *State, when: []const check.Cond, args: []const Val, tys:
 }
 
 /// The scalar a callee's slot is in the caller: what is known of it, and the place it is read from while that is current.
-fn scalarIn(r: *Run, st: *State, slot: Slot, args: []const Val, tys: []const schema.TypeId) Allocator.Error!?struct { con: ?u64, at: ?PlaceId } {
+fn scalarIn(r: *Run, st: *State, slot: Slot, args: []const Val, tys: []const schema.TypeId) Allocator.Error!?struct { con: ?u64, pair: ?[2]u64, at: ?PlaceId } {
     if (slot.param >= args.len) return null;
     const a = args[slot.param];
     if (r.ty.isPointer(tys[slot.param])) {
         if (slot.kind != .content) return null;
         var at = a.place orelse return null;
         for (slot.path) |step| at = try r.places.child(r.arena, at, step);
-        return .{ .con = (try r.peekFlat(st, at)).con orelse st.facts.get(at), .at = at };
+        const here = try r.peekFlat(st, at);
+        return .{ .con = here.con orelse st.facts.get(at), .pair = here.pair, .at = at };
     }
     if (slot.kind != .value) return null;
     var v = a;
@@ -1058,7 +1061,7 @@ fn scalarIn(r: *Run, st: *State, slot: Slot, args: []const Val, tys: []const sch
         if (v.parts == null) return null;
         v = v.field(step);
     }
-    return .{ .con = v.con, .at = if (v.at != null and r.current(v)) v.at else null };
+    return .{ .con = v.con, .pair = v.pair, .at = if (v.at != null and r.current(v)) v.at else null };
 }
 
 /// What the callee's slot is in the caller: the identities the argument leads into, or the memory below it.
@@ -1122,7 +1125,7 @@ fn resolveDescs(r: *Run, st: *State, inst: *const Inst, ctx: FreshCtx, descs: []
     var out: Val = .none;
     for (descs) |d| {
         const set: Set = switch (d.src) {
-            .con => .empty,
+            .con, .scalar => .empty,
             .fresh => |k| if (k < ctx.ids.len) try Set.single(r.arena, try freshId(r, st, inst, ctx, k)) else .empty,
             .gone => blk: {
                 // What the callee hands back was already freed there.
@@ -1139,8 +1142,13 @@ fn resolveDescs(r: *Run, st: *State, inst: *const Inst, ctx: FreshCtx, descs: []
         if (d.obj and d.src == .from) out.obj = try out.obj.merge(r.arena, set) else out.ids = try out.ids.merge(r.arena, set);
     }
     // A scalar is a constant when every path that returns made it the same one.
-    for (descs) |d| if (d.src == .con) {
-        out.con = d.src.con;
+    for (descs) |d| switch (d.src) {
+        .con => |c| out.con = c,
+        .scalar => |slot| if (try scalarIn(r, st, slot, args, tys)) |seen| {
+            out.con = seen.con;
+            out.pair = seen.pair;
+        },
+        else => {},
     };
     // Either a new block or memory the callee was lent, which the checker does not tell apart (the payloads of a union).
     var fresh = false;
@@ -1148,7 +1156,7 @@ fn resolveDescs(r: *Run, st: *State, inst: *const Inst, ctx: FreshCtx, descs: []
     for (descs) |d| switch (d.src) {
         .fresh => fresh = true,
         .from => lent = true,
-        .gone, .con => {},
+        .gone, .con, .scalar => {},
     };
     out.maybe = out.maybe or (fresh and lent);
     return out;
@@ -1183,8 +1191,37 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
     if (s.ret_place) |slot| ret_place = (try resolve(r, st, slot, args, tys, false)).place;
 
     // What the callee writes only on the paths that succeed is, on the error path of the caller's `try`, still what it was.
+    // A call whose successful paths all test something the caller knows to be otherwise cannot succeed here.
+    if (r.ty.kind(inst.ty) == .error_union) {
+        var possible = true;
+        if (s.ok_when) |alts| {
+            possible = false;
+            for (alts) |alt| {
+                var open = true;
+                for (alt) |c| {
+                    const seen = (try scalarIn(r, st, c.slot, args, tys)) orelse continue;
+                    if (seen.con) |k| {
+                        if ((k == c.value) != c.eq) open = false;
+                    } else if (seen.pair) |p| {
+                        if ((p[0] == c.value) != c.eq and (p[1] == c.value) != c.eq) open = false;
+                    }
+                }
+                possible = possible or open;
+            }
+        }
+        if (possible) _ = r.never_ok.remove(inst.id) else try r.never_ok.put(r.arena, inst.id, {});
+    }
+    for (s.clobbers) |slot| {
+        const got = try resolve(r, st, slot, args, tys, false);
+        if (got.place) |pl| try r.clobber(st, pl);
+    }
     var restores: std.ArrayList(check.Restore) = .empty;
     if (r.ty.kind(inst.ty) == .error_union) for (s.writes) |w| {
+        if (w.on_fail and w.into.kind != .object) {
+            const at = (try resolve(r, st, w.into, args, tys, false)).place orelse continue;
+            try restores.append(r.arena, .{ .place = at, .val = .{ .con = w.fail_con }, .con_only = true });
+            continue;
+        }
         if (w.on_fail) continue;
         const got = try resolve(r, st, w.into, args, tys, false);
         const pl = got.place orelse continue;
@@ -1246,12 +1283,15 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
                         if (!opts.pre_ended and !got.flat) try twice(r, st, inst, opts.callee);
                     } else if (!got.flat and !opts.pre_ended and earlierEvent(r, id, inst)) try r.tally("maybe_alias", inst),
                     .heap, .init => {
+                        // The storage of one of the elements of a container: which one is not known.
+                        var ev = event;
+                        if (r.identRec(id).kind == .init and r.places.hasElem(r.identRec(id).a)) ev.soft = true;
                         ended = try ended.with(r.arena, id);
                         if (k.param < ended_by.len) ended_by[k.param] = try ended_by[k.param].with(r.arena, id);
                         if (k.param == 0 and !got.flat) reallocated = try reallocated.with(r.arena, id);
-                        try r.end(st, inst, id, event);
-                        if (kill.on_fail) try fail_ends.append(r.arena, .{ .id = id, .event = event }) else if (st.dead.get(id)) |d| try ok_ends.append(r.arena, .{ .id = id, .event = event, .tomb = try r.tomb(id, d.soft) });
-                        killed = try killed.with(r.arena, try r.tomb(id, event.soft or st.multi.has(id)));
+                        try r.end(st, inst, id, ev);
+                        if (kill.on_fail) try fail_ends.append(r.arena, .{ .id = id, .event = ev }) else if (st.dead.get(id)) |d| try ok_ends.append(r.arena, .{ .id = id, .event = ev, .tomb = try r.tomb(id, d.soft) });
+                        killed = try killed.with(r.arena, try r.tomb(id, ev.soft or st.multi.has(id)));
                     },
                     else => {},
                 };
