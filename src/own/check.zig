@@ -164,6 +164,8 @@ const State = struct {
     mem: std.AutoArrayHashMapUnmanaged(PlaceId, Val) = .empty,
     live: Set = .empty,
     ended: Set = .empty,
+    /// Parameters freed on every path that led here (the dead set is the paths' union).
+    freed: Set = .empty,
     /// Owners that no longer exist, and why (the first cause on this path).
     dead: std.AutoArrayHashMapUnmanaged(dom.Id, Event) = .empty,
     /// Stack slots whose address went into a container that outlives them: fine if the entry is removed before
@@ -186,6 +188,7 @@ const State = struct {
         var out = try a.clone(arena);
         out.trail = entry;
         out.live = try a.live.merge(arena, b.live);
+        out.freed = try a.freed.minus(arena, try a.freed.minus(arena, b.freed));
         out.ended = try a.ended.merge(arena, b.ended);
         var pending_it = b.pending.iterator();
         while (pending_it.next()) |e| {
@@ -218,6 +221,7 @@ const State = struct {
         if (a.alive != b.alive) return false;
         if (!a.alive) return true;
         if (!a.live.eql(b.live) or !a.ended.eql(b.ended)) return false;
+        if (!a.freed.eql(b.freed)) return false;
         if (a.pending.count() != b.pending.count()) return false;
         for (a.pending.keys()) |k| if (!b.pending.contains(k)) return false;
         if (a.dead.count() != b.dead.count()) return false;
@@ -1163,7 +1167,7 @@ const Run = struct {
 
     fn ret(r: *Run, inst: *const Inst, st: *State, val: Val) Error!void {
         var freed_here: u64 = 0;
-        for (st.dead.keys()) |o| {
+        for (st.freed.ids) |o| {
             const rec = r.owners.items[o];
             if (rec.kind == .param and rec.n < 64) freed_here |= @as(u64, 1) << @intCast(rec.n);
         }
@@ -1507,6 +1511,7 @@ const Run = struct {
                     try st.die(r.arena, o, .{ .loc = inst.loc, .text = text, .trail = st.trail });
                 },
                 .param => if (r.isParamItself(val, rec.n)) {
+                    st.freed = try st.freed.with(r.arena, o);
                     const text = try std.fmt.allocPrint(r.arena, "freed here by {s}", .{what});
                     try st.die(r.arena, o, .{ .loc = inst.loc, .text = text, .trail = st.trail });
                 },

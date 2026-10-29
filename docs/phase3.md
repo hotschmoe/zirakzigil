@@ -168,10 +168,11 @@ Corpus (all pinned in `tests/own/*.expect`, run by `tools/run_own.sh`; CI on Lin
 | a project's own invalidation rule | 2 | 1 (with the manifest line) | 0 | 1 (the same type without it) |
 | one-line mutations of a realistic program (`tests/own/realish_bugs.zig`) | 7 | 5 | 0 | 2 (use after free through a hash-map slot; through an element of a list) |
 | a pointer laundered through an integer | 1 | 0 | 1 | 0 |
+| freeing through an array element twice; a helper that frees only on one path | 2 | 0 | 0 | 2 |
 | zmoltcp-shaped (a stale DNS query handle, a socket kept over local buffers, stored or returned; `own/seeded.zig` in zmoltcp) | 4 | 4 | 0 | 0 |
-| **total** | **96** | **90 (93.8 percent)** | **3** | **3** |
+| **total** | **98** | **90 (91.8 percent)** | **3** | **5** |
 
-Not silently accepted: 93 of 96 (96.9 percent). The three misses are the documented limits: a rule the checker was not told, and what is stored inside a container or behind a map slot is not followed.
+Not silently accepted: 93 of 98 (94.9 percent). The five misses are documented limits (`gap*` in the corpus): a rule the checker was not told, what is stored inside a container or behind a map slot, an element of an array (one of many), and a callee that frees on one path only. One correct program is reported (`fpCorrelatedBranches`: two branches on one condition are not correlated); it is pinned as a known false positive.
 
 Correct code, which must stay clean:
 

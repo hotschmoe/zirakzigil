@@ -744,3 +744,32 @@ pub fn badDeferOrder(gpa: Allocator) !void {
     defer arena.deinit();
     try map.put(a, "x", 1);
 }
+
+// Limits, pinned so they are visible: `gap*` is a real mistake the checker does not see, `fp*` is a correct
+// program it reports.
+
+fn maybeFree(gpa: Allocator, buf: []u8, c: bool) void {
+    if (c) gpa.free(buf);
+}
+
+pub fn gapConditionalFreeInHelper(gpa: Allocator, c: bool) !u8 {
+    const buf = try gpa.alloc(u8, 4);
+    maybeFree(gpa, buf, c);
+    return buf[0];
+}
+
+pub fn gapDoubleFreeOfElement(gpa: Allocator, items: []const []u8) void {
+    gpa.free(items[0]);
+    gpa.free(items[0]);
+}
+
+pub fn fpCorrelatedBranches(gpa: Allocator, c: bool) !u8 {
+    const buf = try gpa.alloc(u8, 4);
+    if (c) gpa.free(buf);
+    if (!c) {
+        const v = buf[0];
+        gpa.free(buf);
+        return v;
+    }
+    return 0;
+}

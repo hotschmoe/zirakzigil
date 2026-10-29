@@ -61,7 +61,11 @@ memory.badUseAfterFree error
 memory.badUseAfterFreeSlice error
 memory.drop clean
 memory.firstOf clean
+memory.fpCorrelatedBranches error
+memory.gapConditionalFreeInHelper clean
+memory.gapDoubleFreeOfElement clean
 memory.grow clean
+memory.maybeFree clean
 memory.okAllocFree clean
 memory.okAllocReturn clean
 memory.okAppendLocalPointerToLocalList clean
