@@ -13,15 +13,21 @@ Goal: every function in a pilot codebase exports its AIR as versioned JSON, and 
 
 ```
 compiler/
-  ZIG_VERSION          upstream tag and commit the patch targets
-  hook.patch           the only edits to existing compiler files (target: under 50 lines)
+  ZIG_VERSION          upstream tag and commit the hook targets
+  hook/rules.zon       the only edits to existing compiler files: three inserted lines
   src/zv_air/          our files, copied into the Zig tree as src/zv_air/
     adapter.zig        the only file that reads Air / InternPool internals
     export.zig         JSON writer over the adapter's stable view
-tools/build_zig_zv.sh  fetch tag, copy src/zv_air, git apply hook.patch, build zig-zv
+    cache.zig          options, cache key and restore-on-hit
+tools/zv_hook.zig      inserts the rules; every anchor must match exactly once or nothing is written
+tools/build_zig_zv.sh  fetch tag, copy src/zv_air, apply the rules, build zig-zv
 ```
 
-The hook does three things: it adds a flag (`--zv-air-out <dir>`), stores it on `Compilation` and hashes it into the cache manifest (so a cached build can't silently skip the export), and calls `zv_air.export` after `analyzeFuncBodyInner`. The compiler is built with `-Denable-llvm=false`. The patched compiler (`zig-zv`) is used only for export runs; shipped binaries still come from the stock compiler.
+The hook is three lines. `exportFunc` runs after `analyzeFuncBodyInner`. `hashCache` adds a salt to the whole-cache key, and only when `ZV_AIR_OUT` is set. `restore` is deferred at the top of `Compilation.update`. There are no flags and no new fields: options come from `ZV_AIR_OUT` and `ZV_AIR_STD`, read from `comp.environ_map`. With `ZV_AIR_OUT` unset, none of the three does anything, and the cache key is stock's.
+
+Restore-on-hit: a compile that goes through the cache writes its JSON into its own artifact (`o/<digest>/zv_air/`) and, on every update, hit or miss, copies the files to `ZV_AIR_OUT`. So a cached compile step still produces the full export, deleting the output directory and rebuilding restores it, and the output directory stays out of the cache key. A direct `-fno-emit-bin` run has no cache and writes straight to `ZV_AIR_OUT`. File names embed a content hash, so copies never conflict, but the directory is a union: a function whose body changed leaves its old file behind. Clear the directory before a run that must be exact (`tools/zv_air.sh` does). `-fincremental` is unsupported and fails loudly (below). The build scripts (the project's `build.zig` and the dependencies') are never exported: `zig build` compiles it only when its configuration cache misses, so exporting it would make the set depend on that cache.
+
+The compiler is built with `-Denable-llvm=false`. The patched compiler (`zig-zv`) is used only for export runs; shipped binaries still come from the stock compiler.
 
 ## JSON contract (schema v1)
 
@@ -44,21 +50,47 @@ An instruction is `{id, tag, ty, operands?, attrs?, loc?, bodies?}`. `id` is the
 
 ```
 tools/build_zig_zv.sh                      # once per Zig release; ~8 min, ~9 GB RAM
-zig-zv build-obj -fno-emit-bin --zv-air-out DIR file.zig     # one compilation
+ZV_AIR_OUT=DIR zig-zv build-obj -fno-emit-bin file.zig     # one compilation
 tools/zv_air.sh DIR test                   # a whole `zig build` project: runs `zig-zv build test`
 python tools/air_read.py DIR               # validate and round-trip
+ZV_DEBUG_AIR=1 tools/build_zig_zv.sh       # adds --verbose-air, for the gate below
+tools/check_corpus.sh zig-zv-air           # pinned counts and hook-vs-printer comparison
+tools/check_cache.sh zig-zv                # restore-on-hit scenarios on a zig build project
 ```
 
-Controls: `--zv-air-out DIR` or `ZV_AIR_OUT=DIR`, and `--zv-air-std` or `ZV_AIR_STD=1` to include std and the other toolchain modules (compiler_rt, ubsan_rt, the test runner), which are skipped by default. The environment variables are what make `zig build` work without touching `build.zig`: the build runner spawns `zig-zv` for each compile step and the children inherit them. Only functions the compiler analyzes are exported, so export from a root that reaches them (a test root, or `tools/air_all.zig` for a file whose pub functions are not all reached). A cached compile step skips analysis and so skips the export; `tools/zv_air.sh` uses a fresh cache for that reason. `zig-zv` on Windows cannot link executables (its self-hosted COFF linker rejects `compiler_rt.lib`; stock builds without LLVM behave the same), so on Windows use direct `-fno-emit-bin` invocations or run `zig build` under Linux/WSL.
+Controls: `ZV_AIR_OUT=DIR` turns the export on, and `ZV_AIR_STD=1` includes std and the other toolchain modules (compiler_rt, ubsan_rt, the test runner), which are skipped by default. The environment variables are what make `zig build` work without touching `build.zig`: the build runner spawns `zig-zv` for each compile step and the children inherit them. Only functions the compiler analyzes are exported, so export from a root that reaches them (a test root, or `tools/air_all.zig` for a file whose pub functions are not all reached). `zig-zv` on Windows cannot link executables (its self-hosted COFF linker rejects `compiler_rt.lib`; stock builds without LLVM behave the same), so on Windows use direct `-fno-emit-bin` invocations or run `zig build` under Linux/WSL.
+
+## Cache scenarios (Zig 0.17.0, Linux; `tools/check_cache.sh`)
+
+A `zig build` project of two objects (two exported functions each), run with `ZV_AIR_OUT` set.
+
+| Scenario | Result |
+| --- | --- |
+| Cold build | works: 4 files |
+| Second build (cache hit, `cached` in the summary) after deleting the output directory | works: the same 4 files, restored |
+| Hit with the output directory present | works: unchanged |
+| Edit `a.zig`, rebuild | works: complete set; `b`'s files byte-identical, `a_one` has a new name |
+| Rebuild after the edit (hit) | works: same set as the edit build |
+| Export off: cache entries and installed objects vs the stock compiler | identical (the key is untouched) |
+| Export on: installed objects vs the stock compiler | identical |
+| `zig build --watch`, edit one file | works: the rebuilt step exports again, the output directory is a union (the old `a_one` stays) |
+| `--watch`, delete the output directory, edit one file | partial: only the rebuilt step writes; untouched steps are not run at all, so their files stay missing until the next `zig build` |
+| `-fincremental` (with or without `--watch`) | unsupported, fails loudly: `zv_air: ZV_AIR_OUT cannot be combined with -fincremental`. Under `--watch` the Maker then panics on the dead compiler child (upstream) |
+
+The set is asserted exact (4 files for the project, build scripts of the project and of a path dependency excluded). Found on zmoltcp (`1915b35`, `zig build test`): before dependency build scripts were excluded, a cold build exported 6829 functions and a cache hit 6821, because the 8 functions of a dependency's `build.zig` are compiled only when the configuration cache misses. A stray 8 also separates the earlier reports of 6186 and 6194. With the exclusion, cold, hit and cold-again runs give 6821 with an identical file list.
+
+The output directory is a union by design (several compile steps share it, and no one compile knows the others' files), so a directory reused without clearing keeps names of older exports; that is the likeliest source of larger counts in earlier reports. `tools/zv_air.sh` clears `*.json` first and prints the final file count. Write and restore failures are fatal, never logged and skipped.
+
+Why `-fincremental` cannot work: an incremental update analyzes only what changed, so the hook sees only those functions. Measured with a prototype that wrote straight to the output directory: after editing `a.zig`, `a_one` was written again and `a_two`, `b_one`, `b_two` were not; after deleting the output directory and editing a comment, nothing was written at all. A cache-keyed location cannot repair that, because the incremental artifact directory is keyed by compilation inputs and is never replaced.
 
 ## Milestones
 
 | | Deliverable | Done when |
 | --- | --- | --- |
-| M1 | `zig-zv` builds from the script on Windows and Linux | Hook diff under 50 lines; with the flag off, `zig-zv` and a stock build from the same tag give identical output |
+| M1 | `zig-zv` builds from the script on Windows and Linux | Hook under 50 lines; with the export off, `zig-zv` and a stock build from the same tag give identical output |
 | M2 | Export `examples/search.zig` | JSON for all six functions; contracts visible; compared against what the zvc spike parses |
 | M3 | Export zmoltcp | Every function exports; JSON round-trips through a reader; `unsupported` count reported and driven to zero for zmoltcp's instruction set; export overhead measured |
-| M4 | Canary | A CI workflow applies the patch to a chosen upstream tree and builds; failure opens an issue. It runs on demand, since only the pinned release is supported |
+| M4 | Canary | An on-demand workflow builds zig-zv, checks that every hook anchor matches exactly once, runs the corpus gate (27 functions, 1083 instructions, 0 unsupported, hook JSON equal to the compiler's own `--verbose-air` text) and the cache scenarios; failure opens an issue |
 
 The Phase 1 exit gate is M3 plus M4. Phase 2 then ports `zvc` from parsing source to reading this JSON.
 

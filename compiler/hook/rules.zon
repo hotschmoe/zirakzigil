@@ -1,0 +1,25 @@
+.{ .rules = .{
+    .{
+        .name = "export-call",
+        .file = "src/Zcu/PerThread.zig",
+        .anchor = .{ .text = "var air = try pt.analyzeFuncBodyInner(func_index, reason);" },
+        .position = .after,
+        .insert = "try @import(\"../zv_air/export.zig\").exportFunc(pt, func_index, &air);",
+        .watch = "analyzeFuncBodyInner",
+    },
+    .{
+        .name = "cache-key",
+        .file = "src/Compilation.zig",
+        .anchor = .{ .text = "try addNonIncrementalStuffToCacheManifest(comp, &man);" },
+        .position = .after,
+        .insert = "@import(\"zv_air/cache.zig\").hashCache(comp, &man.hash);",
+        .watch = "addNonIncrementalStuffToCacheManifest",
+    },
+    .{
+        .name = "restore",
+        .file = "src/Compilation.zig",
+        .anchor = .{ .text = "defer cleanupAfterUpdate(comp, tmp_dir_rand_int);" },
+        .position = .after,
+        .insert = "defer @import(\"zv_air/cache.zig\").restore(comp);",
+    },
+} }

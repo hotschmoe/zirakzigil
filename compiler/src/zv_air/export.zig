@@ -10,36 +10,15 @@ const Air = @import("../Air.zig");
 const InternPool = @import("../InternPool.zig");
 const Zcu = @import("../Zcu.zig");
 const adapter = @import("adapter.zig");
-
-const log = std.log.scoped(.zv_air);
+const cache = @import("cache.zig");
 
 pub const schema_version = 1;
-
-pub const Options = struct {
-    /// Directory receiving one file per function instance; null disables the export.
-    out_dir: ?[]const u8 = null,
-    include_std: bool = false,
-
-    /// ZV_AIR_OUT and ZV_AIR_STD let the export reach compiler runs spawned by `zig build`.
-    pub fn fromEnviron(environ_map: anytype) Options {
-        return .{
-            .out_dir = environ_map.get("ZV_AIR_OUT"),
-            .include_std = environ_map.get("ZV_AIR_STD") != null,
-        };
-    }
-
-    /// Anything that changes the export must change the cache key, or a cache hit would skip it.
-    pub fn hash(options: Options, hasher: anytype) void {
-        hasher.addOptionalBytes(options.out_dir);
-        hasher.add(options.include_std);
-    }
-};
 
 pub fn exportFunc(pt: Zcu.PerThread, func_index: InternPool.Index, air: *const Air) Allocator.Error!void {
     const zcu = pt.zcu;
     const comp = zcu.comp;
-    const out_dir = comp.zv_air_options.out_dir orelse return;
-    if (!comp.zv_air_options.include_std and adapter.isToolchain(zcu, func_index)) return;
+    const o = cache.options(comp) orelse return;
+    if ((!o.include_std and adapter.isToolchain(zcu, func_index)) or adapter.isBuildScript(zcu)) return;
 
     var arena_state: std.heap.ArenaAllocator = .init(comp.gpa);
     defer arena_state.deinit();
@@ -49,13 +28,13 @@ pub fn exportFunc(pt: Zcu.PerThread, func_index: InternPool.Index, air: *const A
     var aw: std.Io.Writer.Allocating = .init(arena);
     writeFunction(&aw.writer, function) catch return error.OutOfMemory;
 
-    const name = try fileName(arena, function.fqn, aw.written());
     const io = comp.io;
-    const dir = std.Io.Dir.cwd();
-    dir.createDirPath(io, out_dir) catch |err| return log.err("{s}: {t}", .{ out_dir, err });
-    const sub_path = try std.fs.path.join(arena, &.{ out_dir, name });
-    dir.writeFile(io, .{ .sub_path = sub_path, .data = aw.written() }) catch |err|
-        log.err("{s}: {t}", .{ sub_path, err });
+    const target = cache.target(comp, o);
+    target.dir.createDirPath(io, target.sub_path) catch |err|
+        std.process.fatal("zv_air: {s}: {t}", .{ target.sub_path, err });
+    const sub_path = try std.fs.path.join(arena, &.{ target.sub_path, try fileName(arena, function.fqn, aw.written()) });
+    target.dir.writeFile(io, .{ .sub_path = sub_path, .data = aw.written() }) catch |err|
+        std.process.fatal("zv_air: {s}: {t}", .{ sub_path, err });
 }
 
 /// The name embeds a hash of the content, so generic instances that share a

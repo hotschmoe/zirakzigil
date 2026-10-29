@@ -44,20 +44,20 @@ check() { # name, command prefix output file a, b
 
 for compiler in stock zv zv_on; do
     case $compiler in
-        stock) bin=$stock; extra="" ;;
-        zv) bin=$zv; extra="" ;;
-        zv_on) bin=$zv; extra="--zv-air-out $tmp/air" ;;
+        stock) bin=$stock; pre="env" ;;
+        zv) bin=$zv; pre="env" ;;
+        zv_on) bin=$zv; pre="env ZV_AIR_OUT=$tmp/air" ;;
     esac
     # shellcheck disable=SC2086
-    "$bin" build-obj -fno-emit-bin --zig-lib-dir "$lib" $extra "$tmp/bad.zig" >"$tmp/$compiler.bad.out" 2>&1
+    $pre "$bin" build-obj -fno-emit-bin --zig-lib-dir "$lib" "$tmp/bad.zig" >"$tmp/$compiler.bad.out" 2>&1
     echo "exit $?" >>"$tmp/$compiler.bad.out"
     # shellcheck disable=SC2086
-    "$bin" test -fno-emit-bin --zig-lib-dir "$lib" $extra --dep zv -Mroot="$root/examples/search.zig" -Mzv="$root/src/zv.zig" >"$tmp/$compiler.clean.out" 2>&1
+    $pre "$bin" test -fno-emit-bin --zig-lib-dir "$lib" --dep zv -Mroot="$root/examples/search.zig" -Mzv="$root/src/zv.zig" >"$tmp/$compiler.clean.out" 2>&1
     echo "exit $?" >>"$tmp/$compiler.clean.out"
     mkdir -p "$tmp/$compiler" # the object name is embedded in the object, so keep it identical
     for target in x86_64-windows x86_64-linux; do
         # shellcheck disable=SC2086
-        "$bin" build-obj --zig-lib-dir "$lib" $extra -target "$target" -O ReleaseFast -fno-llvm -fstrip -femit-bin="$tmp/$compiler/obj.o" \
+        $pre "$bin" build-obj --zig-lib-dir "$lib" -target "$target" -O ReleaseFast -fno-llvm -fstrip -femit-bin="$tmp/$compiler/obj.o" \
             $(obj_args) >"$tmp/$compiler.$target.out" 2>&1
         echo "exit $?" >>"$tmp/$compiler.$target.out"
         mv "$tmp/$compiler/obj.o" "$tmp/$compiler.$target.o"
