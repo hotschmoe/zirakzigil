@@ -21,3 +21,4 @@ out=$(cd "$1" && { pwd -W 2>/dev/null || pwd; })
 shift
 rm -f "$out"/*.json
 ZIG_GLOBAL_CACHE_DIR=${ZV_GLOBAL_CACHE:-$root/compiler/.work/global-cache} ZV_AIR_OUT=$out "$zv" build "$@"
+echo "zv_air: $(ls "$out" | grep -c '\.json$') function files in $out"

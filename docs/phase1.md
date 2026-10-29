@@ -79,6 +79,8 @@ A `zig build` project of two objects (two exported functions each), run with `ZV
 
 The set is asserted exact (4 files for the project, build scripts of the project and of a path dependency excluded). Found on zmoltcp (`1915b35`, `zig build test`): before dependency build scripts were excluded, a cold build exported 6829 functions and a cache hit 6821, because the 8 functions of a dependency's `build.zig` are compiled only when the configuration cache misses. A stray 8 also separates the earlier reports of 6186 and 6194. With the exclusion, cold, hit and cold-again runs give 6821 with an identical file list.
 
+The output directory is a union by design (several compile steps share it, and no one compile knows the others' files), so a directory reused without clearing keeps names of older exports; that is the likeliest source of larger counts in earlier reports. `tools/zv_air.sh` clears `*.json` first and prints the final file count. Write and restore failures are fatal, never logged and skipped.
+
 Why `-fincremental` cannot work: an incremental update analyzes only what changed, so the hook sees only those functions. Measured with a prototype that wrote straight to the output directory: after editing `a.zig`, `a_one` was written again and `a_two`, `b_one`, `b_two` were not; after deleting the output directory and editing a comment, nothing was written at all. A cache-keyed location cannot repair that, because the incremental artifact directory is keyed by compilation inputs and is never replaced.
 
 ## Milestones
