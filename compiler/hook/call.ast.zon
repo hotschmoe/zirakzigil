@@ -1,0 +1,9 @@
+.{ .rules = .{
+    .{
+        .name = "export-call",
+        .file = "src/Zcu/PerThread.zig",
+        .anchor = .{ .fn_stmt = .{ .fn_name = "analyzeFuncBody", .stmt = .{ .calls = "analyzeFuncBodyInner" } } },
+        .position = .after,
+        .insert = "try @import(\"../zv_air/export.zig\").exportFunc(pt, func_index, &air);",
+    },
+} }

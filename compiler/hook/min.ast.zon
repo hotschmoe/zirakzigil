@@ -1,0 +1,16 @@
+.{ .rules = .{
+    .{
+        .name = "export-call",
+        .file = "src/Zcu/PerThread.zig",
+        .anchor = .{ .fn_stmt = .{ .fn_name = "analyzeFuncBody", .stmt = .{ .calls = "analyzeFuncBodyInner" } } },
+        .position = .after,
+        .insert = "try @import(\"../zv_air/export.zig\").exportFunc(pt, func_index, &air);",
+    },
+    .{
+        .name = "cache-key",
+        .file = "src/Compilation.zig",
+        .anchor = .{ .fn_stmt = .{ .fn_name = "addNonIncrementalStuffToCacheManifest", .stmt = .first } },
+        .position = .before,
+        .insert = "@import(\"zv_air/export.zig\").hashEnv(comp.environ_map, &man.hash);",
+    },
+} }

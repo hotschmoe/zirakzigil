@@ -1,0 +1,70 @@
+.{ .rules = .{
+    .{
+        .name = "export-call",
+        .file = "src/Zcu/PerThread.zig",
+        .anchor = .{ .fn_stmt = .{ .fn_name = "analyzeFuncBody", .stmt = .{ .calls = "analyzeFuncBodyInner" } } },
+        .position = .after,
+        .insert = "try Compilation.zv_air.exportFunc(pt, func_index, &air);",
+    },
+    .{
+        .name = "import",
+        .file = "src/Compilation.zig",
+        .anchor = .{ .decl = "InternPool" },
+        .position = .after,
+        .insert = "pub const zv_air = @import(\"zv_air/export.zig\");",
+    },
+    .{
+        .name = "field",
+        .file = "src/Compilation.zig",
+        .anchor = .{ .container_field = .{ .field = .{ .named = "clang_preprocessor_mode" } } },
+        .position = .after,
+        .insert = "zv_air_options: zv_air.Options,",
+    },
+    .{
+        .name = "create-option",
+        .file = "src/Compilation.zig",
+        .anchor = .{ .container_field = .{ .container = "CreateOptions", .field = .{ .named = "clang_passthrough_mode" } } },
+        .position = .after,
+        .insert = "zv_air_options: zv_air.Options = .{},",
+    },
+    .{
+        .name = "create-init",
+        .file = "src/Compilation.zig",
+        .anchor = .{ .init_field = .{ .fn_name = "create", .field = "clang_preprocessor_mode" } },
+        .position = .after,
+        .insert = ".zv_air_options = options.zv_air_options,",
+    },
+    .{
+        .name = "cache-key",
+        .file = "src/Compilation.zig",
+        .anchor = .{ .fn_stmt = .{ .fn_name = "addNonIncrementalStuffToCacheManifest", .stmt = .first } },
+        .position = .before,
+        .insert = "comp.zv_air_options.hash(&man.hash);",
+    },
+    .{
+        .name = "main-var",
+        .file = "src/main.zig",
+        .anchor = .{ .fn_stmt = .{ .fn_name = "buildOutputType", .stmt = .first } },
+        .position = .before,
+        .insert = "var zv_air: Compilation.zv_air.Options = .fromEnviron(environ_map);",
+    },
+    .{
+        .name = "main-flags",
+        .file = "src/main.zig",
+        .anchor = .{ .text_after = .{ .prev = "};", .line = "} else if (mem.eql(u8, arg, \"--debug-compile-errors\")) {" } },
+        .position = .before,
+        .insert =
+        \\} else if (mem.eql(u8, arg, "--zv-air-out")) {
+        \\    zv_air.out_dir = args_iter.nextOrFatal();
+        \\} else if (mem.eql(u8, arg, "--zv-air-std")) {
+        \\    zv_air.include_std = true;
+        ,
+    },
+    .{
+        .name = "main-pass",
+        .file = "src/main.zig",
+        .anchor = .{ .init_field = .{ .fn_name = "buildOutputType", .field = "clang_passthrough_mode" } },
+        .position = .after,
+        .insert = ".zv_air_options = zv_air,",
+    },
+} }
