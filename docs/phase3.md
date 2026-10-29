@@ -183,7 +183,7 @@ Correct code, which must stay clean:
 | zmoltcp 0.5.3, production code with its generics instantiated (`own/zmoltcp.zvp`) | 986 | 0 | 0 |
 | zmoltcp 0.5.3 as `zig build test` reaches it, tests and laws included | 5297 | 0 | 0 |
 
-During development the same code produced about 40 false positives and 9 unproven functions before the precision decisions above were made; each is recorded there. The final false-positive rate on about 6,900 function checks of code written without the checker (zmoltcp counted twice) is 0, with the usual caveat that the checker was shaped by that code; the seeded cases were written before the rules they exercise and none was edited to pass.
+During development the same code produced about 40 false positives and 9 unproven functions before the precision decisions above were made; each is recorded there. The final false-positive rate on about 6,900 function checks of code written without the checker (zmoltcp counted twice) is 0, with the usual caveat that the checker was shaped by that code; most seeded cases were written before the rules they exercise; four were corrected when the checker was right and the case was wrong (a loop that I thought was a gap and was a real stale pointer, a `memcpy` case that was correct, a carried token case, an unreachable `return &x` that Zig itself rejects), and none was weakened to pass.
 
 Annotation burden: zero lines in all of the above, except the one-line manifest of `tests/own/registry.zig`. zmoltcp, which has no allocator at all and takes every buffer from its caller, needed none and gets no findings; the interesting surface there is the DNS socket's `zv.Slots` handles and the lending of local buffers to sockets, both in the corpus.
 
