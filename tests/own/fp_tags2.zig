@@ -39,3 +39,17 @@ pub fn badFreeThenDupeFails(gpa: Allocator) !void {
     defer gpa.free(h.last);
     try h.update(gpa);
 }
+
+// libvaxis `Terminal.deinit`: a queue of tagged events is emptied, and the destructor frees the payload of the variants that own one.
+const Event = union(enum) { key: u8, title: []u8 };
+
+fn freeEvent(gpa: Allocator, event: Event) void {
+    switch (event) {
+        .title => |text| gpa.free(text),
+        else => {},
+    }
+}
+
+pub fn okPopLoop(gpa: Allocator, queue: *std.ArrayList(Event)) void {
+    while (queue.pop()) |event| freeEvent(gpa, event);
+}

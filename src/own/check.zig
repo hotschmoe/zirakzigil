@@ -114,7 +114,7 @@ pub const Kill = struct {
 /// callee, or a constant (a scalar). `obj`: it names the object identities of the value, not the identities its
 /// pointers lead into.
 pub const Desc = struct {
-    src: union(enum) { from: Slot, fresh: u32, gone, con: u64 },
+    src: union(enum) { from: Slot, fresh: u32, gone, con: u64, scalar: Slot },
     obj: bool = false,
 
     pub fn eql(a: Desc, b: Desc) bool {
@@ -124,6 +124,7 @@ pub const Desc = struct {
             .fresh => |x| b.src == .fresh and x == b.src.fresh,
             .gone => b.src == .gone,
             .con => |x| b.src == .con and x == b.src.con,
+            .scalar => |x| b.src == .scalar and x.eql(b.src.scalar),
         };
     }
 };
@@ -133,7 +134,7 @@ pub const Leaf = struct { path: []const u32, descs: []const Desc };
 
 /// Memory below a pointer parameter holds `descs` when the callee returns. `must`: on every path that returns.
 /// `on_fail`: some path that returns an error writes it too.
-pub const Write = struct { into: Slot, descs: []const Desc, must: bool, on_fail: bool = false };
+pub const Write = struct { into: Slot, descs: []const Desc, must: bool, on_fail: bool = false, fail_con: ?u64 = null };
 
 /// A fresh allocation of the callee ends with the objects `regions` (an arena it allocated from).
 pub const Fresh = struct { regions: []const Slot, many: bool = false };
@@ -153,6 +154,10 @@ pub const Summary = struct {
     kills: []const Kill = &.{},
     /// Bit i: the allocation or handle behind parameter i is freed on every path that returns.
     frees: u64 = 0,
+    /// The tests the paths that return a value (not an error) went through: one of these holds when the call succeeds. Empty: it never does.
+    ok_when: Alts = null,
+    /// Memory below these slots may have been written with nothing known of what (a call nobody read, a memset, an atomic update).
+    clobbers: []const Slot = &.{},
     /// Bit i: it is freed on some path that returns (and not on all).
     maybe_frees: u64 = 0,
     /// What the memory below the pointer parameters holds afterwards.
@@ -167,12 +172,12 @@ pub const Summary = struct {
     moves: u64 = 0,
 
     pub fn eql(a: Summary, b: Summary) bool {
-        if (a.complete != b.complete or a.frees != b.frees or a.maybe_frees != b.maybe_frees or a.token_stores != b.token_stores or a.moves != b.moves) return false;
+        if (a.complete != b.complete or a.clobbers.len != b.clobbers.len or (a.ok_when == null) != (b.ok_when == null) or (a.ok_when != null and a.ok_when.?.len != b.ok_when.?.len) or a.frees != b.frees or a.maybe_frees != b.maybe_frees or a.token_stores != b.token_stores or a.moves != b.moves) return false;
         if (a.ret.len != b.ret.len or a.kills.len != b.kills.len or a.writes.len != b.writes.len or a.fresh.len != b.fresh.len or a.derefs.len != b.derefs.len) return false;
         for (a.derefs, b.derefs) |x, y| if (!x.eql(y)) return false;
         for (a.ret, b.ret) |x, y| if (!std.mem.eql(u32, x.path, y.path) or !eqlDescs(x.descs, y.descs)) return false;
         for (a.kills, b.kills) |x, y| if (!x.eql(y)) return false;
-        for (a.writes, b.writes) |x, y| if (!x.into.eql(y.into) or x.must != y.must or x.on_fail != y.on_fail or !eqlDescs(x.descs, y.descs)) return false;
+        for (a.writes, b.writes) |x, y| if (!x.into.eql(y.into) or x.must != y.must or x.on_fail != y.on_fail or x.fail_con != y.fail_con or !eqlDescs(x.descs, y.descs)) return false;
         if ((a.ret_place == null) != (b.ret_place == null)) return false;
         if (a.ret_place) |p| if (!p.eql(b.ret_place.?)) return false;
         return true;
@@ -396,7 +401,8 @@ pub const Pending = struct { loc: schema.LocId, ident: dom.Id, site: u32 };
 /// A second free of a handle that may only be an ignored error: reported where the error is propagated.
 pub const Cancel = struct { tomb: dom.Id };
 
-pub const Restore = struct { place: PlaceId, val: Val, obj: bool = false };
+/// `con_only`: what the paths that fail leave in a place they and the others write is `val.con`, or nothing known.
+pub const Restore = struct { place: PlaceId, val: Val, obj: bool = false, con_only: bool = false };
 
 /// An end that a path of the callee that fails also makes.
 pub const FailEnd = struct { id: dom.Id, event: Event, tomb: dom.Id = 0 };
@@ -516,13 +522,13 @@ pub const State = struct {
         }
         // A place that only one path wrote holds a constant on that path only.
         for (out.mem.keys(), out.mem.values()) |key, *v| if (!b.mem.contains(key)) {
-            v.con = null;
+            v.forgetCon();
         };
         var it = b.mem.iterator();
         while (it.next()) |e| {
             const gop = try out.mem.getOrPut(arena, e.key_ptr.*);
             gop.value_ptr.* = if (gop.found_existing) try gop.value_ptr.join(arena, e.value_ptr.*) else e.value_ptr.*;
-            if (!gop.found_existing) gop.value_ptr.con = null;
+            if (!gop.found_existing) gop.value_ptr.forgetCon();
         }
         var over_it = b.over.iterator();
         while (over_it.next()) |e| {
@@ -588,6 +594,8 @@ const Snap = struct {
     writes: []const SnapWrite,
     /// The function returns an error here: the result carries nothing, and the caller's `try` does not go on.
     failed: bool,
+    /// What this path tested on the parameters (null: nothing).
+    when: Alts,
 };
 
 const SnapWrite = struct { into: Slot, descs: []const Desc };
@@ -629,6 +637,9 @@ pub const Run = struct {
     holder_of: std.AutoHashMapUnmanaged(dom.Id, PlaceId) = .empty,
     cancels: std.AutoHashMapUnmanaged(u32, Cancel) = .empty,
     /// What a call wrote only on the paths that succeed, as it was before: the error path of its `try` still has it.
+    clobbers: std.ArrayList(Slot) = .empty,
+    /// Calls that cannot return without an error here: the code after a `try` of one is dead.
+    never_ok: std.AutoHashMapUnmanaged(u32, void) = .empty,
     restores: std.AutoHashMapUnmanaged(u32, []const Restore) = .empty,
     fail_ends: std.AutoHashMapUnmanaged(u32, []const FailEnd) = .empty,
     /// What a call ends only on the paths that succeed: on its error path the block is still there.
@@ -904,6 +915,20 @@ pub const Run = struct {
         try r.swapAll(st, id, t, unsure, false);
     }
 
+    /// Something wrote below `pl` and the run cannot read what: no constant or test of it is good any more, and the summary
+    /// tells the caller.
+    pub fn clobber(r: *Run, st: *State, pl: PlaceId) Allocator.Error!void {
+        st.forget(&r.places, pl);
+        for (st.mem.keys(), st.mem.values()) |key, *v| if (r.places.contains(pl, key)) {
+            v.forgetCon();
+        };
+        if (!r.pointerRooted(pl)) return;
+        try st.touched.put(r.arena, pl, {});
+        const slot = (try r.slotOfPlace(pl, .content)) orelse return;
+        for (r.clobbers.items) |x| if (x.eql(slot)) return;
+        try r.clobbers.append(r.arena, slot);
+    }
+
     pub fn identRec(r: *Run, id: dom.Id) Ident {
         return r.idents.items[id];
     }
@@ -1013,7 +1038,11 @@ pub const Run = struct {
             };
             if (!dup) try out.append(r.arena, d);
         };
-        if (v.con) |c| try out.append(r.arena, .{ .src = .{ .con = c } });
+        if (v.con) |c| {
+            try out.append(r.arena, .{ .src = .{ .con = c } });
+        } else if (v.at != null and v.ep == dom.fixed_epoch and v.pair == null) {
+            if (r.paramOf(v.at.?) != null and !r.pointerRooted(v.at.?)) if (try r.slotOfPlace(v.at.?, .value)) |s| try out.append(r.arena, .{ .src = .{ .scalar = s } });
+        }
         return out.items;
     }
 
@@ -1097,7 +1126,7 @@ pub const Run = struct {
         r.stamps[inst.id] = r.defs;
         // A number points nowhere and holds nothing, whatever it was computed from.
         r.vals[inst.id] = switch (r.ty.kind(inst.ty)) {
-            .int, .bool, .@"enum" => .{ .con = val.con, .at = val.at, .probe = val.probe, .imp = val.imp, .ep = val.ep },
+            .int, .bool, .@"enum" => .{ .con = val.con, .pair = val.pair, .at = val.at, .probe = val.probe, .imp = val.imp, .ep = val.ep },
             .float, .error_set, .comptime_int, .comptime_float, .void, .noreturn, .enum_literal => Val.none,
             else => val,
         };
@@ -1347,13 +1376,13 @@ pub const Run = struct {
         stored.probe = null;
         stored.ep = if (kept) dom.fixed_epoch else 0;
         // Elements and lengths may be the same memory as other places: no constant is followed there.
-        if (r.indexed(pl)) stored.con = null;
+        if (r.indexed(pl)) stored.forgetCon();
         st.forget(&r.places, pl);
         if (r.pointerRooted(pl)) try st.touched.put(r.arena, pl, {});
         if (r.paramOf(pl) != null) for (val.ids.ids) |id| if (r.identRec(id).kind == .heap) try r.holder_of.put(r.arena, id, pl);
         const gop = try st.mem.getOrPut(r.arena, pl);
         // A place that was never written holds something unknown: a weak write does not make it a constant.
-        if (!strong and !gop.found_existing) stored.con = null;
+        if (!strong and !gop.found_existing) stored.forgetCon();
         gop.value_ptr.* = if (strong or !gop.found_existing) stored else try gop.value_ptr.join(r.arena, stored);
     }
 
@@ -1533,7 +1562,7 @@ pub const Run = struct {
 
     /// The value of a by-value parameter: the identities of what the caller passed, field by field.
     fn paramVal(r: *Run, st: *State, ty: schema.TypeId, pl: PlaceId, depth: u32) Allocator.Error!Val {
-        const holder = r.ty.kind(r.ty.payload(ty)) == .@"struct" and !r.ty.isAllocator(ty);
+        const holder = (r.ty.kind(r.ty.payload(ty)) == .@"struct" or r.ty.kind(r.ty.payload(ty)) == .@"union") and !r.ty.isAllocator(ty);
         // A struct without pointers can still be a handle: freeing it frees what the caller gave.
         if (isScalar(r.ty.kind(ty))) return .{ .at = pl, .ep = dom.fixed_epoch };
         if (!r.ty.hasPointers(ty)) return if (r.ty.kind(ty) == .@"struct") .{ .ids = try Set.single(r.arena, try r.ident(.init, pl, 0)) } else .none;
@@ -1572,7 +1601,28 @@ pub const Run = struct {
         r.set(inst, val);
     }
 
-    pub fn store(r: *Run, inst: *const Inst, st: *State, ptr: Val, val: Val, val_ty: schema.TypeId, undef: bool) Error!void {
+    /// A tag-like scalar was written through a pointer the run has no place for: it may be any tag it follows.
+    fn clobberAll(r: *Run, st: *State) Allocator.Error!void {
+        st.facts.clearRetainingCapacity();
+        for (st.mem.values()) |*v| v.forgetCon();
+        const params = r.pack.t.params[r.func.params.off..][0..r.func.params.len];
+        for (params, 0..) |p, n| {
+            if (!r.ty.isPointer(p.ty)) continue;
+            const slot: Slot = .{ .param = @intCast(n), .kind = .content };
+            var have = false;
+            for (r.clobbers.items) |x| have = have or x.eql(slot);
+            if (!have) try r.clobbers.append(r.arena, slot);
+            try st.touched.put(r.arena, try r.places.root(r.arena, .param, @intCast(n)), {});
+        }
+    }
+
+    pub fn store(r: *Run, inst: *const Inst, st: *State, ptr: Val, stored_val: Val, val_ty: schema.TypeId, undef: bool) Error!void {
+        // A write through a pointer of another type than the place's leaves no constant the run can read.
+        var val = stored_val;
+        if (ptr.cast) {
+            val.forgetCon();
+            if (ptr.place) |pl| try r.clobber(st, pl);
+        }
         try r.alive(st, inst, ptr, "write");
         try r.escapes(st, inst, val, r.isLocalPtr(ptr), "stored into memory that outlives it");
         if (ptr.place) |pl| {
@@ -1603,6 +1653,10 @@ pub const Run = struct {
                 if (!before.isEmpty()) try r.writeObj(st, pl, before);
             }
         } else {
+            switch (r.ty.kind(val_ty)) {
+                .@"enum", .bool => try r.clobberAll(st),
+                else => {},
+            }
             // A store through a pointer into the storage a parameter holds (`list.items[i] = x` by way of a pointer a
             // callee returned) lands below that parameter: not followed in memory, but the summary says it.
             for (ptr.ids.ids) |o| {
@@ -1662,10 +1716,10 @@ pub const Run = struct {
         const kind = r.ty.kind(ty);
         if (isScalar(kind)) {
             const pl = ptr.place orelse return Val.none;
-            if (out.many or r.indexed(pl)) return .{ .ep = r.epoch };
+            if (out.many or r.indexed(pl) or ptr.cast) return .{ .ep = r.epoch };
             const copy = out.at != null and out.ep == dom.fixed_epoch;
             const source = if (copy) out.at.? else pl;
-            return .{ .con = out.con orelse st.facts.get(source), .at = source, .ep = if (copy) dom.fixed_epoch else r.epoch };
+            return .{ .con = out.con orelse st.facts.get(source), .pair = out.pair, .at = source, .ep = if (copy) dom.fixed_epoch else r.epoch };
         }
         switch (kind) {
             .float, .error_set => return Val.none,
@@ -1689,7 +1743,7 @@ pub const Run = struct {
                 if (r.indexed(at)) continue;
                 const kept = part.at != null and part.ep == dom.fixed_epoch;
                 const source = if (kept) part.at.? else at;
-                out.* = .{ .con = part.con orelse st.facts.get(source), .at = source, .ep = if (kept) dom.fixed_epoch else r.epoch };
+                out.* = .{ .con = part.con orelse st.facts.get(source), .pair = part.pair, .at = source, .ep = if (kept) dom.fixed_epoch else r.epoch };
                 any = true;
             } else if (r.ty.structFields(f.ty) != null) {
                 out.* = try r.annotate(st, part, f.ty, at, depth + 1);
@@ -1824,12 +1878,19 @@ pub const Run = struct {
             try r.swapAll(st, e.tomb, e.id, false, false);
         };
         if (r.restores.get(call_id)) |list| for (list) |back| {
-            if (back.obj) try r.writeObj(st, back.place, back.val.ids) else try r.writeLeafAs(st, back.place, back.val, true);
+            if (back.obj) {
+                try r.writeObj(st, back.place, back.val.ids);
+            } else if (back.con_only) {
+                var now = try r.readLeaf(st, back.place, .none, false);
+                now.con = back.val.con;
+                now.pair = null;
+                try r.writeLeafAs(st, back.place, now, true);
+            } else try r.writeLeafAs(st, back.place, back.val, true);
         };
         // Only a block a restored place holds again is ended again: a name the call itself made anew is not that block.
         var again: Set = .empty;
         if (r.restores.get(call_id)) |list| for (list) |back| {
-            if (!back.obj) again = try again.merge(r.arena, back.val.ids);
+            if (!back.obj and !back.con_only) again = try again.merge(r.arena, back.val.ids);
         };
         if (r.fail_ends.get(call_id)) |list| for (list) |e| {
             if (!again.has(e.id)) continue;
@@ -1924,6 +1985,7 @@ pub const Run = struct {
             var makes = false;
             for (w.descs) |d| makes = makes or d.src == .fresh;
             w.on_fail = c != g;
+            w.fail_con = if (w.on_fail and c - g == snaps.len - going) failedCon(snaps, w.into) else null;
             // A caller that tries the call has the old block back on the paths that fail, when none of them wrote it.
             w.must = if (going == 0 or (makes and w.on_fail)) c == snaps.len else g == going;
         }
@@ -1964,6 +2026,19 @@ pub const Run = struct {
         for (derefs, r.derefs.items) |*d, x| d.* = try dupeSlot(arena, x);
         std.mem.sort(Slot, derefs, {}, lessSlot);
         out.derefs = derefs;
+        // When the call can succeed.
+        var ok: std.ArrayList([]const Cond) = .empty;
+        var ok_free = false;
+        for (snaps) |s| {
+            if (s.failed) continue;
+            const alts = s.when orelse {
+                ok_free = true;
+                continue;
+            };
+            for (alts) |alt| try ok.append(arena, try dupeConds(arena, alt));
+        }
+        out.ok_when = if (ok_free) null else ok.items;
+        out.clobbers = try dupeSlots(arena, r.clobbers.items);
         out.ret_place = if (place_ok) if (place) |p| try dupeSlot(arena, p) else null else null;
         out.fresh = fresh_list;
         // Pointer parameters (slices too) are taken not to overlap; say so when something is ended or changed through them.
@@ -2055,6 +2130,7 @@ pub const Run = struct {
             .fresh => |x| x < b.src.fresh,
             .gone => false,
             .con => |x| x < b.src.con,
+            .scalar => |x| lessSlot({}, x, b.src.scalar),
         };
     }
 
@@ -2062,10 +2138,26 @@ pub const Run = struct {
         return .{ .param = s.param, .path = try arena.dupe(u32, s.path), .kind = s.kind };
     }
 
+    fn dupeSlots(arena: Allocator, slots: []const Slot) Allocator.Error![]const Slot {
+        const out = try arena.alloc(Slot, slots.len);
+        for (out, slots) |*o, s| o.* = try dupeSlot(arena, s);
+        return out;
+    }
+
+    fn dupeConds(arena: Allocator, conds: []const Cond) Allocator.Error![]const Cond {
+        const out = try arena.alloc(Cond, conds.len);
+        for (out, conds) |*c, x| c.* = .{ .slot = try dupeSlot(arena, x.slot), .value = x.value, .eq = x.eq };
+        return out;
+    }
+
     fn dupeKill(arena: Allocator, k: Kill) Allocator.Error!Kill {
         const when = try arena.alloc(Cond, k.when.len);
         for (when, k.when) |*c, x| c.* = .{ .slot = try dupeSlot(arena, x.slot), .value = x.value, .eq = x.eq };
         return .{ .slot = try dupeSlot(arena, k.slot), .when = when };
+    }
+
+    fn dupeDesc(arena: Allocator, d: Desc) Allocator.Error!Desc {
+        return (try dupeDescs(arena, &.{d}))[0];
     }
 
     fn dupeDescs(arena: Allocator, ds: []const Desc) Allocator.Error![]const Desc {
@@ -2075,18 +2167,20 @@ pub const Run = struct {
             .fresh => |k| .{ .fresh = k },
             .gone => .gone,
             .con => |c| .{ .con = c },
+            .scalar => |s| .{ .scalar = try dupeSlot(arena, s) },
         }, .obj = d.obj };
         return out;
     }
 
     const ConKey = union(enum) { leaf: []const u32, write: Slot };
 
-    /// The constant a result leaf or a write holds on every path that goes on, when it is one and the same.
-    fn agreedCon(snaps: []const Snap, going: usize, key: ConKey) ?u64 {
-        var agreed: ?u64 = null;
+    /// The scalar (a constant, or a by-value parameter's scalar) a result leaf or a write holds on every path that goes on,
+    /// when it is one and the same.
+    fn agreedCon(snaps: []const Snap, going: usize, key: ConKey) ?Desc {
+        var agreed: ?Desc = null;
         for (snaps) |s| {
             if (s.failed and going != 0) continue;
-            var found: ?u64 = null;
+            var found: ?Desc = null;
             switch (key) {
                 .leaf => |path| for (s.ret) |l| if (std.mem.eql(u32, l.path, path)) {
                     found = conOf(l.descs);
@@ -2096,26 +2190,43 @@ pub const Run = struct {
                 },
             }
             const c = found orelse return null;
-            if (agreed != null and agreed.? != c) return null;
+            if (agreed != null and !agreed.?.eql(c)) return null;
             agreed = c;
         }
         return agreed;
     }
 
-    fn conOf(descs: []const Desc) ?u64 {
-        var found: ?u64 = null;
-        for (descs) |d| if (d.src == .con) {
-            if (found != null and found.? != d.src.con) return null;
-            found = d.src.con;
+    /// The constant a write leaves on the paths that return an error, when each of them writes it and they agree.
+    fn failedCon(snaps: []const Snap, slot: Slot) ?u64 {
+        var agreed: ?Desc = null;
+        for (snaps) |s| {
+            if (!s.failed) continue;
+            var found: ?Desc = null;
+            for (s.writes) |w| if (w.into.eql(slot)) {
+                found = conOf(w.descs);
+            };
+            const c = found orelse return null;
+            if (agreed != null and !agreed.?.eql(c)) return null;
+            agreed = c;
+        }
+        const d = agreed orelse return null;
+        return if (d.src == .con) d.src.con else null;
+    }
+
+    fn conOf(descs: []const Desc) ?Desc {
+        var found: ?Desc = null;
+        for (descs) |d| if (d.src == .con or d.src == .scalar) {
+            if (found != null and !found.?.eql(d)) return null;
+            found = d;
         };
         return found;
     }
 
-    /// `descs` without constants, and with `c` when it is known.
-    fn withCon(arena: Allocator, descs: []const Desc, c: ?u64) Allocator.Error![]const Desc {
+    /// `descs` without scalars, and with `c` when it is known.
+    fn withCon(arena: Allocator, descs: []const Desc, c: ?Desc) Allocator.Error![]const Desc {
         var out: std.ArrayList(Desc) = .empty;
-        for (descs) |d| if (d.src != .con) try out.append(arena, d);
-        if (c) |x| try out.append(arena, .{ .src = .{ .con = x } });
+        for (descs) |d| if (d.src != .con and d.src != .scalar) try out.append(arena, d);
+        if (c) |x| try out.append(arena, try dupeDesc(arena, x));
         return out.items;
     }
 
@@ -2230,7 +2341,7 @@ pub const Run = struct {
             const into = (try r.slotOfPlace(key, .content)) orelse continue;
             try writes.append(r.arena, .{ .into = into, .descs = try r.descsOf(v) });
         }
-        try r.snaps.put(r.arena, inst.id, .{ .kills = kills.items, .frees = frees, .moves = moves, .ret = leaves.items, .ret_place = ret_place, .writes = writes.items, .failed = r.returnsError(inst) });
+        try r.snaps.put(r.arena, inst.id, .{ .kills = kills.items, .frees = frees, .moves = moves, .ret = leaves.items, .ret_place = ret_place, .writes = writes.items, .failed = r.returnsError(inst), .when = try r.guardOf(st, &.{}) });
     }
 
     fn ret(r: *Run, inst: *const Inst, st: *State, val: Val) Error!void {
@@ -2372,7 +2483,10 @@ pub const Run = struct {
                 if (r.ty.hasPointers(inst.ty) or r.ty.hasTokens(inst.ty)) {
                     var v = r.arg(inst, 0);
                     // An offset counts elements: a cast to another element type changes the unit.
-                    if (r.elemType(r.operandType(r.v.ops(inst)[0])) != r.elemType(inst.ty)) v.off = null;
+                    if (r.elemType(r.operandType(r.v.ops(inst)[0])) != r.elemType(inst.ty)) {
+                        v.off = null;
+                        v.cast = true;
+                    }
                     r.set(inst, v);
                 } else r.set(inst, .none);
             },
@@ -2422,6 +2536,12 @@ pub const Run = struct {
                         const gop = try r.field_names.getOrPut(r.arena, p.place.?);
                         if (!gop.found_existing) gop.value_ptr.* = try r.arena.dupe(u8, name);
                     }
+                    // Only one variant of a union lives: naming one says the others are dead.
+                    if (r.places.rec(pl).kind == .cell) if (r.ty.pointee(r.operandType(r.v.ops(inst)[0]))) |container| {
+                        if (r.ty.kind(container) == .@"union") if (r.ty.structFields(container)) |variants| {
+                            for (0..variants.len) |k| if (k != field) try r.writeLeafAs(st, try r.places.child(r.arena, pl, @intCast(k)), .none, true);
+                        };
+                    };
                 }
                 r.set(inst, p);
             },
@@ -2564,7 +2684,9 @@ pub const Run = struct {
                 try r.store(inst, st, dst, content, .none, false);
             },
             .memset, .memset_safe => {
-                try r.alive(st, inst, r.arg(inst, 0), "write");
+                const dst = r.arg(inst, 0);
+                try r.alive(st, inst, dst, "write");
+                if (dst.place) |pl| try r.clobber(st, pl);
             },
             .atomic_store_unordered, .atomic_store_monotonic, .atomic_store_release, .atomic_store_seq_cst => {
                 const stored = r.v.ops(inst)[1];
@@ -2575,9 +2697,36 @@ pub const Run = struct {
                 try r.alive(st, inst, p, "read");
                 r.set(inst, try r.load(st, inst, p, inst.ty));
             },
-            .atomic_rmw, .cmpxchg_weak, .cmpxchg_strong => {
-                try r.alive(st, inst, r.arg(inst, 0), "read and written");
+            .atomic_rmw => {
+                const target = r.arg(inst, 0);
+                try r.alive(st, inst, target, "read and written");
                 if (r.ty.hasPointers(inst.ty)) return r.unsupported(inst, "an atomic update of a pointer", .{});
+                // An exchange with a constant leaves that constant; any other update leaves nothing the run can read.
+                const exchange = if (r.v.attrStr(inst, .op)) |op| std.mem.eql(u8, op, "Xchg") else false;
+                if (exchange and target.place != null and r.arg(inst, 1).con != null) {
+                    try r.store(inst, st, target, .{ .con = r.arg(inst, 1).con }, r.operandType(r.v.ops(inst)[1]), false);
+                } else if (target.place) |pl| try r.clobber(st, pl);
+                r.set(inst, .none);
+            },
+            .cmpxchg_weak, .cmpxchg_strong => {
+                const target = r.arg(inst, 0);
+                try r.alive(st, inst, target, "read and written");
+                if (r.ty.hasPointers(inst.ty)) return r.unsupported(inst, "an atomic update of a pointer", .{});
+                // Known to hold the expected constant: it holds the new one afterwards (a weak one may fail, and then holds
+                // the old one: the pair).
+                if (target.place) |pl| {
+                    const have = (try r.peekFlat(st, pl)).con orelse st.facts.get(pl);
+                    const expect = r.arg(inst, 1).con;
+                    const new = r.arg(inst, 2).con;
+                    if (have != null and expect != null and new != null and !target.cast and !r.indexed(pl)) {
+                        if (have.? == expect.?) {
+                            const weak = inst.tag == .cmpxchg_weak;
+                            var now = Val{ .con = if (weak) null else new, .pair = if (weak) .{ @min(new.?, have.?), @max(new.?, have.?) } else null };
+                            if (weak and new.? == have.?) now = .{ .con = new };
+                            try r.writeLeafAs(st, pl, now, true);
+                        }
+                    } else try r.clobber(st, pl);
+                }
                 r.set(inst, .none);
             },
             .tag_name, .error_name => r.set(inst, .none),
@@ -2797,6 +2946,9 @@ pub const Run = struct {
             for (i.no) |p| if (r.entryValued(st, p.at)) try no.append(r.arena, p);
         }
         const pred: ?Pred = if (c.kind == .inst) r.preds.get(c.value) else null;
+        if (pred) |p| if (p.call) |call_id| if (r.never_ok.contains(call_id)) {
+            if (p.present_if_true) take_then = false else take_else = false;
+        };
         const decision = !(r.endsInUnreachable(bodies[0]) or r.endsInUnreachable(bodies[1]));
         // The failing side of a safety check never returns: nothing it does reaches the rest of the function.
         if (take_then and !r.endsInUnreachable(bodies[0])) {
@@ -2971,6 +3123,10 @@ pub const Run = struct {
         };
         try r.exec(r.v.insts(bodies[0]), &failed);
         if (failed.alive) return r.unsupported(inst, "the error path of a try falls through", .{});
+        if (operand_ref.kind == .inst and r.never_ok.contains(operand_ref.value)) {
+            st.alive = false;
+            return;
+        }
         try r.applyMoved(st, subject);
         r.set(inst, eu);
     }
