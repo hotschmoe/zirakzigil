@@ -256,6 +256,15 @@ pub const Val = struct {
             for (parts, pa, pb) |*slot, x, y| slot.* = try x.join(arena, y);
             out.parts = parts;
         };
+        // One side without fields (an empty value, or one the checker cannot take apart) adds to every field.
+        if (out.parts == null) {
+            const shaped, const rest = if (a.parts != null and b.parts == null) .{ a, b } else if (b.parts != null and a.parts == null) .{ b, a } else return out;
+            const parts = try arena.alloc(Val, shaped.parts.?.len);
+            var extra = rest;
+            extra.obj = .empty;
+            for (parts, shaped.parts.?) |*slot, x| slot.* = try x.join(arena, extra.flat());
+            out.parts = parts;
+        }
         return out;
     }
 

@@ -1,15 +1,22 @@
 # Mistakes zv-own found in real projects, and the one it missed (badLoopIteration, zls Server.loop), reduced.
+real.Center.draw clean
 real.Quantizer.addLevelNode clean
 real.Scanner.skipValue clean
+real.Store.append clean
+real.Store.deinit clean
 real.Text.widget clean
 real.badDeinitThenAppend error
 real.badLoopIteration error
 real.badRegisterThenReturn error
+real.badStoreInit error
 real.badScannerCopy error
 real.badValuesAcrossSwapRemove error
 real.badWidgetOfLocal error
 real.okDeinitThenInit clean
+real.okNameTokens clean
 real.okScannerCopyAfter clean
 real.okValuesReloaded clean
+real.lostWidgetChild clean
 real.okWidgetOfParam clean
 real.processMessage clean
+real.savedScannerAdvances clean

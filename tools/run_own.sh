@@ -56,3 +56,7 @@ for dir in tests/own tests/own/std; do
     counted $dir/review2.zvp badPqSift "1 pointers stale only if a container had no room"
     counted $dir/review2.zvp badPqPopMoves "1 pointers stale only if a container had no room"
 done
+for dir in tests/own tests/own/std; do
+    counted $dir/real.zvp lostWidgetChild "[1-9][0-9]* pointers to locals handed to calls"
+done
+counted tests/own/std/real.zvp savedScannerAdvances "[1-9][0-9]* pointers stale only if a container had no room"

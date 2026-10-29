@@ -127,6 +127,13 @@ The caller reads what the result and the writes hold as they are **before** it a
 - Labeled switch loops (`continue :sw`) are interpreted like loops: every case runs from the state at the head, a dispatch is a back edge, the head is the join of everything that reaches it. A loop settles when the state at its head stops growing.
 - A global is a place that outlives the function; the address of a pointer converted to an integer and back is `UNPROVEN`, as before.
 
+- A read-only pointer to one object (`?*const Trail`) borrows: a container that moves its buffer and a callee that ends the slot leave what it points to alone. The mutable single pointers (the `IndexHeader` of a hash map) are owned and end.
+- A struct nothing in the run has written reads as its fields, each one the caller's own memory; a struct stored whole from a value that does not say which field holds what takes from it only what could belong to the field; the join of a struct with a value without fields keeps the fields.
+- A result that is either a new block or memory the callee was lent (the payloads of a union such as `std.json.Scanner.Token`) is a value that may be either: ending it is soft.
+- What a callee writes into a slot it also ended, and what it returns from a block it also ended, is the new block on the paths where it ended it; `invalidate` of a place that is not an element replaces what the slot holds; a hard end of a container's storage ends whichever of the names that stand for the block the slot holds (`Event.exact`), and a summary does not hand that end to its callers as certain.
+- The writes of a function are certain if they happen on every path that goes on after a `try`: the paths that return an error (a `wrap_errunion_err` or an error constant) do not make them uncertain, except for a block the function allocates, which the failing paths do not make.
+- A call ends the same memory through two parameters only if another parameter of the call ended it.
+
 ### What is not followed (printed at the end of every run, never silent)
 
 - Calls to functions outside the packs with no entry in the table are assumed to neither end identities nor keep their arguments. The count is printed.
@@ -136,6 +143,8 @@ The caller reads what the result and the writes hold as they are **before** it a
 - A site that runs again before its previous block was ended stands for several blocks from then on: ending one of them is counted (`summarized`), not reported.
 - A value that may be one of several identities (a join of two pointers) that is freed ends them all softly; the use of a pointer that may lead into freed memory, where the checker cannot tell which, is counted (`maybe_alias`), and so is a pointer that is stale only if a container had no room (`maybe_stale`).
 - Operations on memory the checker cannot name a place for (a pointer a callee handed out, with no place) are not applied and counted (`blind`).
+- A pointer to a local handed to a call that returns a new block or that the summary does not trace (the elements of a block a callee fills, a function pointer) is counted (`lent`); what the result keeps of it is not followed.
+- The footer prints how much was decided: `decided: A of B ends and C of D uses of memory it follows`; an end of an identity that stands for several blocks is the one that is not (`summarized`).
 
 ### Running it on code that is not a test
 
@@ -207,7 +216,7 @@ Correct code, which must stay clean:
 | the correct programs of the second review (`ok*`, `eat*`, `finishArena`, ...) | 29 | 0 | 0 |
 | the reductions of the false positives on zls, ziggy, libvaxis, webzocket and rich_zig (`fp_zls*.zig`, `fp_idioms.zig`, `fp_loops.zig`): 12 classes of the first report, 12 causes of the second | 75 | 0 | 0 |
 | zmoltcp 0.5.4, production code with its generics instantiated (`own/zmoltcp.zvp`, checked with the 0.17.15 checker; the seeded verdicts of `own/seeded.zig` match too) | 986 | 0 | 0 |
-| this repository, `src/own` (the checker itself, 276 functions), exported without and with std | 276 | 8 and 7: false positives where a recursive interpreter hands a state it keeps using to a callee that grows its maps (`Run.block`, `Run.loop`, `Run.loopSwitch`, `Run.switchBr`, `Run.condBr`, `Run.tryOp`, `Run.execute`); not fixed | 0 |
+| this repository, `src/own` (the checker itself, 286 functions), exported without and with std | 286 | 0 and 0; the first version of this work gave 8 and 7 (a recursive interpreter handing a state it keeps using to a callee that grows its maps); the causes are in [reviews/own-2.md](reviews/own-2.md), point 5 | 0 |
 | zmoltcp 0.5.3 as `zig build test` reaches it, tests and laws included (measured before M4, not re-run) | 5297 | 0 | 0 |
 
 During development the same code produced about 40 false positives and 9 unproven functions before the precision decisions above were made; each is recorded there. The review showed what that 0 was worth: the old figure was fitted to zmoltcp, which has no allocator, and to this repository, and 9 of the ordinary `ArrayList` and `HashMap` programs the reviewer wrote were reported. The rate on code that was not fitted is now measured on `tests/own/stdcode.zig` (68 correct functions, 0 reported, though the first run with std bodies reported two of them, `okCache` and `okWordCount`, for a reason that was a bug in the checker, recorded in M4; one more correct program written after the review is reported and pinned, `fpOwnedAssertThenDeinit`) and on the review's 9 (1 reported, and pinned as such). The 0 on zmoltcp is a statement about code without containers that own memory; it says little about the rest. Seeded cases are written by people who know what the checker does; most of the earlier ones were written before the rules they exercise; four were corrected when the checker was right and the case was wrong (a loop that I thought was a gap and was a real stale pointer, a `memcpy` case that was correct, a carried token case, an unreachable `return &x` that Zig itself rejects), and none was weakened to pass.
@@ -228,7 +237,7 @@ Cost: `zv-own` checked the 986 production functions of zmoltcp and its seeded ca
 - Joins are path-insensitive in what they remember of conditions (two branches on one condition are not correlated, except the test of an optional or an error union); a carried linear value that the join merged is unproven, not guessed.
 - What is stored inside a container or behind a map slot is not followed.
 - An allocation site that runs again while its previous block is alive stands for both from then on (the most recent block and a summary of the older ones): an end of the summary is counted, not reported.
-- A call through a function pointer returns a value that depends on nothing (counted). A real bug that flows through one (a stack widget whose `draw` is called through its table, libvaxis `Button`) is not seen.
+- A call through a function pointer returns a value that depends on nothing (counted). A real bug that flows through one (a stack widget whose `draw` is called through its table, libvaxis `Button`) is not seen, and the pointer to a local given to such a call is counted (`lent`).
 
 ### Dead ends
 
@@ -245,6 +254,9 @@ Cost: `zv-own` checked the 986 production functions of zmoltcp and its seeded ca
 - A summary that mints every allocation of its callee at every call: a result that may be any of 32,457 allocations took 5 GB for 693 instructions. Only the allocations that flow out are named, and more than twelve in one result stand for one.
 - Checking what is reachable from a pointer passed to a callee ("reached through a pointer passed to a call"): most reports were false positives (a freed `source` next to a tree that is freed without it). The callee's summary now says what it dereferences, and the caller checks that.
 
+- Reporting every use of a by-value copy of a container after the original may have grown (the saved `Scanner` of lsp-kit, a real bug that depends on the nesting depth): every `append` after a copy would be a finding; kept as `pointers stale only if a container had no room`, counted.
+- A pointer given to a function and returned inside a container the callee fills (libvaxis `Button.draw`): following the elements of a block a callee allocates was tried and removed for the reason above (freeing an element is not freeing the slice); counted (`lent`) instead.
+
 ### Upstream-looking bugs found on the way (not filed anywhere)
 
 - Zig 0.17.0 `std.Io.File.Writer` on Windows: writing to a pipe whose reader has exited (`zv-own --dump | head`) reaches `unreachable` in `writeFilePositionalWindows` and `fileWriteStreamingWindows` (`.PENDING => unreachable`, "wrong File nonblocking flag") instead of returning `error.BrokenPipe`.
@@ -259,3 +271,5 @@ What the bodies show, with the identity model of M2: `append`, `ensureTotalCapac
 The probe pack is 181 KB (project only), 842 KB (project and the std it reaches) or 10.8 MB (all of std). The pinned packs of `tests/own` are exported twice (`tests/own/std/`).
 
 **What is still the table's.** The first reallocation of an empty container, and any growth policy; the hash maps' result aliasing; element ownership inside containers; a `resize` by a length that is not a constant does not free. Each is in the assumptions above or in the corpus as a `gap*`.
+
+**Next, in the order of the functions it would clear (from the 14 false positives left on the five projects, [reviews/own-2.md](reviews/own-2.md)).** (1) *Ownership that depends on a tag*: a `Buffer{ type: enum { static, pooled, dynamic }, data }`, a `Text{ owns_plain: bool }`; the callee's kill is guarded by a condition on a field of a parameter, and the caller knows the constant the struct was built with. It needs the guard in the summary (`param0.f == c`), the constants kept in memory and in the descriptions of results (`slice()` returns `owns_plain = false`), and a branch on a field refining what is known; about 9 of the 14. (2) A `deinit` that gives anything back ends the whole object, however little it releases (`Reader.deinit` leaves `static` and the provider alone); it should end the fields it ends. (3) Unions with one place per variant (the saved scanner in the `state` union of lsp-kit). (4) The elements a callee stores into a block it allocates (the `lent` count), and what a vtable call writes.

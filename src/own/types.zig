@@ -73,6 +73,15 @@ pub const Types = struct {
         return r.kind == .pointer and r.flags.size != .one;
     }
 
+    /// A read-only pointer to one object (not to a buffer), possibly optional: it borrows, and nothing it points to is
+    /// the owner's to move.
+    pub fn isSingle(t: Types, id: schema.TypeId) bool {
+        const at = t.payload(id);
+        if (at == .none) return false;
+        const r = t.rec(at);
+        return r.kind == .pointer and r.flags.size == .one and r.flags.is_const;
+    }
+
     /// The fields of a struct (or the struct inside an optional or error union), when the pack knows them.
     pub fn structFields(t: Types, id: schema.TypeId) ?[]const schema.FieldRec {
         const at = t.payload(id);

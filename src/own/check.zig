@@ -53,6 +53,12 @@ pub const Stats = struct {
     summarized: u32 = 0,
     /// Functions that end or change memory through two pointer parameters of one type, assumed not to overlap.
     alias_params: u32 = 0,
+    /// Ends and uses of memory the checker follows, to set against what it counted and did not decide.
+    ends: u32 = 0,
+    uses: u32 = 0,
+    /// A pointer to a local handed to a call that returns a new block or that the summary does not trace, whose result may
+    /// keep it: not followed.
+    lent: u32 = 0,
 };
 
 /// What of a callee's parameter an effect names: the value passed (`value`: its identities, below `path` for a
@@ -339,7 +345,8 @@ pub const Kind = enum(u8) {
 
 pub const Ident = struct { kind: Kind, a: u32, b: u32 };
 
-pub const Event = struct { loc: schema.LocId, text: []const u8, trail: ?*const diag.Trail, soft: bool = false };
+/// `exact`: the end is of the one block a place holds, whichever of the names that stand for several it carries.
+pub const Event = struct { loc: schema.LocId, text: []const u8, trail: ?*const diag.Trail, soft: bool = false, exact: bool = false };
 
 pub const Pending = struct { loc: schema.LocId, ident: dom.Id, site: u32 };
 
@@ -488,6 +495,8 @@ const Snap = struct {
     ret: []const Leaf,
     ret_place: ?Slot,
     writes: []const SnapWrite,
+    /// The function returns an error here: the result carries nothing, and the caller's `try` does not go on.
+    failed: bool,
 };
 
 const SnapWrite = struct { into: Slot, descs: []const Desc };
@@ -541,6 +550,8 @@ pub const Run = struct {
     /// Stores through a pointer into storage a parameter holds (`list.items[i] = x`): the elements of a container
     /// are not followed in memory, but the summary says they were written.
     elem_stores: std.AutoArrayHashMapUnmanaged(PlaceId, Val) = .empty,
+    /// Contents of single-item pointers: objects, not buffers, so a container that moves its buffer leaves them be.
+    pointees: std.AutoHashMapUnmanaged(dom.Id, void) = .empty,
     /// For the summary: bit i is set when a linear value that came in as parameter i went into memory the function
     /// does not own.
     token_stored: u64 = 0,
@@ -769,7 +780,7 @@ pub const Run = struct {
     /// Ends `id` on this path: every value that holds it holds its tombstone from now on.
     pub fn kill(r: *Run, st: *State, id: dom.Id, event: Event) Allocator.Error!void {
         if (r.identRec(id).kind == .tomb) return;
-        const soft = event.soft or st.multi.has(id);
+        const soft = event.soft or (st.multi.has(id) and !event.exact);
         var e = event;
         e.soft = soft;
         const t = try r.tomb(id, soft);
@@ -961,12 +972,22 @@ pub const Run = struct {
         return ids;
     }
 
+    /// What the caller put at a place that nothing in this run has written: the storage behind it, as one value.
+    fn isPlaceholder(r: *Run, v: Val, pl: PlaceId) Allocator.Error!bool {
+        return v.ids.ids.len == 1 and v.parts == null and v.toks.isEmpty() and v.ids.ids[0] == try r.ident(.init, pl, 1);
+    }
+
+    fn untouched(r: *Run, st: *State, pl: PlaceId) Allocator.Error!bool {
+        const v = st.mem.get(pl) orelse return true;
+        return r.isPlaceholder(v, pl);
+    }
+
     pub fn readVal(r: *Run, st: *State, pl: PlaceId, ty: schema.TypeId) Allocator.Error!Val {
         return r.readDepth(st, pl, ty, 0);
     }
 
     fn readDepth(r: *Run, st: *State, pl: PlaceId, ty: schema.TypeId, depth: u32) Allocator.Error!Val {
-        if (depth < 6 and !st.mem.contains(pl)) if (r.ty.structFields(ty)) |fields| {
+        if (depth < 6 and try r.untouched(st, pl)) if (r.ty.structFields(ty)) |fields| {
             const parts = try r.arena.alloc(Val, fields.len);
             for (parts, fields, 0..) |*part, f, k| part.* = try r.readDepth(st, try r.places.child(r.arena, pl, @intCast(k)), f.ty, depth + 1);
             var out = try Val.aggregate(r.arena, parts);
@@ -1018,6 +1039,7 @@ pub const Run = struct {
             try path.append(r.arena, rec.step);
             at = rec.parent;
             if (st.mem.get(at)) |whole| {
+                if (try r.isPlaceholder(whole, at)) continue;
                 var v = whole;
                 var k = path.items.len;
                 while (k > 0) {
@@ -1041,7 +1063,9 @@ pub const Run = struct {
         if (found) return out;
         // What the caller put there: the storage behind a parameter that nothing in this run has touched yet.
         if (lazy and r.paramOf(pl) != null and (ty == .none or r.ty.hasPointers(ty))) {
-            const v: Val = .{ .ids = try Set.single(r.arena, try r.ident(.init, pl, 1)) };
+            const id = try r.ident(.init, pl, 1);
+            if (ty != .none and r.ty.isSingle(ty)) try r.pointees.put(r.arena, id, {});
+            const v: Val = .{ .ids = try Set.single(r.arena, id) };
             try st.mem.put(r.arena, pl, v);
             return v;
         }
@@ -1062,13 +1086,32 @@ pub const Run = struct {
             if (r.strongAt(pl)) _ = st.mem.swapRemove(pl);
             for (fields, 0..) |f, k| {
                 // A number holds nothing, whatever the value it was cut out of held.
-                const part: Val = if (r.ty.hasTokens(f.ty) or r.ty.hasPointers(f.ty)) val.field(k) else .none;
-                try r.writeDepth(st, try r.places.child(r.arena, pl, @intCast(k)), part, f.ty, depth + 1);
+                var part: Val = if (r.ty.hasTokens(f.ty) or r.ty.hasPointers(f.ty)) val.field(k) else .none;
+                const at = try r.places.child(r.arena, pl, @intCast(k));
+                if (val.parts == null) part.ids = try r.notSiblings(part.ids, pl, at);
+                try r.writeDepth(st, at, part, f.ty, depth + 1);
             }
             return r.writeObj(st, pl, val.obj);
         };
         try r.writeLeaf(st, pl, val);
         try r.writeObj(st, pl, val.obj);
+    }
+
+    /// A struct stored whole from a value that does not say which field holds what: memory known to live in another
+    /// field of the same struct is not what this field holds.
+    fn notSiblings(r: *Run, ids: Set, whole: PlaceId, field: PlaceId) Allocator.Error!Set {
+        var out: Set = .empty;
+        for (ids.ids) |id| {
+            const rec = r.identRec(id);
+            const home: ?PlaceId = switch (rec.kind) {
+                .init => rec.a,
+                .heap => r.holder_of.get(id),
+                else => null,
+            };
+            if (home) |h| if (r.places.contains(whole, h) and !r.places.contains(field, h)) continue;
+            out = try out.with(r.arena, id);
+        }
+        return out;
     }
 
     pub fn writeObj(r: *Run, st: *State, pl: PlaceId, obj: Set) Allocator.Error!void {
@@ -1175,7 +1218,9 @@ pub const Run = struct {
         var first: ?dom.Id = null;
         for (val.ids.ids) |o| {
             const rec = r.identRec(o);
+            if (rec.kind == .heap or rec.kind == .init) try r.tally("uses", inst);
             if (rec.kind != .tomb) continue;
+            try r.tally("uses", inst);
             if (rec.b == 1) {
                 soft = true;
             } else if (first == null) first = o;
@@ -1476,7 +1521,8 @@ pub const Run = struct {
 
     /// Ends `id`; one that stands for several allocations stays, and the end is counted.
     pub fn end(r: *Run, st: *State, inst: *const Inst, id: dom.Id, event: Event) Allocator.Error!void {
-        if (st.multi.has(id)) try r.tally("summarized", inst);
+        try r.tally("ends", inst);
+        if (st.multi.has(id) and !event.exact) try r.tally("summarized", inst);
         try r.kill(st, id, event);
     }
 
@@ -1522,6 +1568,7 @@ pub const Run = struct {
         var kills: std.ArrayList(Slot) = .empty;
         var writes: std.ArrayList(Write) = .empty;
         var counts: std.ArrayList(usize) = .empty;
+        var goes_counts: std.ArrayList(usize) = .empty;
         var leaves: std.ArrayList(Leaf) = .empty;
         var frees: u64 = ~@as(u64, 0);
         var moves: u64 = ~@as(u64, 0);
@@ -1554,16 +1601,27 @@ pub const Run = struct {
                 for (writes.items, 0..) |x, i| if (x.into.eql(w.into)) {
                     at = i;
                 };
+                const goes: usize = @intFromBool(!s.failed);
                 if (at) |i| {
                     writes.items[i].descs = try mergeDescs(arena, writes.items[i].descs, w.descs);
                     counts.items[i] += 1;
+                    goes_counts.items[i] += goes;
                 } else {
                     try writes.append(arena, .{ .into = try dupeSlot(arena, w.into), .descs = try dupeDescs(arena, w.descs), .must = false });
                     try counts.append(arena, 1);
+                    try goes_counts.append(arena, goes);
                 }
             }
         }
-        for (writes.items, counts.items) |*w, c| w.must = c == snaps.len;
+        // What a function does on every path that goes on (the failing ones hand back an error, and the caller's `try`
+        // does not follow them) is what it does, except for the blocks it makes: the failing paths leave the old one.
+        var going: usize = 0;
+        for (snaps) |s| going += @intFromBool(!s.failed);
+        for (writes.items, counts.items, goes_counts.items) |*w, c, g| {
+            var makes = false;
+            for (w.descs) |d| makes = makes or d.src == .fresh;
+            w.must = if (makes or going == 0) c == snaps.len else g == going;
+        }
         out.kills = kills.items;
         out.writes = writes.items;
         out.ret = leaves.items;
@@ -1750,7 +1808,8 @@ pub const Run = struct {
         var kills: std.ArrayList(Slot) = .empty;
         var it = st.dead.iterator();
         while (it.next()) |e| {
-            if (e.value_ptr.soft) continue;
+            // The caller's names for blocks that stand for several are not the callee's to end.
+            if (e.value_ptr.soft or (e.value_ptr.exact and st.multi.has(e.key_ptr.*))) continue;
             const id = e.key_ptr.*;
             const rec = r.identRec(id);
             // The parameter's own value is a free when it is one on every path (below).
@@ -1797,7 +1856,7 @@ pub const Run = struct {
             const into = (try r.slotOfPlace(key, .content)) orelse continue;
             try writes.append(r.arena, .{ .into = into, .descs = try r.descsOf(v) });
         }
-        try r.snaps.put(r.arena, inst.id, .{ .kills = kills.items, .frees = frees, .moves = moves, .ret = leaves.items, .ret_place = ret_place, .writes = writes.items });
+        try r.snaps.put(r.arena, inst.id, .{ .kills = kills.items, .frees = frees, .moves = moves, .ret = leaves.items, .ret_place = ret_place, .writes = writes.items, .failed = r.returnsError(inst) });
     }
 
     fn ret(r: *Run, inst: *const Inst, st: *State, val: Val) Error!void {
@@ -1822,6 +1881,17 @@ pub const Run = struct {
             try r.report(st, .leak, inst.loc, try r.noteList(&.{made}), "linear value `{s}` is not consumed on this path", .{r.tokenName(t)});
         }
         st.alive = false;
+    }
+
+    /// Whether this `ret` hands back an error (`return error.X`, the failing branch of a `try`).
+    fn returnsError(r: *Run, inst: *const Inst) bool {
+        const ops = r.v.ops(inst);
+        if (ops.len == 0) return false;
+        return switch (ops[0].kind) {
+            .inst => if (r.by_id[ops[0].value]) |def| def.tag == .wrap_errunion_err else false,
+            .constant => r.v.constant(ops[0]).kind == .@"error",
+            .none => false,
+        };
     }
 
     fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
@@ -1852,7 +1922,9 @@ pub const Run = struct {
     }
 
     fn step(r: *Run, inst: *const Inst, st: *State) Error!void {
+        const outer = r.cur;
         r.cur = st;
+        defer r.cur = outer;
         r.stats.insts += 1;
         if (inst.loc != .none) r.cur_loc = inst.loc;
         if (inst.ty == .none) return r.unsupported(inst, "instruction {t} is not decoded by the exporter", .{inst.tag});
@@ -2235,7 +2307,7 @@ pub const Run = struct {
         const decision = !(r.endsInUnreachable(bodies[0]) or r.endsInUnreachable(bodies[1]));
         // The failing side of a safety check never returns: nothing it does reaches the rest of the function.
         if (take_then and !r.endsInUnreachable(bodies[0])) {
-            var s = if (take_else) try st.clone(r.arena) else st.*;
+            var s = try st.clone(r.arena);
             if (decision) s.trail = try r.push(st.trail, inst.loc, .then);
             if (pred) |p| if (p.present_if_true) try r.present(&s, p) else try r.absent(&s, p);
             try r.exec(r.v.insts(bodies[0]), &s);

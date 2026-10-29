@@ -150,13 +150,21 @@ pub fn main(init: std.process.Init) !void {
         total.unmodelled += row.result.stats.unmodelled;
         total.blind += row.result.stats.blind;
         total.dynamic_len += row.result.stats.dynamic_len;
+        total.lent += row.result.stats.lent;
+        total.ends += row.result.stats.ends;
+        total.uses += row.result.stats.uses;
     }
     if (unread != 0) try out.print("zv-own: {d} source files were not found: their ownership manifests were not read\n", .{unread});
     try out.print("zv-own: assumed, not checked: {d} calls to functions outside the packs or too odd to read, {d} linear values handed to memory it does not follow\n", .{ total.unknown_calls, total.transfers });
-    if (total.unmodelled + total.blind + total.dynamic_len != 0)
-        try out.print("zv-own: also assumed: {d} container methods with no model (taken to invalidate), {d} operations on memory it cannot name, {d} resizes by a length it cannot show to be non-zero\n", .{ total.unmodelled, total.blind, total.dynamic_len });
+    if (total.unmodelled + total.blind + total.dynamic_len + total.lent != 0)
+        try out.print("zv-own: also assumed: {d} container methods with no model (taken to invalidate), {d} operations on memory it cannot name, {d} resizes by a length it cannot show to be non-zero, {d} pointers to locals handed to calls that return a new block or that the summary does not trace (what the result keeps of them is not followed)\n", .{ total.unmodelled, total.blind, total.dynamic_len, total.lent });
     if (total.maybe_alias + total.maybe_stale + total.summarized + total.alias_params != 0)
         try out.print("zv-own: undecided, counted and not reported: {d} uses of a pointer that may lead into freed memory, {d} pointers stale only if a container had no room, {d} ends of a site that stands for several allocations, {d} functions that assume two pointer parameters of one type do not overlap\n", .{ total.maybe_alias, total.maybe_stale, total.summarized, total.alias_params });
+    if (total.ends + total.uses != 0) {
+        const open_ends = @min(total.summarized, total.ends);
+        const open_uses = @min(total.maybe_alias + total.maybe_stale, total.uses);
+        try out.print("zv-own: decided: {d} of {d} ends and {d} of {d} uses of memory it follows\n", .{ total.ends - open_ends, total.ends, total.uses - open_uses, total.uses });
+    }
     try out.flush();
     if (!ok) std.process.exit(1);
 }

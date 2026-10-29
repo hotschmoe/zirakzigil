@@ -223,6 +223,7 @@ pub fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
         .callee = r.callName(inst),
         .pre_ended = effect == .ends or derived_ends,
     });
+    if (summary) |s| if (r.ty.hasPointers(inst.ty)) try countLent(r, inst, s, args);
     if (container_call and model.seeds) res.room = room.seed;
     // A handle (a value with identities but no pointers) names what a pointer the call hands out points to.
     if (r.ty.hasPointers(inst.ty)) for (args, arg_tys) |a, aty| {
@@ -234,6 +235,35 @@ pub fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
         try containerResult(r, st, inst, &res, model, args, arg_tys);
     }
     return finish(r, inst, res);
+}
+
+/// A pointer to a local handed to a call that returns something with pointers: when the summary of the callee says
+/// nothing of where the argument went, or says the result holds a new allocation (whose elements may keep it), what the
+/// result keeps of the local is not followed.
+fn countLent(r: *Run, inst: *const Inst, s: Summary, args: []const Val) Allocator.Error!void {
+    var new_block = false;
+    for (s.ret) |l| for (l.descs) |d| {
+        new_block = new_block or d.src == .fresh;
+    };
+    for (args, 0..) |a, i| {
+        if (!holdsLocal(r, a)) continue;
+        var traced = false;
+        for (s.ret) |l| for (l.descs) |d| switch (d.src) {
+            .from => |slot| traced = traced or slot.param == i,
+            else => {},
+        };
+        for (s.writes) |w| for (w.descs) |d| switch (d.src) {
+            .from => |slot| traced = traced or slot.param == i,
+            else => {},
+        };
+        if (!traced or new_block) return r.tally("lent", inst);
+    }
+}
+
+fn holdsLocal(r: *Run, v: Val) bool {
+    for (v.ids.ids) |id| if (r.identRec(id).kind == .local) return true;
+    if (v.parts) |parts| for (parts) |part| if (holdsLocal(r, part)) return true;
+    return false;
 }
 
 fn finish(r: *Run, inst: *const Inst, res: Val) Error!void {
@@ -564,7 +594,7 @@ fn invalidate(r: *Run, st: *State, inst: *const Inst, c: Container, what: []cons
     var leaves: std.ArrayList(struct { PlaceId, schema.TypeId }) = .empty;
     try storageLeaves(r, &leaves, pl, c.ty, 0);
     const text = try std.fmt.allocPrint(r.arena, "{s} invalidates pointers into `{s}` here", .{ what, r.placeName(pl) });
-    const event: Event = .{ .loc = inst.loc, .text = text, .trail = st.trail, .soft = !hard or r.places.hasElem(pl) };
+    const event: Event = .{ .loc = inst.loc, .text = text, .trail = st.trail, .soft = !hard or r.places.hasElem(pl), .exact = hard and !r.places.hasElem(pl) };
     // Pointers to elements kept inline in the container are stale too.
     var view: usize = 0;
     while (view < r.idents.items.len) : (view += 1) {
@@ -579,6 +609,7 @@ fn invalidate(r: *Run, st: *State, inst: *const Inst, c: Container, what: []cons
         const had = holdsStorage(r, v);
         for (v.ids.ids) |id| switch (r.identRec(id).kind) {
             .heap, .init => {
+                if (r.pointees.contains(id)) continue;
                 try r.end(st, inst, id, event);
                 ended = try ended.with(r.arena, id);
             },
@@ -594,7 +625,8 @@ fn invalidate(r: *Run, st: *State, inst: *const Inst, c: Container, what: []cons
         for (v.ids.ids) |id| if (r.identRec(id).kind == .local) {
             next.ids = try next.ids.with(r.arena, id);
         };
-        try r.writeLeafAs(st, leaf[0], next, r.strongAt(leaf[0]));
+        // The old block is gone on every path (not only one of several alike): what the slot held is replaced.
+        try r.writeLeafAs(st, leaf[0], next, r.strongAt(leaf[0]) or !event.soft);
     }
     return ended;
 }
@@ -610,7 +642,7 @@ fn holdsStorage(r: *Run, v: Val) bool {
 fn isInsertion(callee: []const u8) bool {
     const dot = std.mem.lastIndexOfScalar(u8, callee, '.') orelse 0;
     const method = callee[if (dot == 0) 0 else dot + 1 ..];
-    const stores = [_][]const u8{ "append", "put", "insert", "add", "push", "enqueue", "getOrPut", "ensure", "resize", "reserve", "expand" };
+    const stores = [_][]const u8{ "append", "put", "fetchPut", "insert", "add", "push", "prepend", "enqueue", "getOrPut", "ensure", "resize", "reserve", "expand", "set", "replace" };
     for (stores) |s| if (std.mem.startsWith(u8, method, s)) return true;
     return false;
 }
@@ -661,6 +693,7 @@ fn storeArgs(r: *Run, st: *State, inst: *const Inst, args: []const Val) Error!vo
     // `getOrPut` hands back the slot for the caller to fill in, which is where a key is replaced by an owned copy.
     if (std.mem.indexOf(u8, callee, "getOrPut") != null) return;
     if (std.mem.indexOf(u8, callee, "Slice") != null or std.mem.indexOf(u8, callee, "NTimes") != null or std.mem.indexOf(u8, callee, "Many") != null) return;
+    if (!isInsertion(callee)) return;
     const self_val = args[0];
     const into_local = r.isLocalPtr(self_val);
     for (args[1..]) |a| try r.escapesInto(st, inst, a, into_local, "stored into a container that outlives it", self_val.place);
@@ -735,7 +768,10 @@ fn unknownResult(
     }
     if (container_call and (model.ptr != .none or model.adopts or model.seeds)) return containerResult(r, st, inst, res, model, args, tys);
     if (effect != .none and effect != .container and effect != .reads) return;
-    if (r.v.attrStr(inst, .callee) == null) return;
+    if (r.v.attrStr(inst, .callee) == null) {
+        for (args) |a| if (r.isLocalPtr(a)) return r.tally("lent", inst);
+        return;
+    }
     // A method the model knows hands out nothing of the container (`get` copies a value).
     if (container_call and model.modelled) return;
     _ = known;
@@ -1028,6 +1064,15 @@ fn resolveDescs(r: *Run, st: *State, inst: *const Inst, ctx: FreshCtx, descs: []
         };
         if (d.obj and d.src == .from) out.obj = try out.obj.merge(r.arena, set) else out.ids = try out.ids.merge(r.arena, set);
     }
+    // Either a new block or memory the callee was lent, which the checker does not tell apart (the payloads of a union).
+    var fresh = false;
+    var lent = false;
+    for (descs) |d| switch (d.src) {
+        .fresh => fresh = true,
+        .from => lent = true,
+        .gone => {},
+    };
+    out.maybe = out.maybe or (fresh and lent);
     return out;
 }
 
@@ -1071,6 +1116,8 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
             continue;
         }
         const where = if (got.place) |pl| r.placeName(pl) else "its argument";
+        // Another parameter of the call ended it, not another part of this one.
+        const earlier = ended;
         switch (k.kind) {
             .object => {
                 const many = got.flat or (if (got.place) |pl| r.places.hasElem(pl) else false);
@@ -1078,7 +1125,7 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
                 if (got.place) |pl| try r.objectAlive(st, inst, pl);
                 for (got.obj.ids) |o| {
                     const rec = r.identRec(o);
-                    if (rec.kind == .tomb and ended.has(rec.a) and !opts.pre_ended and !got.flat) try twice(r, st, inst, opts.callee);
+                    if (rec.kind == .tomb and earlier.has(rec.a) and !opts.pre_ended and !got.flat) try twice(r, st, inst, opts.callee);
                     if (rec.kind != .object) continue;
                     ended = try ended.with(r.arena, o);
                     try r.end(st, inst, o, event);
@@ -1091,12 +1138,12 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
                 if (got.place) |pl| try r.objectAlive(st, inst, pl);
                 const many = got.flat or (if (got.place) |pl| r.places.hasElem(pl) else false);
                 const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "`{s}` invalidates pointers into `{s}` here", .{ opts.callee, where }), .trail = st.trail, .soft = opts.soft or many };
-                for (got.ids.ids) |id| switch (r.identRec(id).kind) {
+                for (got.ids.ids) |id| if (!r.pointees.contains(id)) switch (r.identRec(id).kind) {
                     .object => {
                         try r.end(st, inst, id, event);
                         try r.endRegion(st, inst, try Set.single(r.arena, id), event);
                     },
-                    .tomb => if (ended.has(r.identRec(id).a) and !opts.pre_ended and !got.flat) try twice(r, st, inst, opts.callee),
+                    .tomb => if (earlier.has(r.identRec(id).a) and !opts.pre_ended and !got.flat) try twice(r, st, inst, opts.callee),
                     .heap, .init => {
                         ended = try ended.with(r.arena, id);
                         if (k.param == 0 and !got.flat) reallocated = try reallocated.with(r.arena, id);
@@ -1113,6 +1160,11 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
         try endIds(r, st, inst, a, r.callName(inst), null, true);
     }
     try readsEnded(r, st, inst, args, tys, reallocated, opts.callee);
+    // What the callee gives back from a block it also ended is, on the paths where it ended it, the new block.
+    for (leaves) |*v| {
+        const live = try v.ids.minus(r.arena, ended);
+        if (!live.isEmpty()) v.ids = live;
+    }
 
     for (s.writes, written) |w, v| {
         const got = try resolve(r, st, w.into, args, tys, false);
@@ -1131,6 +1183,10 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
         }
         var stored = v;
         stored.obj = .empty;
+        // The callee ended some of what it also leaves in the slot only on the paths where it left it; the slot read
+        // afterwards holds the new memory, the stale pointers held elsewhere keep the tombstone.
+        const live = try stored.ids.minus(r.arena, ended);
+        if (!live.isEmpty()) stored.ids = live;
         const strong = w.must and r.strongAt(pl);
         if (!strong and !killed.isEmpty()) {
             // What the call ended is not what the place holds afterwards on the path where it wrote.
@@ -1161,6 +1217,7 @@ fn place(r: *Run, base: Val, ty: schema.TypeId, path: []const u32, v: Val, depth
         var out = base;
         out.ids = try base.ids.merge(r.arena, v.ids);
         out.obj = try base.obj.merge(r.arena, v.obj);
+        out.maybe = base.maybe or v.maybe;
         return out;
     }
     if (path[0] == dom.obj_step) {
@@ -1174,6 +1231,7 @@ fn place(r: *Run, base: Val, ty: schema.TypeId, path: []const u32, v: Val, depth
         var out = base;
         out.ids = try base.ids.merge(r.arena, v.ids);
         out.obj = try base.obj.merge(r.arena, v.obj);
+        out.maybe = base.maybe or v.maybe;
         return out;
     }
     const parts = try r.arena.alloc(Val, fields.?.len);
