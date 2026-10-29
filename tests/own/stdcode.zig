@@ -565,6 +565,75 @@ pub fn okClearAndRefill(gpa: Allocator) !u8 {
     return list.items[0];
 }
 
+pub const Gadget = struct {
+    list: std.ArrayList(u8) = .empty,
+
+    pub fn first(self: *Gadget) *u8 {
+        return &self.list.items[0];
+    }
+
+    pub fn push(self: *Gadget, gpa: Allocator, c: u8) !void {
+        try self.list.append(gpa, c);
+    }
+};
+
+fn pushByte(list: *std.ArrayList(u8), gpa: Allocator, c: u8) !void {
+    try list.append(gpa, c);
+}
+
+pub fn okCopyBetween(gpa: Allocator) !usize {
+    var a: std.ArrayList(u8) = .empty;
+    defer a.deinit(gpa);
+    var b: std.ArrayList(u8) = .empty;
+    defer b.deinit(gpa);
+    try a.appendSlice(gpa, "abc");
+    for (a.items) |item| try b.append(gpa, item);
+    return b.items.len;
+}
+
+pub fn okIndexLoopAppend(gpa: Allocator) !usize {
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(gpa);
+    try list.appendSlice(gpa, "abc");
+    var i: usize = 0;
+    while (i < list.items.len and i < 8) {
+        const p = &list.items[i];
+        p.* += 1;
+        if (p.* > 'b') try list.append(gpa, 1);
+        i += 1;
+    }
+    return list.items.len;
+}
+
+pub fn okMapPtrAcrossOtherRemove(gpa: Allocator) !u32 {
+    var map: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+    defer map.deinit(gpa);
+    try map.put(gpa, 1, 1);
+    try map.put(gpa, 2, 2);
+    const p = map.getPtr(1).?;
+    _ = map.remove(2);
+    return p.*;
+}
+
+pub fn okGadgetFirst(gpa: Allocator) !u8 {
+    var h: Gadget = .{};
+    defer h.list.deinit(gpa);
+    try h.push(gpa, 1);
+    try h.push(gpa, 2);
+    const p = h.first();
+    return p.*;
+}
+
+pub fn okInitCapacityHeld(gpa: Allocator, n: usize) !u8 {
+    var list: std.ArrayList(u8) = try .initCapacity(gpa, n + 1);
+    defer list.deinit(gpa);
+    list.appendAssumeCapacity(7);
+    const p = &list.items[0];
+    var i: usize = 0;
+    while (i < n) : (i += 1) list.appendAssumeCapacity(1);
+    return p.*;
+}
+
 // Mistakes.
 
 pub fn badSliceAcrossAppend(gpa: Allocator) !u8 {
@@ -780,4 +849,58 @@ pub fn badNestedPtr(gpa: Allocator) !u32 {
     while (i < 100) : (i += 1) try rows.append(gpa, .empty);
     try first.append(gpa, 1);
     return first.items[0];
+}
+
+pub fn badGadgetFirstAcrossGrow(gpa: Allocator) !u8 {
+    var h: Gadget = .{};
+    defer h.list.deinit(gpa);
+    try h.push(gpa, 1);
+    const p = h.first();
+    try h.list.ensureTotalCapacity(gpa, 4096);
+    return p.*;
+}
+
+pub fn badSliceAcrossHelperPush(gpa: Allocator) !u8 {
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(gpa);
+    try list.append(gpa, 1);
+    const s = list.items;
+    try pushByte(&list, gpa, 2);
+    return s[0];
+}
+
+pub fn badMapPtrAcrossLoopPut(gpa: Allocator) !u32 {
+    var map: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+    defer map.deinit(gpa);
+    try map.put(gpa, 1, 1);
+    const p = map.getPtr(1).?;
+    var i: u32 = 2;
+    while (i < 1000) : (i += 1) try map.put(gpa, i, i);
+    return p.*;
+}
+
+pub fn badAddOneAcrossInsert(gpa: Allocator) !u8 {
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(gpa);
+    const p = try list.addOne(gpa);
+    p.* = 1;
+    try list.insert(gpa, 0, 2);
+    return p.*;
+}
+
+pub fn badLoopCaptureAppend(gpa: Allocator) !void {
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(gpa);
+    try list.appendSlice(gpa, "abc");
+    for (list.items) |*p| {
+        try list.append(gpa, p.*);
+        p.* += 1;
+    }
+}
+
+pub fn badDoubleDeinit(gpa: Allocator) !void {
+    var list: std.ArrayList(u8) = .empty;
+    try list.append(gpa, 1);
+    list.deinit(gpa);
+    list.deinit(gpa);
 }

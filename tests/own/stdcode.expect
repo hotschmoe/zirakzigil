@@ -2,6 +2,8 @@
 # gapConditionalFree is a mistake the checker does not see: freeIfSome frees on one path only, so no caller may rely on it.
 # fpOwnedAssertThenDeinit is correct and reported: toOwnedSliceAssert moves the buffer out without freeing it (a known false positive).
 # gapRemapIgnored is a mistake the checker does not see: the result of remap says whether the memory moved, and nothing looks.
+stdcode.Gadget.first clean
+stdcode.Gadget.push clean
 stdcode.Interner.deinit clean
 stdcode.Interner.intern clean
 stdcode.Interner.name clean
@@ -9,20 +11,26 @@ stdcode.Slab.acquire clean
 stdcode.Slab.deinit clean
 stdcode.Slab.get clean
 stdcode.Slab.release clean
+stdcode.badAddOneAcrossInsert error
 stdcode.badAdoptTwice error
 stdcode.badAtomicAfterFree error
 stdcode.badCmpxchgAfterFree error
+stdcode.badDoubleDeinit error
+stdcode.badGadgetFirstAcrossGrow error
 stdcode.badGetOrPutPtrAcrossPut error
 stdcode.badGrowWrapperUse error
 stdcode.badInternerPointerAcrossIntern error
 stdcode.badIntrusiveAfterDestroy error
 stdcode.badKeysAcrossPut error
+stdcode.badLoopCaptureAppend error
+stdcode.badMapPtrAcrossLoopPut error
 stdcode.badMutualFree error
 stdcode.badMutualHeld error
 stdcode.badNestedPtr error
 stdcode.badRemapUse error
 stdcode.badSlabPointerAcrossAcquire error
 stdcode.badSliceAcrossAppend error
+stdcode.badSliceAcrossHelperPush error
 stdcode.badToOwnedKeepsPointer error
 stdcode.badTreeUseAfterFree error
 stdcode.badUseAfterDeinitMap error
@@ -49,17 +57,22 @@ stdcode.okBumpValues clean
 stdcode.okCache clean
 stdcode.okClearAndRefill clean
 stdcode.okCloneBoth clean
+stdcode.okCopyBetween clean
 stdcode.okDedupe clean
 stdcode.okFetchRemove clean
+stdcode.okGadgetFirst clean
 stdcode.okGetOrPutDupeKey clean
 stdcode.okGrowWrapper clean
 stdcode.okHandoff clean
 stdcode.okHeldWithinReserved clean
 stdcode.okIndexInsteadOfPointer clean
+stdcode.okIndexLoopAppend clean
+stdcode.okInitCapacityHeld clean
 stdcode.okInsertFront clean
 stdcode.okInterner clean
 stdcode.okIntrusive clean
 stdcode.okJoin clean
+stdcode.okMapPtrAcrossOtherRemove clean
 stdcode.okMultiSet clean
 stdcode.okMutual clean
 stdcode.okNested clean
@@ -83,3 +96,4 @@ stdcode.okTokenize clean
 stdcode.okTreeRoundTrip clean
 stdcode.okValueCopyAcrossPut clean
 stdcode.okWordCount clean
+stdcode.pushByte clean

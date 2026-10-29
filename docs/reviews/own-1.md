@@ -39,9 +39,9 @@ A related correct program written after the review, `fpOwnedAssertThenDeinit` (a
 | --- | --- | --- |
 | Review probes: silent misses | 12 | 0 (11 findings, 1 counted) |
 | Review probes: false positives | 9 | 1 (pinned) |
-| Seeded mistakes in the corpus | 98: 90 found (91.8 percent), 3 unproven, 5 missed | 141: 129 found (91.5 percent), 4 unproven, 8 missed |
-| Not silently accepted | 93 of 98 | 134 of 141 |
-| Ordinary allocator-heavy code written without the checker | not measured | 60 correct functions, 0 reported (4 were reported by the first versions and fixed: `okCache` and `okWordCount` with std bodies, `okSwapContainers` and `okArenaContainers`); 1 reported later and pinned |
+| Seeded mistakes in the corpus | 98: 90 found (91.8 percent), 3 unproven, 5 missed | 147: 135 found (91.8 percent), 4 unproven, 8 missed |
+| Not silently accepted | 93 of 98 | 140 of 147 |
+| Ordinary allocator-heavy code written without the checker | not measured | 68 correct functions, 0 reported (4 were reported by the first versions and fixed: `okCache` and `okWordCount` with std bodies, `okSwapContainers` and `okArenaContainers`); 1 reported later and pinned |
 | This repository, about 550 function checks | 0 reported | about a dozen reported by the first version of the new rules, 0 after the fixes |
 | zmoltcp production pack (986 functions, no allocator) | 0 reported | 0 reported; `own-seeded` verdicts unchanged |
 | Pack for the probe file | 181 KB | 842 KB with the std functions it reaches (10.8 MB with all of std) |

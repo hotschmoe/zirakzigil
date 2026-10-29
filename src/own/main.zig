@@ -10,6 +10,7 @@
 //!     --max-unproven N           fail when more than N functions are unproven
 //!     --max-trusted N            fail when more than N functions are declared `.trusted` in an `ownership` manifest
 //!     --summary                  one line per function, clean ones too
+//!     --effects                  as --summary, and what each function was found to do (kills, frees, returns, stores) and assumed
 //!     --dump                     the AIR of the selected functions as text, and stop
 //! Exit status: 0 when no function has a finding (or matches --expect), 1 otherwise, 2 for bad usage.
 
@@ -350,7 +351,7 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only TEXT] [--files PREFIX] [--expect FILE] [--pins FILE] [--max-unproven N] [--max-trusted N] [--summary] [--dump] PACK|INDEX_DIR...\n", .{});
+    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only TEXT] [--files PREFIX] [--expect FILE] [--pins FILE] [--max-unproven N] [--max-trusted N] [--summary] [--effects] [--dump] PACK|INDEX_DIR...\n", .{});
     std.process.exit(2);
 }
 
