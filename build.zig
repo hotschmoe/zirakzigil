@@ -313,4 +313,13 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "zv_air", .module = air }},
     }) });
     b.step("zv-air", "Install the pack reader tool").dependOn(&b.addInstallArtifact(air_cli, .{}).step);
+
+    // The verifier: reads AIR packs through `zv_air`, proves with Z3 over a pipe. Never links compiler code.
+    const zvc = b.addExecutable(.{ .name = "zvc", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/zvc/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zv_air", .module = air }},
+    }) });
+    b.step("zvc", "Install the verifier").dependOn(&b.addInstallArtifact(zvc, .{}).step);
 }

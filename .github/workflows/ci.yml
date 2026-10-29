@@ -31,13 +31,10 @@ jobs:
       - name: Negative suite
         run: ./tools/run_negative.sh
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-      - name: Static verifier (zvc)
-        run: |
-          pip install z3-solver
-          # zvc exits 1 on purpose: the example has two rejected functions.
-          python tools/zvc.py examples/search.zig | tee zvc.out || true
-          grep -q "4 verified, 2 rejected" zvc.out
-
+      - name: Z3 (pinned release, checked against its digest)
+        run: echo "ZV_Z3=$(sh tools/install_z3.sh "$RUNNER_TEMP/z3")" >> "$GITHUB_ENV"
+      - name: Verifier (zvc) against its pinned AIR packs and verdicts
+        run: sh tools/run_zvc.sh
 
   hook:
     runs-on: ubuntu-latest

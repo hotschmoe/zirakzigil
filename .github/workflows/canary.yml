@@ -44,6 +44,11 @@ jobs:
         run: |
           set -o pipefail
           sh tools/check_corpus.sh compiler/.work/zig-air/zig-out/bin/zig-zv-air 2>&1 | tee -a canary.log
+      - name: Pinned zvc packs equal a fresh export
+        run: |
+          set -o pipefail
+          ZIG_ZV=$PWD/compiler/.work/zig-air/zig-out/bin/zig-zv-air sh tools/zvc_export.sh fresh $(awk '{ print $2 }' tests/zvc/SOURCES | sed 's/^\*//') 2>&1 | tee -a canary.log
+          for pack in fresh/*.zvp; do cmp "$pack" "tests/zvc/$(basename "$pack")" 2>&1 | tee -a canary.log; done
       - name: Cache scenarios
         id: cache
         run: |

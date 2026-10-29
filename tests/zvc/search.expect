@@ -1,0 +1,7 @@
+# name verdict. examples/search.zig: two planted bugs that must stay refuted, four functions that must stay proved.
+search.midpointNaive refuted
+search.midpoint proved
+search.lowerBound proved
+search.withdrawNaive refuted
+search.withdraw proved
+search.clampedAdd proved
