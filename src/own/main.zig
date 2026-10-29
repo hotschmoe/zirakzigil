@@ -3,7 +3,7 @@
 //!   zv-own [options] PATH...     PATH is a `.zvp` pack or an index directory
 //!     --src DIR                  where module-relative source paths are found (default `.`)
 //!     --module NAME=DIR          a different directory for the sources of one module
-//!     --only TEXT                only functions whose name contains TEXT
+//!     --only PATH                only functions whose name has PATH as dotted components (`min` selects `a.min`, not `a.minMul`)
 //!     --files PREFIX             only functions declared in files whose module-relative path starts with PREFIX (repeatable)
 //!     --expect FILE              lines `NAME clean|error|unproven`; exit 0 iff every verdict equals the pinned one
 //!     --pins FILE                lines `SHA256 PATH`: the sources the packs were exported from; any difference is an error
@@ -92,7 +92,7 @@ pub fn main(init: std.process.Init) !void {
         const fqn = pack.str(f.fqn);
         if (!selected(pack, f, opts)) continue;
         const name = try source.declaredName(arena, fqn);
-        if (opts.only) |only| if (std.mem.indexOf(u8, name, only) == null) continue;
+        if (opts.only) |only| if (!zv_air.names.selects(name, only)) continue;
         const key = try std.fmt.allocPrint(arena, "{s}#{x}", .{ fqn, f.id });
         if ((try seen.getOrPut(arena, key)).found_existing) continue;
         if (opts.dump) {
@@ -351,7 +351,7 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only TEXT] [--files PREFIX] [--expect FILE] [--pins FILE] [--max-unproven N] [--max-trusted N] [--summary] [--effects] [--dump] PACK|INDEX_DIR...\n", .{});
+    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only PATH] [--files PREFIX] [--expect FILE] [--pins FILE] [--max-unproven N] [--max-trusted N] [--summary] [--effects] [--dump] PACK|INDEX_DIR...\n", .{});
     std.process.exit(2);
 }
 

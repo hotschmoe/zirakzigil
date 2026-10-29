@@ -235,11 +235,29 @@ pub const Vc = struct {
             const index = v.attrInt(inst, .index) orelse return v.ctx.unsupported("argument without an index", .{});
             const given = if (index < v.param_names.len) v.param_names[index] else "_";
             const name = if (std.mem.eql(u8, given, "_")) try std.fmt.allocPrint(v.arena(), "arg{d}", .{index}) else given;
+            if (index >= params.len or params[index].ty != inst.ty) return v.ctx.unsupported("argument {d} is not a parameter of the declared signature (a comptime parameter)", .{index});
             const val = try v.ctx.symbolic(name, params[index].ty, true);
             try v.param_values.append(v.arena(), val);
             v.values[inst.id] = val;
+            if (val == .slice) if (v.sentinelOf(inst.ty)) |sentinel| {
+                const held = try pool.eq(try pool.select(val.slice.mem, val.slice.len), try pool.bv(sentinel.bits, sentinel.value));
+                st.pc = try pool.@"and"(st.pc, held);
+                v.pre = try pool.@"and"(v.pre, held);
+            };
         }
         try v.exec(v.pack.instsOf(v.func.insts), &st);
+    }
+
+    /// The sentinel of a slice type, when its name states one as an integer: `[:0]const u8`.
+    fn sentinelOf(v: *const Vc, ty: schema.TypeId) ?struct { bits: u16, value: u128 } {
+        const t = v.ctx.typeRec(ty);
+        const elem = v.ctx.intInfo(t.child) orelse return null;
+        const name = v.ctx.typeName(ty);
+        if (!std.mem.startsWith(u8, name, "[:")) return null;
+        const end = std.mem.indexOfScalar(u8, name, ']') orelse return null;
+        const sentinel = std.fmt.parseInt(u128, name[2..end], 0) catch return null;
+        if (elem.bits < 128 and sentinel >> @intCast(elem.bits) != 0) return null;
+        return .{ .bits = elem.bits, .value = sentinel };
     }
 
     // Attribute and operand access.
@@ -479,7 +497,7 @@ pub const Vc = struct {
                 }
             },
             .ptr_cast, .addrspace_cast => {
-                if (v.reinterprets(inst)) return v.ctx.unsupported("a pointer cast between integer types of different widths", .{});
+                if (!v.sameLayoutPointee(inst)) return v.ctx.unsupported("a pointer cast to a pointee of another layout", .{});
                 v.setResult(inst, try v.arg(inst, 0));
             },
             .struct_field_ptr, .struct_field_ptr_index_0, .struct_field_ptr_index_1, .struct_field_ptr_index_2, .struct_field_ptr_index_3 => {
@@ -601,7 +619,9 @@ pub const Vc = struct {
             },
             .bit_cast, .bit_cast_safe => {
                 const a = try v.arg(inst, 0);
-                if (a == .scalar) {
+                if (a != .scalar) {
+                    if (v.operandType(v.ops(inst)[0]) != inst.ty) return v.ctx.unsupported("bit_cast of {t} to {s}", .{ std.meta.activeTag(a), v.ctx.typeName(inst.ty) });
+                } else {
                     const have = pool.sortOf(a.scalar);
                     const want = v.ctx.scalarSort(inst.ty) orelse return v.ctx.unsupported("bit_cast to {s}", .{v.ctx.typeName(inst.ty)});
                     if (!have.eql(want)) {
@@ -783,21 +803,27 @@ pub const Vc = struct {
         }
     }
 
-    /// A pointer cast that reads integers of one width as another: the model keeps one value per cell.
-    fn reinterprets(v: *const Vc, inst: *const Inst) bool {
+    /// A pointer cast keeps the model's value only when the pointees have one layout: the same type, integers of
+    /// one width, or arrays of such of one length. Anything else reads the same bits as another type.
+    fn sameLayoutPointee(v: *const Vc, inst: *const Inst) bool {
         const from = v.operandType(v.ops(inst)[0]);
         if (from == .none or inst.ty == .none) return false;
         const f = v.ctx.typeRec(from);
         const t = v.ctx.typeRec(inst.ty);
-        if (f.kind != .pointer or t.kind != .pointer) return false;
-        const a = v.elementOf(f.child);
-        const b = v.elementOf(t.child);
-        return a.kind == .int and b.kind == .int and a.bits != b.bits;
+        return f.kind == .pointer and t.kind == .pointer and v.sameLayout(f.child, t.child);
     }
 
-    fn elementOf(v: *const Vc, id: schema.TypeId) schema.TypeRec {
-        const t = v.ctx.typeRec(id);
-        return if (t.kind == .array) v.ctx.typeRec(t.child) else t;
+    fn sameLayout(v: *const Vc, a: schema.TypeId, b: schema.TypeId) bool {
+        if (a == b) return true;
+        if (a == .none or b == .none) return false;
+        const x = v.ctx.typeRec(a);
+        const y = v.ctx.typeRec(b);
+        if (x.kind != y.kind) return false;
+        return switch (x.kind) {
+            .int => x.bits == y.bits,
+            .array => x.len == y.len and v.sameLayout(x.child, y.child),
+            else => false,
+        };
     }
 
     // Arithmetic.
@@ -1571,7 +1597,10 @@ pub const Vc = struct {
         if (std.meta.activeTag(val) != std.meta.activeTag(result)) return v.ctx.unsupported("a returned {t} where the declared result is {t}", .{ std.meta.activeTag(val), std.meta.activeTag(result) });
         switch (val) {
             .none => return pool.tru(),
-            .scalar => |t| return pool.eq(result.scalar, t),
+            .scalar => |t| {
+                if (!pool.sortOf(result.scalar).eql(pool.sortOf(t))) return v.ctx.unsupported("a returned scalar of another sort than the declared result", .{});
+                return pool.eq(result.scalar, t);
+            },
             .opt => |o| return pool.@"and"(
                 try pool.eq(result.opt.has, o.has),
                 try v.agrees(result.opt.payload, o.payload),
