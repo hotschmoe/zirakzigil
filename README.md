@@ -114,6 +114,7 @@ zig build test --fuzz=100K              # the same, stopping after 100K iteratio
 ./tools/run_negative.sh                 # 6 must-fail + 36 must-not-compile cases
 ./tools/run_baseline.sh                 # the same bugs in plain Zig (about 1.5 min)
 tools/run_zvc.sh                        # the verifier against its pinned AIR packs and verdicts (needs Z3)
+tools/run_own.sh                         # the ownership checker against its pinned AIR packs and verdicts (no solver)
 ```
 
 To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, `zirakzigil.addAssuranceGate` for the Phase 0 gate (a root module and the names of your law and scenario files). Your own `zig build matrix` is one call to `zirakzigil.addTestMatrix`; see "Build matrix" there.
