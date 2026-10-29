@@ -49,6 +49,17 @@ pub fn hashEnv(environ_map: anytype, hasher: anytype) void {
     Options.fromEnviron(environ_map).hash(hasher);
 }
 
+/// An exporting compilation must never be served from the cache: a hit skips analysis, and so the
+/// export. With the output directory set, the cache key gets a fresh nonce, so it never matches.
+pub fn hashCache(comp: *const Compilation, hasher: anytype) void {
+    const options = optionsOf(comp);
+    options.hash(hasher);
+    if (options.out_dir == null) return;
+    var nonce: [8]u8 = undefined;
+    comp.io.random(&nonce);
+    hasher.addBytes(&nonce);
+}
+
 pub fn exportFunc(pt: Zcu.PerThread, func_index: InternPool.Index, air: *const Air) Allocator.Error!void {
     const zcu = pt.zcu;
     const comp = zcu.comp;
