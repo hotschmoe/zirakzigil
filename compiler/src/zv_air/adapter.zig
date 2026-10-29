@@ -72,11 +72,11 @@ pub fn isToolchain(zcu: *Zcu, func_index: InternPool.Index) bool {
     return mod == zcu.std_mod or mod.root.root == .zig_lib;
 }
 
-/// Whether the function is in the project's build script, which `zig build` compiles only when its
-/// configuration cache misses, so exporting it would make the export depend on that cache.
-pub fn isBuildScript(zcu: *Zcu, func_index: InternPool.Index) bool {
-    const func = zcu.funcInfo(func_index);
-    return zcu.root_mod.deps.get("@build") == zcu.navFileScope(func.owner_nav).mod;
+/// Whether the compilation is the `zig build` configure script: the project's build.zig and every
+/// dependency's. It is compiled only when the configuration cache misses, so exporting it would make
+/// the export depend on that cache.
+pub fn isBuildScript(zcu: *Zcu) bool {
+    return zcu.root_mod.deps.contains("@build");
 }
 
 /// Builds the view of `air`. Everything is allocated from `arena`.

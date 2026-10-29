@@ -22,6 +22,7 @@ cat >"$proj/build.zig" <<'ZIG'
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    _ = b.dependency("dep", .{});
     const target = b.standardTargetOptions(.{});
     for ([_][]const u8{ "a", "b" }) |name| {
         const obj = b.addObject(.{
@@ -36,6 +37,17 @@ pub fn build(b: *std.Build) void {
     }
 }
 ZIG
+mkdir -p "$proj/dep"
+printf '.{ .name = .dep, .version = "0.0.1", .fingerprint = 0x1c3a9f5e2b7d4a68, .paths = .{ "" } }
+' >"$proj/dep/build.zig.zon"
+printf 'const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    _ = b;
+}
+' >"$proj/dep/build.zig"
+printf '.{ .name = .proj, .version = "0.0.1", .fingerprint = 0x2d4b0a6f3c8e5b79, .dependencies = .{ .dep = .{ .path = "dep" } }, .paths = .{ "" } }
+' >"$proj/build.zig.zon"
 for name in a b; do
     printf 'export fn %s_one(x: u32) u32 {\n    return x +%% 1;\n}\nexport fn %s_two(x: u32) u32 {\n    return x *%% 2;\n}\n' "$name" "$name" >"$proj/$name.zig"
 done

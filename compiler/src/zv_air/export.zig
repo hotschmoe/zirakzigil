@@ -18,7 +18,7 @@ pub fn exportFunc(pt: Zcu.PerThread, func_index: InternPool.Index, air: *const A
     const zcu = pt.zcu;
     const comp = zcu.comp;
     const o = cache.options(comp) orelse return;
-    if ((!o.include_std and adapter.isToolchain(zcu, func_index)) or adapter.isBuildScript(zcu, func_index)) return;
+    if ((!o.include_std and adapter.isToolchain(zcu, func_index)) or adapter.isBuildScript(zcu)) return;
 
     var arena_state: std.heap.ArenaAllocator = .init(comp.gpa);
     defer arena_state.deinit();
