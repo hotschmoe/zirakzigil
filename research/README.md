@@ -8,7 +8,10 @@ Every track is measured on the same historical upgrade:
 
 1. **Build it for 0.16.0 first**, as if 0.16.0 were the pin. Host compiler: `C:\Users\hotschmoe\zr\host-0.16\zig.exe` (checksum-verified). Upstream tree: `C:\Users\hotschmoe\Documents\GitHub\zig-0.16`, read-only, so make your own copy. It must export `research/corpus/corpus.zig` (version-neutral; passes `zig test` on both 0.16.0 and 0.17.0).
 2. **Upgrade to 0.17.0.** Host is `zig` on PATH. Upstream tree: `C:\Users\hotschmoe\Documents\GitHub\zig-0.17`, also read-only. Record the upgrade cost exactly, using the metrics below.
-3. **Forward-check against master.** The canary workflow (`gh workflow run canary.yml --ref <your-branch>`) builds the master commit that matches the latest nightly.
+3. **Live port: 0.17.0 -> 0.18.0-dev.738+ae9a8acc7**, today's nightly. This is the upgrade we will actually face next, with no known answer. Host: `C:\Users\hotschmoe\zr\host-0.18-dev\zig.exe` (checksum-verified). Upstream tree: `C:\Users\hotschmoe\zr\zig-0.18-dev`, a full checkout at ae9a8acc7 with longpaths on; read-only, so make your own copy. Record the same metrics as for path 1.
+4. **Canary.** `gh workflow run canary.yml --ref <your-branch>` builds the same nightly commit on Linux CI, which confirms the Linux side.
+
+There are two upgrade paths: the historical replay (0.16 -> 0.17) and the live port (0.17 -> 0.18-dev). Report both in every RESULTS.md. A mechanism that only looks good in hindsight doesn't count.
 
 The 0.17.0 output must be usable by the existing consumers: either schema v1 byte-identical to today's exporter on `research/corpus/corpus.zig`, `examples/search.zig` and zmoltcp, or a documented, versioned replacement.
 
