@@ -18,7 +18,7 @@ Three confirmed holes. In each, `zvc` printed `proved` for a function that a Deb
 
 ## Resolution
 
-Fixed in 0.17.10. Every case is a pinned verdict in `tests/zvc/soundness2.zig` (`soundness2.expect`); `tools/run_zvc.sh` runs the cross-function and gate-option ones again. The unsound ones are REFUTED or UNPROVEN there and never `proved`. The suites were exported again with a zig-zv built from master and run before and after: no pinned verdict of `search`, `cases`, `features` or `soundness` changed.
+Fixed in 0.17.12. Every case is a pinned verdict in `tests/zvc/soundness2.zig` (`soundness2.expect`); `tools/run_zvc.sh` runs the cross-function and gate-option ones again. The unsound ones are REFUTED or UNPROVEN there and never `proved`. The suites were exported again with a zig-zv built from master and run before and after: no pinned verdict of `search`, `cases`, `features` or `soundness` changed.
 
 ### 1. `Seq.sub` wrap: confirmed, fixed
 
