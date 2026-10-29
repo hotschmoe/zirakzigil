@@ -25,14 +25,31 @@ The hook does three things: it adds a flag (`--zv-air-out <dir>`), stores it on 
 
 ## JSON contract (schema v1)
 
-One file per function instance, containing:
+One compact JSON file per function instance, named `<fqn>.<content hash>.json`. The hash makes generic instances with the same name distinct and the file set reproducible. Top level:
 
-- `schema`, `zig_version`, the fully qualified name, and the source file and line;
-- parameter and return types;
-- every instruction with its tag, result type, operands, decoded payload and nearest `dbg_stmt` location;
-- callees, including inline ones.
+| Field | Meaning |
+| --- | --- |
+| `schema`, `zig_version` | 1, and the compiler version that produced the file |
+| `fqn`, `file`, `line`, `generic_instance` | fully qualified name, index into `files`, 1-based declaration line, whether this is a generic instantiation |
+| `params`, `ret` | runtime parameters (`ty`, `zir_index`) and the return type, as indexes into `types` |
+| `files`, `types`, `callees` | the per-file tables: `{module, path}`, `{name, kind}`, and `{fqn, inlined}` for every direct call and every `dbg_inline_block` |
+| `unsupported` | number of undecoded instructions |
+| `insts` | the main body |
 
-Types are interned into a per-file table. Anything the adapter doesn't decode yet is emitted as `{"tag": ..., "unsupported": true}` rather than dropped, so coverage can be measured.
+An instruction is `{id, tag, ty, operands?, attrs?, loc?, bodies?}`. `id` is the AIR instruction index and is what operands and `target` attributes refer to. An operand is `{"inst": id}`, `{"ty": type, "val": "<printed value>"}` for a constant, or `null`. `loc` is `[file, line, col]` of the nearest preceding `dbg_stmt`, absolute and 1-based, switched to the callee's file inside an inlined body. `attrs` holds the decoded payload (`index`, `field`, `callee`, `target`, `order`, ...). `bodies` holds nested instruction lists: `then`/`else` for `cond_br`, `error` for `try`, `block`, `loop`, `inline` for `dbg_inline_block`, and one `case` (with `items`/`ranges`) per prong plus `else` for switches. A tag the adapter does not decode is `{id, tag, "unsupported": true}`.
+
+`tools/air_read.py` validates this shape and checks that re-serializing the parsed file reproduces it byte for byte.
+
+## Using it
+
+```
+tools/build_zig_zv.sh                      # once per Zig release; ~8 min, ~9 GB RAM
+zig-zv build-obj -fno-emit-bin --zv-air-out DIR file.zig     # one compilation
+tools/zv_air.sh DIR test                   # a whole `zig build` project: runs `zig-zv build test`
+python tools/air_read.py DIR               # validate and round-trip
+```
+
+Controls: `--zv-air-out DIR` or `ZV_AIR_OUT=DIR`, and `--zv-air-std` or `ZV_AIR_STD=1` to include std and the other toolchain modules (compiler_rt, ubsan_rt, the test runner), which are skipped by default. The environment variables are what make `zig build` work without touching `build.zig`: the build runner spawns `zig-zv` for each compile step and the children inherit them. Only functions the compiler analyzes are exported, so export from a root that reaches them (a test root, or `tools/air_all.zig` for a file whose pub functions are not all reached). A cached compile step skips analysis and so skips the export; `tools/zv_air.sh` uses a fresh cache for that reason. `zig-zv` on Windows cannot link executables (its self-hosted COFF linker rejects `compiler_rt.lib`; stock builds without LLVM behave the same), so on Windows use direct `-fno-emit-bin` invocations or run `zig build` under Linux/WSL.
 
 ## Milestones
 
