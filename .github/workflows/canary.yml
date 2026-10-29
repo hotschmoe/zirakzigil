@@ -1,7 +1,7 @@
 name: zig-master canary
 
-# Applies compiler/hook.patch and compiler/src/zv_air to upstream Zig master and builds zig-zv,
-# so a Zig change that breaks the fork shows up before a release does (fork policy, docs/design.md).
+# Track B variant: builds zig-zv (hook plus reflection dump plus hand adapter) against upstream Zig master,
+# then exports the corpus and checks that raw dump plus normalizer reproduce the hand adapter byte for byte.
 
 on:
   schedule:
@@ -15,9 +15,14 @@ permissions:
 jobs:
   canary:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - name: Build the normalizer with 0.17.0
+        run: zig build-exe research/track-b/norm/norm.zig -OReleaseSafe -femit-bin=$RUNNER_TEMP/norm
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: master
@@ -26,13 +31,21 @@ jobs:
         id: build
         run: |
           set -o pipefail
-          ZV_ZIG_REF=$(zig version | sed 's/.*+//') sh tools/build_zig_zv.sh 2>&1 | tee canary.log
+          sh research/track-b/build.sh master 2>&1 | tee canary.log
+      - name: Export the corpus and compare
+        id: compare
+        run: |
+          set -o pipefail
+          ZV_BIN=$PWD/research/track-b/.work/master/zig-out/bin/zig-zv-master sh research/track-b/run.sh master corpus out 2>&1 | tee -a canary.log
+          $RUNNER_TEMP/norm research/track-b/norm/0.18.zon out/raw out/norm --strict 2>&1 | tee -a canary.log
+          diff -r out/v1 out/norm 2>&1 | head -20 | tee -a canary.log
+          diff -rq out/v1 out/norm
       - name: Open an issue on failure
-        if: failure() && steps.build.outcome == 'failure'
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          title="Canary: zig-zv no longer builds against Zig master"
+          title="Canary: zig-zv no longer builds or exports against Zig master"
           if gh issue list --state open --search "in:title \"$title\"" --json number -q '.[].number' | grep -q .; then
             echo "an open canary issue already exists"
             exit 0
@@ -40,7 +53,7 @@ jobs:
           {
             echo "The weekly canary failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
-            echo "Last lines of the build log:"
+            echo "Last lines of the log:"
             echo
             echo '```'
             tail -n 40 canary.log

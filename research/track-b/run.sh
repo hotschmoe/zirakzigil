@@ -11,10 +11,10 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd -W 2>/dev/null || pwd)
 rm -rf "$out/v1" "$out/raw" "$out/txt" "$out/.cache"
 export ZV_AIR_OUT=$out/v1 ZV_AIR_RAW=$out/raw ZV_AIR_TEXT=$out/txt
-export ZIG_GLOBAL_CACHE_DIR=${ZV_GLOBAL_CACHE:-/c/Users/hotschmoe/zr/b-work/global-cache-$ver}
+export ZIG_GLOBAL_CACHE_DIR=${ZV_GLOBAL_CACHE:-$out/.global-cache}
 cd "$root"
 case $target in
     corpus) "$zv" test -fno-emit-bin --cache-dir "$out/.cache" research/corpus/corpus.zig ;;
     search) "$zv" test -fno-emit-bin --cache-dir "$out/.cache" --dep target -Mroot=tools/air_all.zig --dep zv -Mtarget=examples/search.zig --dep zv_options -Mzv=src/zv.zig -Mzv_options=research/track-b/zv_options.zig ;;
-    zmoltcp) zvo=$root/research/track-b/zv_options.zig; zvs=$root/src/zv.zig; cd /c/Users/hotschmoe/Documents/GitHub/zmoltcp && "$zv" test -fno-emit-bin --cache-dir "$out/.cache" --dep zv -Mroot=src/root.zig --dep zv_options -Mzv="$zvs" -Mzv_options="$zvo" ;;
+    zmoltcp) zvo=$root/research/track-b/zv_options.zig; zvs=$root/src/zv.zig; cd ${ZM_DIR:-/c/Users/hotschmoe/Documents/GitHub/zmoltcp} && "$zv" test -fno-emit-bin --cache-dir "$out/.cache" --dep zv -Mroot=src/root.zig --dep zv_options -Mzv="$zvs" -Mzv_options="$zvo" ;;
 esac
