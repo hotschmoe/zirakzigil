@@ -1,0 +1,1519 @@
+# Begin Function AIR: corpus.test.corpus:
+# Total AIR+Liveness bytes: 1.9111328125KiB
+# AIR Instructions:         105 (945B)
+# AIR Extra Data:           200 (800B)
+# Liveness tomb_bits:       56B
+# Liveness Extra Data:      7 (28B)
+# Liveness special table:   3 (24B)
+  %0 = save_err_return_trace_index()
+  %1!= dbg_stmt(2:5)
+  %2 = alloc(*[4]u8)
+  %3!= store(%2, <[4]u8, "\x01\x02\x03\x04".*>)
+  %5!= dbg_var_ptr(%2, "buf")
+  %6!= dbg_stmt(3:5)
+  %7 = alloc(*corpus.Node)
+  %8 = struct_field_ptr_index_0(*i32, %7)
+  %9!= store_safe(%8!, <i32, 2>)
+  %10 = struct_field_ptr_index_1(*?*corpus.Node, %7)
+  %11!= store_safe(%10!, <?*corpus.Node, null>)
+  %12!= dbg_var_ptr(%7, "n")
+  %13!= dbg_stmt(4:5)
+  %14 = alloc(*u32)
+  %15!= store_safe(%14, <u32, 0>)
+  %16!= dbg_var_ptr(%14, "at")
+  %17!= dbg_stmt(5:5)
+  %18!= bitcast(*@Vector(4, f32), @.zero_usize)
+  %19!= ptr_elem_ptr(*f32, %18, @.zero_usize)
+  %20!= bitcast(*@Vector(4, f32), @.zero_usize)
+  %21!= ptr_elem_ptr(*f32, %18, @.one_usize)
+  %22!= bitcast(*@Vector(4, f32), @.zero_usize)
+  %23!= ptr_elem_ptr(*f32, %18, <usize, 2>)
+  %24!= bitcast(*@Vector(4, f32), @.zero_usize)
+  %25!= ptr_elem_ptr(*f32, %18, <usize, 3>)
+  %26!= bitcast(*@Vector(4, f32), @.zero_usize)
+  %27!= dbg_var_ptr(<*const @Vector(4, f32), &.{ 1, 2, 3, 4 }>, "v")
+  %28!= dbg_stmt(6:5)
+  %29 = alloc(*[4]u8)
+  %30!= store_safe(%29, <[4]u8, undefined>)
+  %31!= dbg_var_ptr(%29, "dst")
+  %32!= dbg_stmt(7:11)
+  %33 = array_to_slice([]u8, %29!)
+  %34 = array_to_slice([]const u8, %2)
+  %35!= dbg_stmt(7:11)
+  %36!= call(<fn ([]u8, []const u8) void, (function 'memory')>, [%33!, %34!])
+  %37!= dbg_stmt(9:14)
+  %38 = call(<fn (u32, u32) u32, (function 'arith')>, [<u32, 3>, <u32, 4>])
+  %39!= dbg_stmt(9:64)
+  %40 = call(<fn (f64, f32) f64, (function 'floats')>, [<f64, 2>, <f32, 1>])
+  %41!= dbg_stmt(10:13)
+  %42 = call(<fn (u64) u32, (function 'bits')>, [<u64, 240>])
+  %43!= dbg_stmt(10:63)
+  %44 = call(<fn (i64, f32) u8, (function 'casts')>, [<i64, 300>, <f32, 2.5>])
+  %45!= dbg_stmt(11:15)
+  %46 = array_to_slice([]u8, %2!)
+  %47!= dbg_stmt(11:15)
+  %48 = call(<fn ([]u8, usize) u8, (function 'slices')>, [%46!, @.one_usize])
+  %49!= dbg_stmt(11:64)
+  %50 = call(<fn () u32, (function 'arrays')>, [])
+  %51!= dbg_stmt(12:18)
+  %52 = bitcast(?*const u32, %14)
+  %53!= dbg_stmt(12:18)
+  %54 = call(<fn (?*const u32, ?u32) u32, (function 'optionals')>, [%52!, <?u32, null>])
+  %55!= dbg_stmt(12:64)
+  %56 = call(<fn (u32) u32, (function 'errors')>, [<u32, 5>])
+  %57 = block(u32, {
+    %58!= dbg_stmt(13:17)
+    %59 = call(<fn (u32) error{Bad,Worse}!u32, (function 'tryChain')>, [<u32, 3>])
+    %60 = is_non_err(%59)
+    %69!= cond_br(%60!, poi {
+      %0!
+      %61 = unwrap_errunion_payload(u32, %59!)
+      %62!= br(%57, %61!)
+    }, poi {
+      %59!
+      %63!= unwrap_errunion_err(error{Bad,Worse}, %59)
+      %64!= save_err_return_trace_index()
+      %65 = err_return_trace(*builtin.StackTrace)
+      %66 = struct_field_ptr_index_0(*usize, %65!)
+      %67!= store(%66!, %0!)
+      %68!= br(%57, <u32, 0>)
+    })
+  } %0!)
+  %70!= dbg_stmt(13:62)
+  %71 = call(<fn (corpus.Shape) f32, (function 'area')>, [<corpus.Shape, .{ .circle = 1 }>])
+  %72!= dbg_stmt(14:13)
+  %73 = call(<fn (corpus.Shape) f32, (function 'area')>, [<corpus.Shape, .{ .rect = .{ .w = 1, .h = 2 } }>])
+  %74!= dbg_stmt(14:66)
+  %75 = call(<fn (u8) u8, (function 'switches')>, [<u8, 98>])
+  %76!= dbg_stmt(15:14)
+  %77 = call(<fn (u32) u32, (function 'loops')>, [<u32, 5>])
+  %78!= dbg_stmt(15:67)
+  %79 = call(<fn (corpus.Packed) corpus.Packed, (function 'packedOps')>, [<corpus.Packed, .{ .a = 1, .b = 2, .c = 3 }>])
+  %80!= dbg_stmt(16:14)
+  %81 = bitcast(*const corpus.Node, %7!)
+  %82!= dbg_stmt(16:14)
+  %83 = call(<fn (*const corpus.Node) i32, (function 'sum')>, [%81!])
+  %84!= dbg_stmt(16:68)
+  %85 = call(<fn () i64, (function 'useGeneric')>, [])
+  %86!= dbg_stmt(17:20)
+  %87 = call(<fn (u32) u32, (function 'inlineCalls')>, [<u32, 2>])
+  %88!= dbg_stmt(17:68)
+  %89 = call(<fn (*const fn (u32) u32, u32) u32, (function 'fnPointers')>, [<*const fn (u32) u32, &corpus.inlineCalls>, <u32, 3>])
+  %90!= dbg_stmt(18:16)
+  %91 = call(<fn (*u32) u32, (function 'atomics')>, [%14!])
+  %92!= dbg_stmt(18:65)
+  %93 = call(<fn (@Vector(4, f32), @Vector(4, f32)) f32, (function 'vectors')>, [<@Vector(4, f32), .{ 1, 2, 3, 4 }>, <@Vector(4, f32), .{ 1, 2, 3, 4 }>])
+  %94!= dbg_stmt(19:17)
+  %95 = call(<fn (u32) u32, (function 'deferred')>, [<u32, 2>])
+  %96!= dbg_stmt(19:78)
+  %97 = call(<fn (u32) u32, (function 'unreachableAndAssert')>, [<u32, 3>])
+  %98!= dbg_stmt(20:16)
+  %99 = call(<fn () u32, (function 'structs')>, [])
+  %100 = aggregate_init(struct { u32, f64, u32, u8, u8, u32, u32, u32, u32, f32, f32, u8, u32, corpus.Packed, i32, i64, u32, u32, u32, f32, u32, u32, u32 }, [%38!, %40!, %42!, %44!, %48!, %50!, %54!, %56!, %57!, %71!, %73!, %75!, %77!, %79!, %83!, %85!, %87!, %89!, %91!, %93!, %95!, %97!, %99!])
+  %102!= dbg_stmt(8:30)
+  %103!= call(<fn (struct { u32, f64, u32, u8, u8, u32, u32, u32, u32, f32, f32, u8, u32, corpus.Packed, i32, i64, u32, u32, u32, f32, u32, u32, u32 }) void, (function 'doNotOptimizeAway__anon_66714')>, [%100!])
+  %104!= ret_safe(<anyerror!void, {}>)
+# End Function AIR: corpus.test.corpus
+# Begin Function AIR: corpus.memory:
+# Total AIR+Liveness bytes: 1.3720703125KiB
+# AIR Instructions:         69 (621B)
+# AIR Extra Data:           108 (432B)
+# Liveness tomb_bits:       40B
+# Liveness Extra Data:      36 (144B)
+# Liveness special table:   8 (64B)
+  %0 = arg([]u8, 0)
+  %1 = arg([]const u8, 1)
+  %2!= save_err_return_trace_index()
+  %3 = alloc(*[]u8)
+  %4!= store_safe(%3, %0!)
+  %5 = bitcast(*const []u8, %3!)
+  %6 = alloc(*[]const u8)
+  %7!= store_safe(%6, %1!)
+  %8 = bitcast(*const []const u8, %6!)
+  %9!= dbg_stmt(2:23)
+  %10 = ptr_slice_len_ptr(*const usize, %5)
+  %11 = load(usize, %10!)
+  %12!= dbg_stmt(2:32)
+  %13 = ptr_slice_len_ptr(*const usize, %8)
+  %14 = load(usize, %13!)
+  %15 = bitcast(u64, %11!)
+  %16 = bitcast(u64, %14!)
+  %17 = min(%15!, %16!)
+  %18!= dbg_var_val(%17, "n")
+  %19!= dbg_stmt(3:16)
+  %20 = load([]u8, %5!)
+  %21 = slice_ptr([*]u8, %20)
+  %22 = ptr_add([*]u8, %21!, @.zero_usize)
+  %23 = bitcast(usize, %17)
+  %24 = sub(%23, @.zero_usize)
+  %25 = slice_len(usize, %20!)
+  %26 = cmp_lte(%23, %25)
+  %29!= block(void, {
+    %30!= cond_br(%26!, likely {
+      %25! %23!
+      %31!= br(%29, @.void_value)
+    }, cold {
+      %17! %24! %8! %22!
+      %27!= call(<fn (usize, usize) noreturn, (function 'outOfBounds')>, [%23!, %25!])
+      %28!= unreach()
+    })
+  } %25! %23! %26!)
+  %32 = slice([]u8, %22!, %24!)
+  %33!= dbg_stmt(3:27)
+  %34 = load([]const u8, %8!)
+  %35 = slice_ptr([*]const u8, %34)
+  %36 = ptr_add([*]const u8, %35!, @.zero_usize)
+  %37 = bitcast(usize, %17!)
+  %38 = sub(%37, @.zero_usize)
+  %39 = slice_len(usize, %34!)
+  %40 = cmp_lte(%37, %39)
+  %43!= block(void, {
+    %44!= cond_br(%40!, likely {
+      %37! %39!
+      %45!= br(%43, @.void_value)
+    }, cold {
+      %36! %38! %32!
+      %41!= call(<fn (usize, usize) noreturn, (function 'outOfBounds')>, [%37!, %39!])
+      %42!= unreach()
+    })
+  } %37! %39! %40!)
+  %46 = slice([]const u8, %36!, %38!)
+  %47 = slice_len(usize, %32)
+  %48 = slice_len(usize, %46)
+  %49 = cmp_eq(%47, %48!)
+  %52!= block(void, {
+    %53!= cond_br(%49!, likely {
+      %54!= br(%52, @.void_value)
+    }, cold {
+      %47! %46! %32!
+      %50!= call(<fn () noreturn, (function 'copyLenMismatch')>, [])
+      %51!= unreach()
+    })
+  } %49!)
+  %55 = slice_ptr([*]const u8, %46!)
+  %56 = slice_ptr([*]u8, %32)
+  %57 = ptr_add([*]const u8, %55, %47)
+  %58 = ptr_add([*]u8, %56, %47!)
+  %59 = cmp_gte(%56!, %57!)
+  %60 = cmp_gte(%55, %58!)
+  %61 = bool_or(%59!, %60!)
+  %64!= block(void, {
+    %65!= cond_br(%61!, likely {
+      %66!= br(%64, @.void_value)
+    }, cold {
+      %55! %32!
+      %62!= call(<fn () noreturn, (function 'memcpyAlias')>, [])
+      %63!= unreach()
+    })
+  } %61!)
+  %67!= memcpy(%32!, %55!)
+  %68!= ret_safe(@.void_value)
+# End Function AIR: corpus.memory
+# Begin Function AIR: corpus.structs:
+# Total AIR+Liveness bytes: 676B
+# AIR Instructions:         40 (360B)
+# AIR Extra Data:           47 (188B)
+# Liveness tomb_bits:       24B
+# Liveness Extra Data:      0 (0B)
+# Liveness special table:   0 (0B)
+  %0!= save_err_return_trace_index()
+  %1!= dbg_stmt(3:5)
+  %2 = alloc(*corpus.structs.P)
+  %3 = struct_field_ptr_index_0(*u32, %2)
+  %4!= store_safe(%3!, <u32, 1>)
+  %5 = struct_field_ptr_index_1(*u32, %2)
+  %6!= store(%5!, <u32, 4>)
+  %7!= dbg_var_ptr(%2, "p")
+  %8!= dbg_stmt(4:6)
+  %9 = struct_field_ptr_index_1(*u32, %2)
+  %10 = load(u32, %9)
+  %11!= dbg_stmt(4:13)
+  %12 = struct_field_ptr_index_0(*u32, %2)
+  %13 = load(u32, %12!)
+  %14!= dbg_stmt(4:9)
+  %15 = add_safe(%10!, %13!)
+  %16!= store_safe(%9!, %15!)
+  %17!= dbg_stmt(5:19)
+  %18 = struct_field_ptr_index_0(*u32, %2)
+  %19 = load(u32, %18!)
+  %20!= dbg_stmt(5:24)
+  %21 = struct_field_ptr_index_1(*u32, %2!)
+  %22 = load(u32, %21!)
+  %23 = aggregate_init(struct { u32, u32, comptime u32 = 9 }, [%19!, %22!, <u32, 9>])
+  %24 = alloc(*struct { u32, u32, comptime u32 = 9 })
+  %25!= store_safe(%24, %23)
+  %26 = bitcast(*const struct { u32, u32, comptime u32 = 9 }, %24!)
+  %27!= dbg_var_val(%23!, "t")
+  %28!= dbg_stmt(6:13)
+  %29 = struct_field_ptr_index_0(*const u32, %26)
+  %30 = load(u32, %29!)
+  %31!= dbg_stmt(6:20)
+  %32 = struct_field_ptr_index_1(*const u32, %26!)
+  %33 = load(u32, %32!)
+  %34!= dbg_stmt(6:17)
+  %35 = add_safe(%30!, %33!)
+  %36!= dbg_stmt(6:24)
+  %37 = add_safe(%35!, <u32, 9>)
+  %38!= dbg_stmt(6:5)
+  %39!= ret_safe(%37!)
+# End Function AIR: corpus.structs
+# Begin Function AIR: corpus.unreachableAndAssert:
+# Total AIR+Liveness bytes: 388B
+# AIR Instructions:         16 (144B)
+# AIR Extra Data:           25 (100B)
+# Liveness tomb_bits:       8B
+# Liveness Extra Data:      4 (16B)
+# Liveness special table:   2 (16B)
+  %0 = arg(u32, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(2:21)
+  %3 = cmp_neq(%0, <u32, 7>)
+  %4!= dbg_stmt(2:21)
+  %5!= call(<fn (bool) void, (function 'assert')>, [%3!])
+  %6!= dbg_stmt(3:9)
+  %7!= block(void, {
+    %8 = cmp_eq(%0, <u32, 8>)
+    %13!= cond_br(%8!, cold poi {
+      %0!
+      %9!= dbg_stmt(3:17)
+      %10!= call(<fn () noreturn, (function 'reachedUnreachable')>, [])
+      %11!= unreach()
+    }, poi {
+      %12!= br(%7, @.void_value)
+    })
+  })
+  %14!= dbg_stmt(4:5)
+  %15!= ret_safe(%0!)
+# End Function AIR: corpus.unreachableAndAssert
+# Begin Function AIR: corpus.deferred:
+# Total AIR+Liveness bytes: 432B
+# AIR Instructions:         24 (216B)
+# AIR Extra Data:           24 (96B)
+# Liveness tomb_bits:       16B
+# Liveness Extra Data:      0 (0B)
+# Liveness special table:   0 (0B)
+  %0 = arg(u32, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(2:5)
+  %3 = alloc(*u32)
+  %4!= store(%3, %0!)
+  %6!= dbg_var_ptr(%3, "y")
+  %7!= dbg_stmt(4:5)
+  %9!= dbg_stmt(5:15)
+  %10 = load(u32, %3)
+  %11!= dbg_stmt(5:17)
+  %12 = mul_safe(%10!, <u32, 2>)
+  %13!= store_safe(%3, %12!)
+  %15!= dbg_stmt(7:5)
+  %16 = load(u32, %3)
+  %17!= dbg_stmt(3:11)
+  %18 = load(u32, %3)
+  %19!= dbg_stmt(3:13)
+  %20 = add_safe(%18!, <u32, 1>)
+  %21!= store_safe(%3!, %20!)
+  %22!= dbg_stmt(7:5)
+  %23!= ret_safe(%16!)
+# End Function AIR: corpus.deferred
+# Begin Function AIR: corpus.vectors:
+# Total AIR+Liveness bytes: 280B
+# AIR Instructions:         12 (108B)
+# AIR Extra Data:           15 (60B)
+# Liveness tomb_bits:       8B
+# Liveness Extra Data:      0 (0B)
+# Liveness special table:   0 (0B)
+  %0 = arg(@Vector(4, f32), 0)
+  %1 = arg(@Vector(4, f32), 1)
+  %2!= save_err_return_trace_index()
+  %3!= dbg_stmt(2:17)
+  %4 = mul(%0, %1!)
+  %5!= dbg_stmt(2:21)
+  %6 = add(%4!, %0!)
+  %7!= dbg_var_val(%6, "c")
+  %8!= dbg_stmt(3:5)
+  %9 = reduce(%6!, Add)
+  %10!= dbg_stmt(3:5)
+  %11!= ret_safe(%9!)
+# End Function AIR: corpus.vectors
+# Begin Function AIR: corpus.atomics:
+# Total AIR+Liveness bytes: 464B
+# AIR Instructions:         20 (180B)
+# AIR Extra Data:           32 (128B)
+# Liveness tomb_bits:       16B
+# Liveness Extra Data:      5 (20B)
+# Liveness special table:   2 (16B)
+  %0 = arg(*u32, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(2:5)
+  %3!= atomic_rmw(%0, <u32, 1>, Add, seq_cst)
+  %4!= dbg_stmt(3:5)
+  %5!= atomic_store_release(%0, <u32, 5>, release)
+  %6!= dbg_stmt(4:5)
+  %7 = bitcast(*const u32, %0)
+  %8 = atomic_load(%7!, acquire)
+  %9 = block(u32, {
+    %10 = cmpxchg_strong(%0!, <u32, 5>, <u32, 6>, seq_cst, seq_cst)
+    %11 = is_non_null(%10)
+    %15!= cond_br(%11!, poi {
+      %12 = optional_payload(u32, %10!)
+      %13!= br(%9, %12!)
+    }, poi {
+      %10!
+      %14!= br(%9, <u32, 0>)
+    })
+  } %0!)
+  %16!= dbg_stmt(4:42)
+  %17 = add_safe(%8!, %9!)
+  %18!= dbg_stmt(4:5)
+  %19!= ret_safe(%17!)
+# End Function AIR: corpus.atomics
+# Begin Function AIR: corpus.fnPointers:
+# Total AIR+Liveness bytes: 312B
+# AIR Instructions:         12 (108B)
+# AIR Extra Data:           23 (92B)
+# Liveness tomb_bits:       8B
+# Liveness Extra Data:      0 (0B)
+# Liveness special table:   0 (0B)
+  %0 = arg(*const fn (u32) u32, 0)
+  %1 = arg(u32, 1)
+  %2!= save_err_return_trace_index()
+  %3!= dbg_stmt(2:13)
+  %4 = call(%0!, [%1])
+  %5 = aggregate_init(struct { u32, comptime comptime_int = 1 }, [%1!, @.one])
+  %6 = struct_field_val(%5!, 0)
+  %7 = call_never_inline(<fn (u32, u32) u32, (function 'arith')>, [%6!, <u32, 1>])
+  %8!= dbg_stmt(2:17)
+  %9 = add_safe(%4!, %7!)
+  %10!= dbg_stmt(2:5)
+  %11!= ret_safe(%9!)
+# End Function AIR: corpus.fnPointers
+# Begin Function AIR: corpus.inlineCalls:
+# Total AIR+Liveness bytes: 492B
+# AIR Instructions:         24 (216B)
+# AIR Extra Data:           32 (128B)
+# Liveness tomb_bits:       16B
+# Liveness Extra Data:      3 (12B)
+# Liveness special table:   2 (16B)
+  %0 = arg(u32, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(2:18)
+  %3 = dbg_inline_block(u32, <fn (u32) callconv(.@"inline") u32, (function 'helper')>, {
+    %4!= dbg_arg_inline(%0, "x")
+    %5!= save_err_return_trace_index()
+    %6!= dbg_stmt(2:5)
+    %7 = mul_wrap(%0, <u32, 3>)
+    %8!= dbg_stmt(2:5)
+    %9!= br(%3, %7!)
+  })
+  %10!= dbg_stmt(2:33)
+  %11 = add_safe(%0!, <u32, 1>)
+  %12!= dbg_stmt(2:30)
+  %13 = dbg_inline_block(u32, <fn (u32) callconv(.@"inline") u32, (function 'helper')>, {
+    %14!= dbg_arg_inline(%11, "x")
+    %15!= save_err_return_trace_index()
+    %16!= dbg_stmt(2:5)
+    %17 = mul_wrap(%11!, <u32, 3>)
+    %18!= dbg_stmt(2:5)
+    %19!= br(%13, %17!)
+  } %11!)
+  %20!= dbg_stmt(2:22)
+  %21 = add_safe(%3!, %13!)
+  %22!= dbg_stmt(2:5)
+  %23!= ret_safe(%21!)
+# End Function AIR: corpus.inlineCalls
+# Begin Function AIR: corpus.useGeneric:
+# Total AIR+Liveness bytes: 344B
+# AIR Instructions:         16 (144B)
+# AIR Extra Data:           22 (88B)
+# Liveness tomb_bits:       8B
+# Liveness Extra Data:      0 (0B)
+# Liveness special table:   0 (0B)
+  %0!= save_err_return_trace_index()
+  %1!= dbg_stmt(2:5)
+  %2!= dbg_var_val(<[3]u8, "\x03\t\x02".*>, "a")
+  %3!= dbg_stmt(3:5)
+  %4!= dbg_var_val(<[2]i64, .{ -3, 4 }>, "b")
+  %5!= dbg_stmt(4:19)
+  %7 = call(<fn ([]const u8) u8, (function 'generic__anon_66835')>, [<[]const u8, "\x03\t\x02"[0..3]>])
+  %8!= dbg_stmt(4:37)
+  %10 = call(<fn ([]const i64) i64, (function 'generic__anon_66841')>, [<[]const i64, &.{ -3, 4 }[0..2]>])
+  %11!= dbg_stmt(4:28)
+  %12 = intcast(i64, %7!)
+  %13 = add_safe(%12!, %10!)
+  %14!= dbg_stmt(4:5)
+  %15!= ret_safe(%13!)
+# End Function AIR: corpus.useGeneric
+# Begin Function AIR: corpus.Node.sum:
+# Total AIR+Liveness bytes: 844B
+# AIR Instructions:         48 (432B)
+# AIR Extra Data:           58 (232B)
+# Liveness tomb_bits:       24B
+# Liveness Extra Data:      7 (28B)
+# Liveness special table:   3 (24B)
+  %0 = arg(*const corpus.Node, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(2:9)
+  %3 = alloc(*i32)
+  %4!= store_safe(%3, <i32, 0>)
+  %5!= dbg_var_ptr(%3, "total")
+  %6!= dbg_stmt(3:9)
+  %7 = alloc(*?*const corpus.Node)
+  %8 = bitcast(?*const corpus.Node, %0!)
+  %9!= store_safe(%7, %8!)
+  %10!= dbg_var_ptr(%7, "cur")
+  %11!= block(void, {
+    %12!= loop(noreturn, {
+      %13!= block(void, {
+        %14!= dbg_stmt(4:16)
+        %15 = load(?*const corpus.Node, %7)
+        %16 = is_non_null(%15)
+        %42!= cond_br(%16!, poi {
+          %17 = optional_payload(*const corpus.Node, %15!)
+          %18 = alloc(**const corpus.Node)
+          %19!= store_safe(%18, %17)
+          %20 = bitcast(*const *const corpus.Node, %18!)
+          %21!= dbg_var_val(%17!, "n")
+          %23!= dbg_stmt(4:42)
+          %24 = load(i32, %3)
+          %25!= dbg_stmt(4:53)
+          %26 = load(*const corpus.Node, %20)
+          %27 = struct_field_ptr_index_0(*const i32, %26!)
+          %28 = load(i32, %27!)
+          %29 = add_wrap(%24!, %28!)
+          %30!= store_safe(%3, %29!)
+          %31!= dbg_stmt(4:54)
+          %32!= dbg_empty_stmt()
+          %34!= dbg_stmt(4:35)
+          %35 = load(*const corpus.Node, %20!)
+          %36 = struct_field_ptr_index_1(*const ?*corpus.Node, %35!)
+          %37 = load(?*corpus.Node, %36!)
+          %38 = bitcast(?*const corpus.Node, %37!)
+          %39!= store_safe(%7, %38!)
+          %40!= br(%13, @.void_value)
+        }, poi {
+          %7! %15!
+          %41!= br(%11, @.void_value)
+        })
+      })
+      %43!= repeat(%12)
+    })
+  } %7!)
+  %44!= dbg_stmt(5:9)
+  %45 = load(i32, %3!)
+  %46!= dbg_stmt(5:9)
+  %47!= ret_safe(%45!)
+# End Function AIR: corpus.Node.sum
+# Begin Function AIR: corpus.generic__anon_66841:
+# Total AIR+Liveness bytes: 1.37890625KiB
+# AIR Instructions:         68 (612B)
+# AIR Extra Data:           106 (424B)
+# Liveness tomb_bits:       40B
+# Liveness Extra Data:      40 (160B)
+# Liveness special table:   9 (72B)
+  %0 = arg([]const i64, 1)
+  %1!= save_err_return_trace_index()
+  %2 = alloc(*[]const i64)
+  %3!= store_safe(%2, %0!)
+  %4 = bitcast(*const []const i64, %2!)
+  %5!= dbg_stmt(2:5)
+  %6 = alloc(*i64)
+  %7!= dbg_stmt(2:24)
+  %8 = load([]const i64, %4)
+  %9 = slice_len(usize, %8)
+  %10 = cmp_lt(@.zero_usize, %9)
+  %13!= block(void, {
+    %14!= cond_br(%10!, likely {
+      %9!
+      %15!= br(%13, @.void_value)
+    }, cold {
+      %6! %4! %8!
+      %11!= call(<fn (usize, usize) noreturn, (function 'outOfBounds')>, [@.zero_usize, %9!])
+      %12!= unreach()
+    })
+  } %9! %10!)
+  %16 = slice_elem_ptr(*const i64, %8!, @.zero_usize)
+  %17 = load(i64, %16!)
+  %18!= store_safe(%6, %17!)
+  %19!= dbg_var_ptr(%6, "best")
+  %20 = alloc(*usize)
+  %21!= store_safe(%20, @.zero_usize)
+  %22!= dbg_stmt(3:15)
+  %23 = load([]const i64, %4!)
+  %24 = slice_ptr([*]const i64, %23)
+  %25 = ptr_add([*]const i64, %24!, @.one_usize)
+  %26 = slice_len(usize, %23)
+  %27 = cmp_lte(@.one_usize, %26)
+  %30!= block(void, {
+    %31!= cond_br(%27!, likely {
+      %32!= br(%30, @.void_value)
+    }, cold {
+      %20! %6! %25! %23!
+      %28!= call(<fn (usize, usize) noreturn, (function 'startGreaterThanEnd')>, [@.one_usize, %26!])
+      %29!= unreach()
+    })
+  } %27!)
+  %33 = sub(%26, @.one_usize)
+  %34 = slice_len(usize, %23!)
+  %35 = cmp_lte(%26, %34)
+  %38!= block(void, {
+    %39!= cond_br(%35!, likely {
+      %26! %34!
+      %40!= br(%38, @.void_value)
+    }, cold {
+      %33! %6! %25! %20!
+      %36!= call(<fn (usize, usize) noreturn, (function 'outOfBounds')>, [%26!, %34!])
+      %37!= unreach()
+    })
+  } %35! %34! %26!)
+  %41 = slice([]const i64, %25!, %33!)
+  %42 = slice_len(usize, %41)
+  %43!= block(void, {
+    %44!= loop(noreturn, {
+      %45 = load(usize, %20)
+      %46!= block(void, {
+        %47 = bitcast(u64, %45)
+        %48 = bitcast(u64, %42)
+        %49 = cmp_lt(%47!, %48!)
+        %60!= cond_br(%49!, poi {
+          %50 = slice_elem_val(%41, %45)
+          %51!= dbg_var_val(%50, "x")
+          %52!= dbg_stmt(3:26)
+          %53 = load(i64, %6)
+          %54 = max(%53!, %50!)
+          %55!= store_safe(%6, %54!)
+          %56!= dbg_stmt(3:45)
+          %57!= dbg_empty_stmt()
+          %58!= br(%46, @.void_value)
+        }, poi {
+          %41! %45! %42! %20!
+          %59!= br(%43, @.void_value)
+        })
+      })
+      %61 = add(%45!, @.one_usize)
+      %62!= store_safe(%20, %61!)
+      %63!= repeat(%44)
+    })
+  } %41! %42! %20!)
+  %64!= dbg_stmt(4:5)
+  %65 = load(i64, %6!)
+  %66!= dbg_stmt(4:5)
+  %67!= ret_safe(%65!)
+# End Function AIR: corpus.generic__anon_66841
+# Begin Function AIR: corpus.generic__anon_66835:
+# Total AIR+Liveness bytes: 1.37890625KiB
+# AIR Instructions:         68 (612B)
+# AIR Extra Data:           106 (424B)
+# Liveness tomb_bits:       40B
+# Liveness Extra Data:      40 (160B)
+# Liveness special table:   9 (72B)
+  %0 = arg([]const u8, 1)
+  %1!= save_err_return_trace_index()
+  %2 = alloc(*[]const u8)
+  %3!= store_safe(%2, %0!)
+  %4 = bitcast(*const []const u8, %2!)
+  %5!= dbg_stmt(2:5)
+  %6 = alloc(*u8)
+  %7!= dbg_stmt(2:24)
+  %8 = load([]const u8, %4)
+  %9 = slice_len(usize, %8)
+  %10 = cmp_lt(@.zero_usize, %9)
+  %13!= block(void, {
+    %14!= cond_br(%10!, likely {
+      %9!
+      %15!= br(%13, @.void_value)
+    }, cold {
+      %6! %4! %8!
+      %11!= call(<fn (usize, usize) noreturn, (function 'outOfBounds')>, [@.zero_usize, %9!])
+      %12!= unreach()
+    })
+  } %9! %10!)
+  %16 = slice_elem_ptr(*const u8, %8!, @.zero_usize)
+  %17 = load(u8, %16!)
+  %18!= store_safe(%6, %17!)
+  %19!= dbg_var_ptr(%6, "best")
+  %20 = alloc(*usize)
+  %21!= store_safe(%20, @.zero_usize)
+  %22!= dbg_stmt(3:15)
+  %23 = load([]const u8, %4!)
+  %24 = slice_ptr([*]const u8, %23)
+  %25 = ptr_add([*]const u8, %24!, @.one_usize)
+  %26 = slice_len(usize, %23)
+  %27 = cmp_lte(@.one_usize, %26)
+  %30!= block(void, {
+    %31!= cond_br(%27!, likely {
+      %32!= br(%30, @.void_value)
+    }, cold {
+      %20! %6! %25! %23!
+      %28!= call(<fn (usize, usize) noreturn, (function 'startGreaterThanEnd')>, [@.one_usize, %26!])
+      %29!= unreach()
+    })
+  } %27!)
+  %33 = sub(%26, @.one_usize)
+  %34 = slice_len(usize, %23!)
+  %35 = cmp_lte(%26, %34)
+  %38!= block(void, {
+    %39!= cond_br(%35!, likely {
+      %26! %34!
+      %40!= br(%38, @.void_value)
+    }, cold {
+      %33! %6! %25! %20!
+      %36!= call(<fn (usize, usize) noreturn, (function 'outOfBounds')>, [%26!, %34!])
+      %37!= unreach()
+    })
+  } %35! %34! %26!)
+  %41 = slice([]const u8, %25!, %33!)
+  %42 = slice_len(usize, %41)
+  %43!= block(void, {
+    %44!= loop(noreturn, {
+      %45 = load(usize, %20)
+      %46!= block(void, {
+        %47 = bitcast(u64, %45)
+        %48 = bitcast(u64, %42)
+        %49 = cmp_lt(%47!, %48!)
+        %60!= cond_br(%49!, poi {
+          %50 = slice_elem_val(%41, %45)
+          %51!= dbg_var_val(%50, "x")
+          %52!= dbg_stmt(3:26)
+          %53 = load(u8, %6)
+          %54 = max(%53!, %50!)
+          %55!= store_safe(%6, %54!)
+          %56!= dbg_stmt(3:45)
+          %57!= dbg_empty_stmt()
+          %58!= br(%46, @.void_value)
+        }, poi {
+          %41! %45! %42! %20!
+          %59!= br(%43, @.void_value)
+        })
+      })
+      %61 = add(%45!, @.one_usize)
+      %62!= store_safe(%20, %61!)
+      %63!= repeat(%44)
+    })
+  } %41! %42! %20!)
+  %64!= dbg_stmt(4:5)
+  %65 = load(u8, %6!)
+  %66!= dbg_stmt(4:5)
+  %67!= ret_safe(%65!)
+# End Function AIR: corpus.generic__anon_66835
+# Begin Function AIR: corpus.packedOps:
+# Total AIR+Liveness bytes: 492B
+# AIR Instructions:         28 (252B)
+# AIR Extra Data:           30 (120B)
+# Liveness tomb_bits:       16B
+# Liveness Extra Data:      0 (0B)
+# Liveness special table:   0 (0B)
+  %0 = arg(corpus.Packed, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(2:5)
+  %3 = alloc(*corpus.Packed)
+  %4!= store(%3, %0!)
+  %6!= dbg_var_ptr(%3, "q")
+  %7!= dbg_stmt(3:6)
+  %8 = struct_field_ptr_index_1(*align(2:4:2) u8, %3)
+  %9 = load(u8, %8)
+  %10!= dbg_stmt(3:14)
+  %11 = struct_field_ptr_index_0(*align(2:0:2) u4, %3)
+  %12 = load(u4, %11!)
+  %13 = intcast(u8, %12!)
+  %14 = add_wrap(%9!, %13!)
+  %15!= store_safe(%8!, %14!)
+  %16!= dbg_stmt(4:6)
+  %17 = struct_field_ptr_index_2(*align(2:12:2) u4, %3)
+  %18!= dbg_stmt(4:22)
+  %19 = struct_field_ptr_index_1(*align(2:4:2) u8, %3)
+  %20 = load(u8, %19!)
+  %21!= dbg_stmt(4:11)
+  %22 = trunc(u4, %20!)
+  %23!= store_safe(%17!, %22!)
+  %24!= dbg_stmt(5:5)
+  %25 = load(corpus.Packed, %3!)
+  %26!= dbg_stmt(5:5)
+  %27!= ret_safe(%25!)
+# End Function AIR: corpus.packedOps
+# Begin Function AIR: corpus.loops:
+# Total AIR+Liveness bytes: 1.4208984375KiB
+# AIR Instructions:         79 (711B)
+# AIR Extra Data:           103 (412B)
+# Liveness tomb_bits:       40B
+# Liveness Extra Data:      25 (100B)
+# Liveness special table:   11 (88B)
+  %0 = arg(u32, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(2:5)
+  %3 = alloc(*u32)
+  %4!= store_safe(%3, <u32, 0>)
+  %5!= dbg_var_ptr(%3, "i")
+  %6!= dbg_stmt(3:5)
+  %7 = alloc(*u32)
+  %8!= store_safe(%7, <u32, 0>)
+  %9!= dbg_var_ptr(%7, "acc")
+  %10!= block(void, {
+    %11!= loop(noreturn, {
+      %12!= block(void, {
+        %13!= dbg_stmt(4:19)
+        %14 = load(u32, %3)
+        %15 = cmp_lt(%14!, %0)
+        %73!= cond_br(%15!, poi {
+          %16!= block(void, {
+            %17!= dbg_stmt(5:9)
+            %18 = alloc(*u32)
+            %19!= store_safe(%18, <u32, 0>)
+            %20!= dbg_var_ptr(%18, "j")
+            %21!= block(void, {
+              %22!= loop(noreturn, {
+                %23!= block(void, {
+                  %24!= dbg_stmt(6:16)
+                  %25 = load(u32, %18)
+                  %26 = cmp_lt(%25!, <u32, 4>)
+                  %61!= cond_br(%26!, poi {
+                    %28!= dbg_stmt(7:17)
+                    %29!= block(void, {
+                      %30 = load(u32, %18)
+                      %31 = load(u32, %3)
+                      %32 = cmp_eq(%30!, %31!)
+                      %35!= cond_br(%32!, poi {
+                        %18!
+                        %33!= br(%16, @.void_value)
+                      }, poi {
+                        %34!= br(%29, @.void_value)
+                      })
+                    })
+                    %36!= dbg_stmt(8:17)
+                    %37!= block(void, {
+                      %38 = load(u32, %7)
+                      %39 = cmp_gt(%38!, <u32, 1000>)
+                      %42!= cond_br(%39!, poi {
+                        %0! %3! %18!
+                        %40!= br(%10, @.void_value)
+                      }, poi {
+                        %41!= br(%37, @.void_value)
+                      })
+                    })
+                    %43!= dbg_stmt(9:13)
+                    %44 = load(u32, %7)
+                    %45 = load(u32, %3)
+                    %46 = load(u32, %18)
+                    %47!= dbg_stmt(9:23)
+                    %48 = mul_safe(%45!, %46!)
+                    %49 = add_wrap(%44!, %48!)
+                    %50!= store_safe(%7, %49!)
+                    %51!= dbg_stmt(10:9)
+                    %52!= dbg_empty_stmt()
+                    %54!= dbg_stmt(6:26)
+                    %55 = load(u32, %18)
+                    %56!= dbg_stmt(6:28)
+                    %57 = add_safe(%55!, <u32, 1>)
+                    %58!= store_safe(%18, %57!)
+                    %59!= br(%23, @.void_value)
+                  }, poi {
+                    %18!
+                    %60!= br(%21, @.void_value)
+                  })
+                })
+                %62!= repeat(%22)
+              })
+            } %18!)
+            %63!= dbg_stmt(11:5)
+            %64!= dbg_empty_stmt()
+            %65!= br(%16, @.void_value)
+          })
+          %66!= dbg_stmt(4:29)
+          %67 = load(u32, %3)
+          %68!= dbg_stmt(4:31)
+          %69 = add_safe(%67!, <u32, 1>)
+          %70!= store_safe(%3, %69!)
+          %71!= br(%12, @.void_value)
+        }, poi {
+          %0! %3!
+          %72!= br(%10, @.void_value)
+        })
+      })
+      %74!= repeat(%11)
+    })
+  } %0! %3!)
+  %75!= dbg_stmt(12:5)
+  %76 = load(u32, %7!)
+  %77!= dbg_stmt(12:5)
+  %78!= ret_safe(%76!)
+# End Function AIR: corpus.loops
+# Begin Function AIR: corpus.switches:
+# Total AIR+Liveness bytes: 443B
+# AIR Instructions:         15 (135B)
+# AIR Extra Data:           37 (148B)
+# Liveness tomb_bits:       8B
+# Liveness Extra Data:      8 (32B)
+# Liveness special table:   2 (16B)
+  %0 = arg(u8, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(2:20)
+  %3 = block(u8, {
+    %12!= switch_br(%0, [@.zero_u8] => {
+        %0!
+        %4!= br(%3, @.one_u8)
+      }, [@.one_u8...<u8, 9>] => {
+        %5!= dbg_stmt(4:20)
+        %6 = mul_safe(%0!, <u8, 2>)
+        %7!= br(%3, %6!)
+      }, [<u8, 97>, <u8, 98>, <u8, 99>] => {
+        %0!
+        %8!= br(%3, <u8, 3>)
+      }, else => {
+        %9!= dbg_var_val(%0, "v")
+        %10 = sub_wrap(%0!, @.one_u8)
+        %11!= br(%3, %10!)
+      }
+    )
+  } %0!)
+  %13!= dbg_stmt(2:5)
+  %14!= ret_safe(%3!)
+# End Function AIR: corpus.switches
+# Begin Function AIR: corpus.area:
+# Total AIR+Liveness bytes: 709B
+# AIR Instructions:         33 (297B)
+# AIR Extra Data:           58 (232B)
+# Liveness tomb_bits:       24B
+# Liveness Extra Data:      9 (36B)
+# Liveness special table:   2 (16B)
+  %0 = arg(corpus.Shape, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(2:20)
+  %4 = get_union_tag(@typeInfo(corpus.Shape).@"union".tag_type.?, %0)
+  %3 = block(f32, {
+    %30!= switch_br(%4!, [<@typeInfo(corpus.Shape).@"union".tag_type.?, .circle>] => {
+        %5 = struct_field_val(%0!, 0)
+        %6!= dbg_var_val(%5, "r")
+        %7!= dbg_stmt(3:32)
+        %8 = mul(<f32, 3.141590118408203>, %5)
+        %9!= dbg_stmt(3:36)
+        %10 = mul(%8!, %5!)
+        %11!= br(%3, %10!)
+      }, [<@typeInfo(corpus.Shape).@"union".tag_type.?, .rect>] => {
+        %12 = struct_field_val(%0!, 1)
+        %13 = alloc(*corpus.Shape__struct_66661)
+        %14!= store_safe(%13, %12)
+        %15 = bitcast(*const corpus.Shape__struct_66661, %13!)
+        %16!= dbg_var_val(%12!, "r")
+        %17!= dbg_stmt(4:23)
+        %18 = struct_field_ptr_index_0(*const f32, %15)
+        %19 = load(f32, %18!)
+        %20!= dbg_stmt(4:29)
+        %21 = struct_field_ptr_index_1(*const f32, %15!)
+        %22 = load(f32, %21!)
+        %23!= dbg_stmt(4:26)
+        %24 = mul(%19!, %22!)
+        %25!= br(%3, %24!)
+      }, [<@typeInfo(corpus.Shape).@"union".tag_type.?, .none>] => {
+        %0!
+        %26!= br(%3, <f32, 0>)
+      }, else .cold => {
+        %0!
+        %27!= dbg_stmt(2:20)
+        %28!= call(<fn () noreturn, (function 'corruptSwitch')>, [])
+        %29!= unreach()
+      }
+    )
+  } %4! %0!)
+  %31!= dbg_stmt(2:5)
+  %32!= ret_safe(%3!)
+# End Function AIR: corpus.area
+# Begin Function AIR: corpus.tryChain:
+# Total AIR+Liveness bytes: 944B
+# AIR Instructions:         44 (396B)
+# AIR Extra Data:           70 (280B)
+# Liveness tomb_bits:       24B
+# Liveness Extra Data:      19 (76B)
+# Liveness special table:   8 (64B)
+  %0 = arg(u32, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(3:26)
+  %3 = call(<fn (u32) error{Bad,Worse}!u32, (function 'mayFail')>, [%0])
+  %17 = try(%3, {
+    %4 = unwrap_errunion_err(error{Bad,Worse}, %3!)
+    %5!= dbg_stmt(2:39)
+    %7!= call(<fn (u32) void, (function 'doNotOptimizeAway__anon_66863')>, [%0!])
+    %8!= dbg_stmt(3:15)
+    %9 = wrap_errunion_err(error{Bad,Worse}!u32, %4!)
+    %10 = is_non_err(%9)
+    %12!= block(void, {
+      %13!= cond_br(%10!, likely {
+        %14!= br(%12, @.void_value)
+      }, unlikely {
+        %11!= call_never_tail(<noinline fn () void, (function 'returnError')>, [])
+        %15!= br(%12, @.void_value)
+      })
+    } %10!)
+    %16!= ret_safe(%9!)
+  } %3!)
+  %18!= dbg_var_val(%17, "a")
+  %19!= dbg_stmt(4:23)
+  %20 = call(<fn (u32) error{Bad,Worse}!u32, (function 'mayFail')>, [%17!])
+  %34 = try(%20, {
+    %21 = unwrap_errunion_err(error{Bad,Worse}, %20!)
+    %22!= dbg_stmt(2:39)
+    %24!= call(<fn (u32) void, (function 'doNotOptimizeAway__anon_66863')>, [%0!])
+    %25!= dbg_stmt(4:12)
+    %26 = wrap_errunion_err(error{Bad,Worse}!u32, %21!)
+    %27 = is_non_err(%26)
+    %29!= block(void, {
+      %30!= cond_br(%27!, likely {
+        %31!= br(%29, @.void_value)
+      }, unlikely {
+        %28!= call_never_tail(<noinline fn () void, (function 'returnError')>, [])
+        %32!= br(%29, @.void_value)
+      })
+    } %27!)
+    %33!= ret_safe(%26!)
+  } %0! %20!)
+  %35!= dbg_stmt(4:5)
+  %36 = wrap_errunion_payload(error{Bad,Worse}!u32, %34!)
+  %37 = is_non_err(%36)
+  %39!= block(void, {
+    %40!= cond_br(%37!, likely {
+      %41!= br(%39, @.void_value)
+    }, unlikely {
+      %38!= call_never_tail(<noinline fn () void, (function 'returnError')>, [])
+      %42!= br(%39, @.void_value)
+    })
+  } %37!)
+  %43!= ret_safe(%36!)
+# End Function AIR: corpus.tryChain
+# Begin Function AIR: corpus.errors:
+# Total AIR+Liveness bytes: 688B
+# AIR Instructions:         32 (288B)
+# AIR Extra Data:           53 (212B)
+# Liveness tomb_bits:       16B
+# Liveness Extra Data:      11 (44B)
+# Liveness special table:   3 (24B)
+  %0 = arg(u32, 0)
+  %1 = save_err_return_trace_index()
+  %2!= dbg_stmt(2:22)
+  %3 = call(<fn (u32) error{Bad,Worse}!u32, (function 'mayFail')>, [%0!])
+  %4!= dbg_stmt(2:15)
+  %6 = is_non_err(%3)
+  %5 = block(u32, {
+    %28!= cond_br(%6!, poi {
+      %1!
+      %7 = unwrap_errunion_payload(u32, %3!)
+      %8!= br(%5, %7!)
+    }, unlikely poi {
+      %9 = unwrap_errunion_err(error{Bad,Worse}, %3!)
+      %27!= switch_br(%9!, [<error{Bad,Worse}, error.Bad>] => {
+          %10!= save_err_return_trace_index()
+          %11!= dbg_stmt(3:22)
+          %12 = err_return_trace(*builtin.StackTrace)
+          %13 = struct_field_ptr_index_0(*usize, %12!)
+          %14!= store(%13!, %1!)
+          %15!= dbg_stmt(3:22)
+          %16!= ret_safe(<u32, 1>)
+        }, [<error{Bad,Worse}, error.Worse>] => {
+          %17!= save_err_return_trace_index()
+          %18!= dbg_stmt(4:24)
+          %19 = err_return_trace(*builtin.StackTrace)
+          %20 = struct_field_ptr_index_0(*usize, %19!)
+          %21!= store(%20!, %1!)
+          %22!= dbg_stmt(4:24)
+          %23!= ret_safe(<u32, 2>)
+        }, else .cold => {
+          %1!
+          %24!= dbg_stmt(2:15)
+          %25!= call(<fn () noreturn, (function 'corruptSwitch')>, [])
+          %26!= unreach()
+        }
+      )
+    })
+  } %1! %6! %3!)
+  %29!= dbg_var_val(%5, "a")
+  %30!= dbg_stmt(6:5)
+  %31!= ret_safe(%5!)
+# End Function AIR: corpus.errors
+# Begin Function AIR: corpus.mayFail:
+# Total AIR+Liveness bytes: 661B
+# AIR Instructions:         29 (261B)
+# AIR Extra Data:           46 (184B)
+# Liveness tomb_bits:       16B
+# Liveness Extra Data:      12 (48B)
+# Liveness special table:   6 (48B)
+  %0 = arg(u32, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(2:9)
+  %3!= block(void, {
+    %4 = cmp_eq(%0, <u32, 0>)
+    %9!= cond_br(%4!, poi {
+      %0!
+      %5!= dbg_stmt(2:17)
+      %6!= call_never_tail(<noinline fn () void, (function 'returnError')>, [])
+      %7!= ret_safe(<error{Bad,Worse}!u32, error.Bad>)
+    }, poi {
+      %8!= br(%3, @.void_value)
+    })
+  })
+  %10!= dbg_stmt(3:9)
+  %11!= block(void, {
+    %12 = cmp_gt(%0, <u32, 100>)
+    %17!= cond_br(%12!, poi {
+      %0!
+      %13!= dbg_stmt(3:18)
+      %14!= call_never_tail(<noinline fn () void, (function 'returnError')>, [])
+      %15!= ret_safe(<error{Bad,Worse}!u32, error.Worse>)
+    }, poi {
+      %16!= br(%11, @.void_value)
+    })
+  })
+  %18!= dbg_stmt(4:14)
+  %19 = mul_safe(%0!, <u32, 2>)
+  %20!= dbg_stmt(4:5)
+  %21 = wrap_errunion_payload(error{Bad,Worse}!u32, %19!)
+  %22 = is_non_err(%21)
+  %24!= block(void, {
+    %25!= cond_br(%22!, likely {
+      %26!= br(%24, @.void_value)
+    }, unlikely {
+      %23!= call_never_tail(<noinline fn () void, (function 'returnError')>, [])
+      %27!= br(%24, @.void_value)
+    })
+  } %22!)
+  %28!= ret_safe(%21!)
+# End Function AIR: corpus.mayFail
+# Begin Function AIR: corpus.optionals:
+# Total AIR+Liveness bytes: 569B
+# AIR Instructions:         25 (225B)
+# AIR Extra Data:           38 (152B)
+# Liveness tomb_bits:       16B
+# Liveness Extra Data:      10 (40B)
+# Liveness special table:   4 (32B)
+  %0 = arg(?*const u32, 0)
+  %1 = arg(?u32, 1)
+  %2!= save_err_return_trace_index()
+  %3!= dbg_stmt(2:19)
+  %4 = block(u32, {
+    %5 = is_non_null(%0)
+    %11!= cond_br(%5!, poi {
+      %6 = optional_payload(*const u32, %0!)
+      %7!= dbg_var_val(%6, "p")
+      %8 = load(u32, %6!)
+      %9!= br(%4, %8!)
+    }, poi {
+      %0!
+      %10!= br(%4, <u32, 0>)
+    })
+  } %0!)
+  %12!= dbg_var_val(%4, "a")
+  %13!= dbg_stmt(3:5)
+  %14 = block(u32, {
+    %15 = is_non_null(%1)
+    %19!= cond_br(%15!, poi {
+      %16 = optional_payload(u32, %1!)
+      %17!= br(%14, %16!)
+    }, poi {
+      %1!
+      %18!= br(%14, <u32, 5>)
+    })
+  } %1!)
+  %20!= dbg_var_val(%14, "b")
+  %21!= dbg_stmt(4:14)
+  %22 = add_safe(%4!, %14!)
+  %23!= dbg_stmt(4:5)
+  %24!= ret_safe(%22!)
+# End Function AIR: corpus.optionals
+# Begin Function AIR: corpus.arrays:
+# Total AIR+Liveness bytes: 923B
+# AIR Instructions:         51 (459B)
+# AIR Extra Data:           67 (268B)
+# Liveness tomb_bits:       32B
+# Liveness Extra Data:      9 (36B)
+# Liveness special table:   3 (24B)
+  %0!= save_err_return_trace_index()
+  %1!= dbg_stmt(2:5)
+  %2 = alloc(*[4]u32)
+  %3!= store(%2, <[4]u32, .{ 1, 2, 3, 4 }>)
+  %5!= dbg_var_ptr(%2, "a")
+  %6!= dbg_stmt(3:5)
+  %7 = load([4]u32, %2)
+  %8 = alloc(*[4]u32)
+  %9!= store_safe(%8, %7)
+  %10 = bitcast(*const [4]u32, %8!)
+  %11!= dbg_var_val(%7!, "b")
+  %12!= dbg_stmt(4:6)
+  %13 = ptr_elem_ptr(*u32, %2, @.one_usize)
+  %14!= dbg_stmt(4:13)
+  %15 = ptr_elem_ptr(*const u32, %10!, <usize, 3>)
+  %16 = load(u32, %15!)
+  %17!= store_safe(%13!, %16!)
+  %18!= dbg_stmt(5:5)
+  %19 = alloc(*u32)
+  %20!= store_safe(%19, <u32, 0>)
+  %21!= dbg_var_ptr(%19, "total")
+  %22 = alloc(*usize)
+  %23!= store_safe(%22, @.zero_usize)
+  %24!= dbg_stmt(6:10)
+  %25 = load([4]u32, %2!)
+  %26!= block(void, {
+    %27!= loop(noreturn, {
+      %28 = load(usize, %22)
+      %29!= block(void, {
+        %30 = bitcast(u64, %28)
+        %31 = cmp_lt(%30!, <u64, 4>)
+        %43!= cond_br(%31!, poi {
+          %32 = array_elem_val(%25, %28)
+          %33!= dbg_var_val(%32, "v")
+          %34!= dbg_stmt(6:17)
+          %35 = load(u32, %19)
+          %36!= dbg_stmt(6:23)
+          %37 = add_safe(%35!, %32!)
+          %38!= store_safe(%19, %37!)
+          %39!= dbg_stmt(6:26)
+          %40!= dbg_empty_stmt()
+          %41!= br(%29, @.void_value)
+        }, poi {
+          %28! %22! %25!
+          %42!= br(%26, @.void_value)
+        })
+      })
+      %44 = add(%28!, @.one_usize)
+      %45!= store_safe(%22, %44!)
+      %46!= repeat(%27)
+    })
+  } %22! %25!)
+  %47!= dbg_stmt(7:5)
+  %48 = load(u32, %19!)
+  %49!= dbg_stmt(7:5)
+  %50!= ret_safe(%48!)
+# End Function AIR: corpus.arrays
+# Begin Function AIR: corpus.slices:
+# Total AIR+Liveness bytes: 2.1357421875KiB
+# AIR Instructions:         115 (1.0107421875KiB)
+# AIR Extra Data:           167 (668B)
+# Liveness tomb_bits:       64B
+# Liveness Extra Data:      53 (212B)
+# Liveness special table:   13 (104B)
+  %0 = arg([]u8, 0)
+  %1 = arg(usize, 1)
+  %2!= save_err_return_trace_index()
+  %3 = alloc(*[]u8)
+  %4!= store_safe(%3, %0!)
+  %5 = bitcast(*const []u8, %3!)
+  %6!= dbg_stmt(2:9)
+  %7!= block(void, {
+    %8!= dbg_stmt(2:12)
+    %9 = ptr_slice_len_ptr(*const usize, %5)
+    %10 = load(usize, %9!)
+    %11 = bitcast(u64, %10!)
+    %12 = cmp_eq(%11!, <u64, 0>)
+    %16!= cond_br(%12!, poi {
+      %1! %5!
+      %13!= dbg_stmt(2:23)
+      %14!= ret_safe(@.zero_u8)
+    }, poi {
+      %15!= br(%7, @.void_value)
+    })
+  })
+  %17!= dbg_stmt(3:28)
+  %18 = ptr_slice_len_ptr(*const usize, %5)
+  %19 = load(usize, %18!)
+  %20!= dbg_stmt(3:23)
+  %21 = cmp_neq(%19, @.zero_usize)
+  %24!= block(void, {
+    %25!= cond_br(%21!, likely {
+      %26!= br(%24, @.void_value)
+    }, cold {
+      %19! %5! %1!
+      %22!= call(<fn () noreturn, (function 'divideByZero')>, [])
+      %23!= unreach()
+    })
+  } %21!)
+  %27 = rem(%1!, %19!)
+  %28!= dbg_stmt(3:18)
+  %29 = load([]u8, %5)
+  %30 = slice_ptr([*]u8, %29)
+  %31 = ptr_add([*]u8, %30!, %27)
+  %32 = slice_len(usize, %29)
+  %33 = cmp_lte(%27, %32)
+  %36!= block(void, {
+    %37!= cond_br(%33!, likely {
+      %38!= br(%36, @.void_value)
+    }, cold {
+      %5! %31! %29!
+      %34!= call(<fn (usize, usize) noreturn, (function 'startGreaterThanEnd')>, [%27!, %32!])
+      %35!= unreach()
+    })
+  } %33!)
+  %39 = sub(%32, %27!)
+  %40 = slice_len(usize, %29!)
+  %41 = cmp_lte(%32, %40)
+  %44!= block(void, {
+    %45!= cond_br(%41!, likely {
+      %32! %40!
+      %46!= br(%44, @.void_value)
+    }, cold {
+      %5! %31! %39!
+      %42!= call(<fn (usize, usize) noreturn, (function 'outOfBounds')>, [%32!, %40!])
+      %43!= unreach()
+    })
+  } %32! %40! %41!)
+  %47 = slice([]u8, %31!, %39!)
+  %48!= dbg_var_val(%47, "s")
+  %49!= dbg_stmt(4:5)
+  %50 = alloc(*u8)
+  %51!= store_safe(%50, @.zero_u8)
+  %52!= dbg_var_ptr(%50, "sum")
+  %53 = alloc(*usize)
+  %54!= store_safe(%53, @.zero_usize)
+  %55!= dbg_stmt(5:13)
+  %56 = slice_len(usize, %47)
+  %57!= block(void, {
+    %58!= loop(noreturn, {
+      %59 = load(usize, %53)
+      %60!= block(void, {
+        %61 = bitcast(u64, %59)
+        %62 = bitcast(u64, %56)
+        %63 = cmp_lt(%61!, %62!)
+        %78!= cond_br(%63!, poi {
+          %64 = slice_elem_val(%47, %59)
+          %65!= dbg_var_val(%64, "x")
+          %66!= dbg_var_val(%59, "i")
+          %67!= dbg_stmt(5:25)
+          %68 = load(u8, %50)
+          %69!= dbg_stmt(5:46)
+          %70 = trunc(u8, %59)
+          %71 = add_wrap(%64!, %70!)
+          %72 = add_wrap(%68!, %71!)
+          %73!= store_safe(%50, %72!)
+          %74!= dbg_stmt(5:58)
+          %75!= dbg_empty_stmt()
+          %76!= br(%60, @.void_value)
+        }, poi {
+          %47! %53! %59! %56!
+          %77!= br(%57, @.void_value)
+        })
+      })
+      %79 = add(%59!, @.one_usize)
+      %80!= store_safe(%53, %79!)
+      %81!= repeat(%58)
+    })
+  } %47! %53! %56!)
+  %82!= dbg_stmt(6:28)
+  %83 = ptr_slice_len_ptr(*const usize, %5)
+  %84 = load(usize, %83!)
+  %85 = bitcast(u64, %84!)
+  %86 = min(<u64, 2>, %85!)
+  %87 = intcast(u2, %86!)
+  %88!= dbg_stmt(6:16)
+  %89 = load([]u8, %5)
+  %90 = slice_ptr([*]u8, %89)
+  %91 = ptr_add([*]u8, %90!, @.zero_usize)
+  %92 = intcast(usize, %87!)
+  %93 = sub(%92, @.zero_usize)
+  %94 = slice_len(usize, %89!)
+  %95 = cmp_lte(%92, %94)
+  %98!= block(void, {
+    %99!= cond_br(%95!, likely {
+      %94! %92!
+      %100!= br(%98, @.void_value)
+    }, cold {
+      %93! %5! %50! %91!
+      %96!= call(<fn (usize, usize) noreturn, (function 'outOfBounds')>, [%92!, %94!])
+      %97!= unreach()
+    })
+  } %95! %94! %92!)
+  %101 = slice([]u8, %91!, %93!)
+  %102!= slice_len(usize, %101)
+  %103!= memset_safe(%101!, <u8, 7>)
+  %104!= dbg_stmt(7:5)
+  %105 = load(u8, %50!)
+  %106!= dbg_stmt(7:22)
+  %107 = ptr_slice_ptr_ptr(*const [*]u8, %5!)
+  %108!= dbg_stmt(7:26)
+  %109 = load([*]u8, %107!)
+  %110 = ptr_elem_ptr(*u8, %109!, @.zero_usize)
+  %111 = load(u8, %110!)
+  %112 = add_wrap(%105!, %111!)
+  %113!= dbg_stmt(7:5)
+  %114!= ret_safe(%112!)
+# End Function AIR: corpus.slices
+# Begin Function AIR: corpus.casts:
+# Total AIR+Liveness bytes: 900B
+# AIR Instructions:         48 (432B)
+# AIR Extra Data:           64 (256B)
+# Liveness tomb_bits:       24B
+# Liveness Extra Data:      13 (52B)
+# Liveness special table:   4 (32B)
+  %0 = arg(i64, 0)
+  %1 = arg(f32, 1)
+  %2!= save_err_return_trace_index()
+  %3!= dbg_stmt(2:5)
+  %4 = bit_and(%0, <i64, 255>)
+  %5!= dbg_stmt(2:20)
+  %6 = intcast_safe(i32, %4!)
+  %7!= dbg_var_val(%6, "a")
+  %8!= dbg_stmt(3:5)
+  %9 = bitcast(u64, %0!)
+  %10!= dbg_stmt(3:20)
+  %11 = trunc(u16, %9!)
+  %12!= dbg_var_val(%11, "b")
+  %13!= dbg_stmt(4:20)
+  %14 = block(i32, {
+    %32 = cmp_lte(%1, <f32, -2147483904>)
+    %33 = cmp_gte(%1, <f32, 2147483648>)
+    %34 = bool_or(%32!, %33!)
+    %35!= cond_br(%34!, cold {
+      %6! %1! %11!
+      %36!= call(<fn () noreturn, (function 'integerPartOutOfBounds')>, [])
+      %37!= unreach()
+    }, {
+      %38 = int_from_float(i32, %1!)
+      %39!= br(%14, %38!)
+    })
+  } %1!)
+  %15!= dbg_var_val(%14, "c")
+  %16!= dbg_stmt(5:20)
+  %17 = float_from_int(f32, %6)
+  %18!= dbg_var_val(%17, "d")
+  %19!= dbg_stmt(6:5)
+  %20 = add_wrap(%6!, %14!)
+  %21 = bitcast(u32, %20!)
+  %22 = intcast(u32, %11!)
+  %23 = add_wrap(%21!, %22!)
+  %24 = abs(f32, %17!)
+  %25!= dbg_stmt(6:66)
+  %26 = block(u32, {
+    %40 = cmp_lte(%24, <f32, -1>)
+    %41 = cmp_gte(%24, <f32, 4294967296>)
+    %42 = bool_or(%40!, %41!)
+    %43!= cond_br(%42!, cold {
+      %24! %23!
+      %44!= call(<fn () noreturn, (function 'integerPartOutOfBounds')>, [])
+      %45!= unreach()
+    }, {
+      %46 = int_from_float(u32, %24!)
+      %47!= br(%26, %46!)
+    })
+  } %24!)
+  %27 = add_wrap(%23!, %26!)
+  %28!= dbg_stmt(6:12)
+  %29 = trunc(u8, %27!)
+  %30!= dbg_stmt(6:5)
+  %31!= ret_safe(%29!)
+# End Function AIR: corpus.casts
+# Begin Function AIR: corpus.bits:
+# Total AIR+Liveness bytes: 388B
+# AIR Instructions:         20 (180B)
+# AIR Extra Data:           22 (88B)
+# Liveness tomb_bits:       16B
+# Liveness Extra Data:      0 (0B)
+# Liveness special table:   0 (0B)
+  %0 = arg(u64, 0)
+  %1!= save_err_return_trace_index()
+  %2!= dbg_stmt(2:5)
+  %3 = popcount(u7, %0)
+  %4 = clz(u7, %0)
+  %5!= dbg_stmt(2:25)
+  %6 = add_safe(%3!, %4!)
+  %7 = ctz(u7, %0)
+  %8!= dbg_stmt(2:35)
+  %9 = add_safe(%6!, %7!)
+  %10 = byte_swap(u64, %0)
+  %11 = bit_reverse(u64, %0!)
+  %12 = xor(%10!, %11!)
+  %13!= dbg_stmt(2:56)
+  %14 = trunc(u32, %12!)
+  %15!= dbg_stmt(2:45)
+  %16 = intcast(u32, %9!)
+  %17 = add_safe(%16!, %14!)
+  %18!= dbg_stmt(2:5)
+  %19!= ret_safe(%17!)
+# End Function AIR: corpus.bits
+# Begin Function AIR: corpus.floats:
+# Total AIR+Liveness bytes: 370B
+# AIR Instructions:         18 (162B)
+# AIR Extra Data:           22 (88B)
+# Liveness tomb_bits:       16B
+# Liveness Extra Data:      0 (0B)
+# Liveness special table:   0 (0B)
+  %0 = arg(f64, 0)
+  %1 = arg(f32, 1)
+  %2!= save_err_return_trace_index()
+  %3!= dbg_stmt(2:5)
+  %4 = sqrt(%0)
+  %5 = fpext(f64, %1!)
+  %6!= dbg_stmt(2:35)
+  %7 = mul(%5!, <f64, 0.5>)
+  %8!= dbg_stmt(2:21)
+  %9 = add(%4!, %7!)
+  %10 = floor(%0)
+  %11!= dbg_stmt(2:41)
+  %12 = sub(%9!, %10!)
+  %13 = mul_add(%0, %0!, <f64, 1>)
+  %14!= dbg_stmt(2:53)
+  %15 = add(%12!, %13!)
+  %16!= dbg_stmt(2:5)
+  %17!= ret_safe(%15!)
+# End Function AIR: corpus.floats
+# Begin Function AIR: corpus.arith:
+# Total AIR+Liveness bytes: 1002B
+# AIR Instructions:         54 (486B)
+# AIR Extra Data:           71 (284B)
+# Liveness tomb_bits:       32B
+# Liveness Extra Data:      16 (64B)
+# Liveness special table:   4 (32B)
+  %0 = arg(u32, 0)
+  %1 = arg(u32, 1)
+  %2!= save_err_return_trace_index()
+  %3!= dbg_stmt(2:5)
+  %4 = add_wrap(%0, %1)
+  %5!= dbg_var_val(%4, "s")
+  %6!= dbg_stmt(3:5)
+  %7 = sub_sat(%0, %1)
+  %8!= dbg_var_val(%7, "d")
+  %9!= dbg_stmt(4:5)
+  %10 = mul_with_overflow(struct { u32, u1 }, %0, %1)
+  %11 = alloc(*struct { u32, u1 })
+  %12!= store_safe(%11, %10)
+  %13 = bitcast(*const struct { u32, u1 }, %11!)
+  %14!= dbg_var_val(%10!, "p")
+  %15!= dbg_stmt(5:5)
+  %16 = xor(%4!, %7!)
+  %17!= dbg_stmt(5:21)
+  %18 = struct_field_ptr_index_0(*const u32, %13)
+  %19 = load(u32, %18!)
+  %20 = xor(%16!, %19!)
+  %21!= dbg_stmt(5:37)
+  %22 = struct_field_ptr_index_1(*const u1, %13!)
+  %23 = load(u1, %22!)
+  %24 = intcast(u32, %23!)
+  %25 = xor(%20!, %24!)
+  %26 = bit_or(%1, <u32, 1>)
+  %27!= dbg_stmt(5:47)
+  %28 = cmp_neq(%26, <u32, 0>)
+  %31!= block(void, {
+    %32!= cond_br(%28!, likely {
+      %33!= br(%31, @.void_value)
+    }, cold {
+      %26! %1! %25! %0!
+      %29!= call(<fn () noreturn, (function 'divideByZero')>, [])
+      %30!= unreach()
+    })
+  } %28!)
+  %34 = div_trunc(%0, %26!)
+  %35 = xor(%25!, %34!)
+  %36 = bit_or(%1, <u32, 1>)
+  %37!= dbg_stmt(5:63)
+  %38 = cmp_neq(%36, <u32, 0>)
+  %41!= block(void, {
+    %42!= cond_br(%38!, likely {
+      %43!= br(%41, @.void_value)
+    }, cold {
+      %1! %35! %0! %36!
+      %39!= call(<fn () noreturn, (function 'divideByZero')>, [])
+      %40!= unreach()
+    })
+  } %38!)
+  %44 = rem(%0, %36!)
+  %45 = xor(%35!, %44!)
+  %46!= dbg_stmt(5:79)
+  %47 = shl(%0!, <u5, 3>)
+  %48 = xor(%45!, %47!)
+  %49!= dbg_stmt(5:90)
+  %50 = shr(%1!, <u5, 2>)
+  %51 = xor(%48!, %50!)
+  %52!= dbg_stmt(5:5)
+  %53!= ret_safe(%51!)
+# End Function AIR: corpus.arith
