@@ -1167,10 +1167,11 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
     // What the callee writes only on the paths that succeed is, on the error path of the caller's `try`, still what it was.
     var restores: std.ArrayList(check.Restore) = .empty;
     if (r.ty.kind(inst.ty) == .error_union) for (s.writes) |w| {
-        if (w.on_fail or w.into.kind == .object) continue;
+        if (w.on_fail) continue;
         const got = try resolve(r, st, w.into, args, tys, false);
         const pl = got.place orelse continue;
-        try restores.append(r.arena, .{ .place = pl, .val = try r.readLeaf(st, pl, .none, false) });
+        const is_obj = w.into.kind == .object;
+        try restores.append(r.arena, .{ .place = pl, .val = if (is_obj) .{ .ids = r.objAt(st, pl) } else try r.readLeaf(st, pl, .none, false), .obj = is_obj });
     };
     if (restores.items.len != 0) try r.restores.put(r.arena, inst.id, restores.items) else _ = r.restores.remove(inst.id);
     var killed: Set = .empty;

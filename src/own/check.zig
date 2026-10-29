@@ -394,7 +394,7 @@ pub const Pending = struct { loc: schema.LocId, ident: dom.Id, site: u32 };
 /// A second free of a handle that may only be an ignored error: reported where the error is propagated.
 pub const Cancel = struct { tomb: dom.Id };
 
-pub const Restore = struct { place: PlaceId, val: Val };
+pub const Restore = struct { place: PlaceId, val: Val, obj: bool = false };
 
 /// An end that a path of the callee that fails also makes.
 pub const FailEnd = struct { id: dom.Id, event: Event, tomb: dom.Id = 0 };
@@ -1802,7 +1802,9 @@ pub const Run = struct {
             st.alloced = try st.alloced.with(r.arena, e.id);
             try r.swapAll(st, e.tomb, e.id, false, false);
         };
-        if (r.restores.get(call_id)) |list| for (list) |back| try r.writeLeafAs(st, back.place, back.val, true);
+        if (r.restores.get(call_id)) |list| for (list) |back| {
+            if (back.obj) try r.writeObj(st, back.place, back.val.ids) else try r.writeLeafAs(st, back.place, back.val, true);
+        };
         if (r.fail_ends.get(call_id)) |list| for (list) |e| {
             // The restored places hold the block again; ending it once more replaces it there too.
             _ = st.dead.swapRemove(e.id);
