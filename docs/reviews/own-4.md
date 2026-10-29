@@ -29,7 +29,15 @@ Found while repairing: a store of a tag-like scalar (an enum or a bool) through 
 
 ## The five projects and zmoltcp
 
-NUMBERS
+Same packs, same method as own-3.md (std bodies, project functions, 0.17.18 run first, today, same machine). **Project functions reported: 13 before and after; real 8; false positives 5 before and after** (ziggy `textDocument/completion`; libvaxis `_ttyRun`, `Terminal._run`, `FocusHandler.update`; webzocket `test Reader: fuzz`). zls 3 (all real), ziggy 1, libvaxis 7 (4 real), webzocket 2 (1 real), rich_zig 0. None of the fixes cost a project false positive.
+
+What did change: the dependency function lsp-kit `Message.parseFromSliceLeaky` is reported again (zls and ziggy packs). It is the shape of the saved scanner: `var params_source = state.params;` copies a `Scanner`, `parseParamsFromTokenStreamWithKnownMethod(..., &params_source, ...)` advances the copy, and `source` is used afterwards; the copy and `source` share one heap stack, which the advance reallocates when the nesting is deep. A tagged union now splits by variant, so the copy keeps the identity of the stack, and the model (an append invalidates) says what it says everywhere else. I believe it is the second instance of the data-dependent real bug (same as `real.savedScannerAdvances`), not a false positive in the sense of the others, but it is reported and not counted, which phase3.md says the saved scanner itself is not; I did not suppress it.
+
+The decided fraction of ends (zls 1637 of 2262, ziggy lib 344 of 584, libvaxis force 236 of 354, webzocket tests 348 of 494, rich tests 2483 of 2721) is within one percent of 0.17.18.
+
+zmoltcp: 986 functions, 0 findings, 0 unproven, `decided: 6 of 6 ends and 4178 of 4178 uses`, nothing undecided; `own/seeded.expect` matches. Nothing in that repository was written.
+
+Time: unchanged within noise (a full run of both packs of the five projects, 18 minutes on the loaded machine; ziggy lib 17 s).
 
 ## What the numbers of the corpus mean
 
