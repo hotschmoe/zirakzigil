@@ -23,6 +23,7 @@ memory.badAttachLocalBuffer error
 memory.badDanglingAfterAppend error
 memory.badDanglingSlice error
 memory.badDeferFreeThenReturn error
+memory.badDeferOrder error
 memory.badDoubleFree error
 memory.badErrdeferFreeThenReturnOnSuccess error
 memory.badFreeInBranchThenUse error
@@ -70,6 +71,7 @@ memory.okArenaResetLoop clean
 memory.okArenaScope clean
 memory.okAttachLocalSocket clean
 memory.okAttachParamBuffer clean
+memory.okDeferOrder clean
 memory.okDupeReturn clean
 memory.okErrdeferFree clean
 memory.okFreeEachBranch clean

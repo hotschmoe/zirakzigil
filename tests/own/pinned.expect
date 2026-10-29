@@ -1,0 +1,9 @@
+pinned.Node.touch clean
+pinned.badCopy error
+pinned.badCopyInsideWrapper error
+pinned.badPassByValue error
+pinned.byValue clean
+pinned.okCopyField clean
+pinned.okFreshValue clean
+pinned.okInPlace clean
+pinned.okThroughPointer clean

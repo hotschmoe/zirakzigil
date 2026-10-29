@@ -125,6 +125,12 @@ pub const OwnershipGateOptions = struct {
     /// Fail when more than this many functions are unproven (outside the checker's supported fragment). The count
     /// is listed in every run; setting it ratchets it.
     max_unproven: ?u32 = null,
+    /// The step's name, for a project with several gates (the checked library, and seeded mistakes with pinned verdicts).
+    step: []const u8 = "own",
+    /// Fail when more than this many functions are declared `.trusted` in an `ownership` manifest.
+    max_trusted: ?u32 = null,
+    /// Where a module other than `src` (a dependency, `zv`) keeps its sources: `NAME=DIR` relative to the project root.
+    modules: []const []const u8 = &.{},
 };
 
 /// Adds the `own` step: `zv-own` checks the functions of the checked-in AIR packs for ownership mistakes
@@ -141,8 +147,12 @@ pub fn addOwnershipGate(b: *std.Build, options: OwnershipGateOptions) *std.Build
     for (options.files) |prefix| run.addArgs(&.{ "--files", prefix });
     if (options.expect) |path| run.addArgs(&.{ "--expect", path });
     if (options.max_unproven) |limit| run.addArgs(&.{ "--max-unproven", b.fmt("{d}", .{limit}) });
+    if (options.max_trusted) |limit| run.addArgs(&.{ "--max-trusted", b.fmt("{d}", .{limit}) });
+    for (options.modules) |m| run.addArgs(&.{ "--module", m });
+    run.addArg("--module");
+    run.addPrefixedDirectoryArg("zv=", dep.path("src"));
     run.addArgs(options.packs);
-    const step = b.step("own", "Check the ownership of the functions in the checked-in AIR packs");
+    const step = b.step(options.step, "Check the ownership of the functions in the checked-in AIR packs");
     step.dependOn(&run.step);
     return step;
 }

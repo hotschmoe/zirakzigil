@@ -41,6 +41,26 @@ pub const Types = struct {
         return r.kind == .@"struct" and std.mem.startsWith(u8, t.pack.str(r.name), "zv.Linear(");
     }
 
+    /// A struct that holds a `zv.PinCheck` by value: its address is part of what it is, so it must not be copied.
+    pub fn isPinned(t: Types, id: schema.TypeId) bool {
+        return t.pinnedBelow(id, 0);
+    }
+
+    fn pinnedBelow(t: Types, id: schema.TypeId, depth: u32) bool {
+        if (id == .none or depth > 8) return false;
+        const r = t.rec(id);
+        switch (r.kind) {
+            .@"struct" => {
+                if (std.mem.eql(u8, t.pack.str(r.name), "zv.PinCheck")) return true;
+                const fields = t.pack.fieldsOf(id) orelse return false;
+                for (fields) |f| if (t.pinnedBelow(f.ty, depth + 1)) return true;
+                return false;
+            },
+            .optional, .error_union, .array => return t.pinnedBelow(r.child, depth + 1),
+            else => return false,
+        }
+    }
+
     pub fn isPointer(t: Types, id: schema.TypeId) bool {
         return t.kind(id) == .pointer;
     }

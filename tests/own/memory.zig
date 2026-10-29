@@ -723,3 +723,24 @@ pub fn badStoreSocketInOuter(outer: *Sock) void {
     var tx: [64]u8 = undefined;
     outer.* = Sock.init(&rx, &tx);
 }
+
+// Defer order: defers run last to first, so a container declared before the arena it allocates from must be
+// deinitialized before it.
+
+pub fn okDeferOrder(gpa: Allocator) !void {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var map: std.StringHashMapUnmanaged(u32) = .empty;
+    defer map.deinit(a);
+    try map.put(a, "x", 1);
+}
+
+pub fn badDeferOrder(gpa: Allocator) !void {
+    var map: std.StringHashMapUnmanaged(u32) = .empty;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    const a = arena.allocator();
+    defer map.deinit(a);
+    defer arena.deinit();
+    try map.put(a, "x", 1);
+}

@@ -20,6 +20,8 @@ pub const Kind = enum {
     escape_local,
     /// A pointer into an arena or other region that outlives it.
     escape_region,
+    /// A value of a pinned type (it holds a `zv.PinCheck`) copied by value.
+    pinned_copy,
     /// Two ranges of one array that overlap where they must not (`@memcpy`).
     alias,
     /// A construct outside the supported fragment: the function is neither accepted nor refuted.
@@ -39,6 +41,7 @@ pub const Kind = enum {
             .escape_local => "pointer to a local escapes",
             .escape_region => "pointer escapes its region",
             .alias => "overlapping ranges",
+            .pinned_copy => "pinned value copied",
             .unsupported => "outside the supported fragment",
         };
     }

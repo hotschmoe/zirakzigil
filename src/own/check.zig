@@ -1100,6 +1100,9 @@ const Run = struct {
 
     fn load(r: *Run, st: *State, inst: *const Inst, ptr: Val, ty: schema.TypeId) Error!Val {
         var out: Val = .none;
+        // A temporary the compiler built to return a fresh value is not a copy of anything the program named.
+        const temporary = if (ptr.place) |pl| r.places.rec(pl).kind == .cell and !r.names.contains(r.places.rec(pl).n) else false;
+        if (r.ty.isPinned(ty) and !temporary) try r.report(st, .pinned_copy, inst.loc, &.{}, "a value of the pinned type `{s}` is copied by value; pass a pointer to it", .{r.ty.name(ty)});
         if (ptr.place) |pl| {
             try r.objectAlive(st, inst, pl);
             out = try r.readPlace(st, pl);
