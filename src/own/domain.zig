@@ -209,6 +209,9 @@ pub const Val = struct {
     /// One of many instances: read out of an array or slice. An allocation site names all of them at once, so
     /// freeing this value does not say that the next one is freed.
     many: bool = false,
+    /// Owners that end if this value (an optional or an error union from a call that may move its argument) holds a
+    /// payload: `remap` and `realloc` succeeded, so the old allocation is gone.
+    moved: Set = .empty,
     /// `toks` holds alternatives: a join merged values that held different tokens, so the value is one of them.
     alt: bool = false,
 
@@ -222,6 +225,7 @@ pub const Val = struct {
         var out: Val = .{
             .toks = try a.toks.merge(arena, b.toks),
             .owners = try a.owners.merge(arena, b.owners),
+            .moved = try a.moved.merge(arena, b.moved),
             .place = if (a.place != null and a.place == b.place) a.place else null,
             .src = if (a.src != null and a.src == b.src) a.src else null,
             .off = if (a.off != null and a.off == b.off) a.off else null,
@@ -237,7 +241,7 @@ pub const Val = struct {
     }
 
     pub fn eql(a: Val, b: Val) bool {
-        if (!a.toks.eql(b.toks) or !a.owners.eql(b.owners) or a.place != b.place or a.src != b.src or a.alt != b.alt or a.off != b.off or a.many != b.many) return false;
+        if (!a.toks.eql(b.toks) or !a.owners.eql(b.owners) or !a.moved.eql(b.moved) or a.place != b.place or a.src != b.src or a.alt != b.alt or a.off != b.off or a.many != b.many) return false;
         if (a.parts) |pa| {
             const pb = b.parts orelse return false;
             if (pa.len != pb.len) return false;
@@ -260,6 +264,7 @@ pub const Val = struct {
             out.alt = out.alt or part.alt;
             out.toks = try out.toks.merge(arena, part.toks);
             out.owners = try out.owners.merge(arena, part.owners);
+            out.moved = try out.moved.merge(arena, part.moved);
         }
         return out;
     }

@@ -4,6 +4,7 @@
 pub const schema = @import("schema.zig");
 pub const json = @import("json.zig");
 pub const reader = @import("reader.zig");
+pub const slice = @import("slice.zig");
 pub const Builder = @import("builder.zig").Builder;
 
 pub const Pack = schema.Pack;

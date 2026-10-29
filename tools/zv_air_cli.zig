@@ -3,6 +3,7 @@
 //!   zv-air stats PATH                counts and sizes of a pack, or of the whole set of an index directory
 //!   zv-air dump PACK [--fn NAME] [--pretty]   the pack as JSON (NAME: only functions containing it)
 //!   zv-air verify PATH               load and validate every reference
+//!   zv-air slice PACK OUT.zvp        the project's functions and the library functions they reach, tables compacted
 //! PATH is a `.zvp` file or an index directory.
 
 const std = @import("std");
@@ -10,7 +11,7 @@ const Io = std.Io;
 const zv_air = @import("zv_air");
 const schema = zv_air.schema;
 
-const Command = enum { list, stats, dump, verify };
+const Command = enum { list, stats, dump, verify, slice };
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -25,6 +26,17 @@ pub fn main(init: std.process.Init) !void {
     var filter: ?[]const u8 = null;
     var pretty = false;
     var i: usize = 3;
+    if (command == .slice) {
+        if (args.len != 4) return usage();
+        var set = try open(gpa, io, args[2]);
+        defer set.deinit(gpa);
+        if (set.loaded.len != 1) return fail("slice takes one pack, {d} found", .{set.loaded.len});
+        const bytes = try zv_air.slice.slice(gpa, set.loaded[0].pack);
+        defer gpa.free(bytes);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = args[3], .data = bytes });
+        try out.print("{s}: {d} bytes (from {d})\n", .{ args[3], bytes.len, set.loaded[0].bytes.len });
+        return out.flush();
+    }
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--pretty")) {
             pretty = true;
@@ -51,6 +63,7 @@ pub fn main(init: std.process.Init) !void {
             try zv_air.json.write(out, set.loaded[0].pack, .{ .pretty = pretty, .filter = filter });
         },
         .stats => try stats(out, set, loaded),
+        .slice => unreachable,
     }
     try out.flush();
 }
@@ -110,7 +123,7 @@ fn stats(out: *Io.Writer, set: zv_air.Set, loaded: Io.Duration) !void {
 }
 
 fn usage() !void {
-    std.log.err("usage: zv-air list|stats|verify|dump PATH [--fn NAME] [--pretty]", .{});
+    std.log.err("usage: zv-air list|stats|verify|dump PATH [--fn NAME] [--pretty] | slice PACK OUT.zvp", .{});
     std.process.exit(2);
 }
 

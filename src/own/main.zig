@@ -10,6 +10,7 @@
 //!     --max-unproven N           fail when more than N functions are unproven
 //!     --max-trusted N            fail when more than N functions are declared `.trusted` in an `ownership` manifest
 //!     --summary                  one line per function, clean ones too
+//!     --effects                  as --summary, and what each function was found to do (kills, frees, returns, stores) and assumed
 //!     --dump                     the AIR of the selected functions as text, and stop
 //! Exit status: 0 when no function has a finding (or matches --expect), 1 otherwise, 2 for bad usage.
 
@@ -38,6 +39,7 @@ const Options = struct {
     max_unproven: ?usize = null,
     max_trusted: ?usize = null,
     summary: bool = false,
+    effects: bool = false,
     dump: bool = false,
 };
 
@@ -105,8 +107,9 @@ pub fn main(init: std.process.Init) !void {
 
     var counts: [4]usize = @splat(0);
     for (rows.items) |row| {
-        counts[@intFromEnum(row.verdict)] += 1;
-        try printRow(out, &srcs, row, opts.summary);
+        counts[@backingInt(row.verdict)] += 1;
+        try printRow(out, &srcs, row, opts.summary or opts.effects);
+        if (opts.effects) try printEffects(out, row);
         try out.flush();
     }
     try out.print("\nzv-own: {d} clean, {d} with findings, {d} unproven, {d} trusted\n", .{ counts[0], counts[1], counts[2], counts[3] });
@@ -120,14 +123,18 @@ pub fn main(init: std.process.Init) !void {
         try out.print("zv-own: more trusted functions than the {d} allowed\n", .{limit});
         ok = false;
     };
-    var unknown: u32 = 0;
-    var transfers: u32 = 0;
+    var total: check.Stats = .{};
     for (rows.items) |row| {
-        unknown += row.result.stats.unknown_calls;
-        transfers += row.result.stats.transfers;
+        total.unknown_calls += row.result.stats.unknown_calls;
+        total.transfers += row.result.stats.transfers;
+        total.unmodelled += row.result.stats.unmodelled;
+        total.blind += row.result.stats.blind;
+        total.dynamic_len += row.result.stats.dynamic_len;
     }
     if (unread != 0) try out.print("zv-own: {d} source files were not found: their ownership manifests were not read\n", .{unread});
-    try out.print("zv-own: assumed, not checked: {d} calls to functions outside the packs, {d} linear values handed to memory it does not follow\n", .{ unknown, transfers });
+    try out.print("zv-own: assumed, not checked: {d} calls to functions outside the packs or too odd to read, {d} linear values handed to memory it does not follow\n", .{ total.unknown_calls, total.transfers });
+    if (total.unmodelled + total.blind + total.dynamic_len != 0)
+        try out.print("zv-own: also assumed: {d} container methods with no model (taken to invalidate), {d} operations on memory it cannot name, {d} resizes by a length it cannot show to be non-zero\n", .{ total.unmodelled, total.blind, total.dynamic_len });
     try out.flush();
     if (!ok) std.process.exit(1);
 }
@@ -141,7 +148,7 @@ fn selected(pack: *const schema.Pack, f: schema.Func, opts: Options) bool {
         for (opts.files) |prefix| if (std.mem.startsWith(u8, path, prefix)) return true;
         return false;
     }
-    if (std.mem.eql(u8, module, "zv")) return false;
+    if (std.mem.eql(u8, module, "zv") or std.mem.eql(u8, module, "std") or std.mem.eql(u8, module, "ubsan_rt")) return false;
     if (std.mem.eql(u8, module, "root") and std.mem.startsWith(u8, path, "air_")) return false;
     return true;
 }
@@ -189,6 +196,17 @@ fn printRow(out: *Io.Writer, srcs: *sources.Sources, row: Row, all: bool) !void 
     }
 }
 
+/// What a call to the function does, as the checker derived it from the body.
+fn printEffects(out: *Io.Writer, row: Row) !void {
+    const s = row.result.summary;
+    try out.print("      effects: complete={} ret_alloc={} frees={x} token_stores={x}\n", .{ s.complete, s.ret_alloc, s.frees, s.token_stores });
+    const st = row.result.stats;
+    if (st.blind + st.unknown_calls + st.unmodelled + st.dynamic_len != 0) try out.print("      assumed: {d} unknown calls, {d} unmodelled, {d} blind, {d} dynamic lengths\n", .{ st.unknown_calls, st.unmodelled, st.blind, st.dynamic_len });
+    for (s.kills) |k| try out.print("      kills param {d} path {any} ends={}\n", .{ k.param, k.path, k.ends });
+    for (s.ret) |q| try out.print("      returns param {d} path {any} stored={}\n", .{ q.param, q.path, q.stored });
+    for (s.stores) |q| try out.print("      stores param {d} into param {d} path {any}\n", .{ q.from, q.into, q.path });
+}
+
 fn printPos(out: *Io.Writer, srcs: *sources.Sources, pack: *const schema.Pack, loc: schema.LocId) !void {
     if (srcs.where(pack, loc)) |w| try out.print("{d}:{d}", .{ w.line, w.col }) else try out.writeAll("?");
 }
@@ -220,7 +238,7 @@ fn compareExpected(io: Io, arena: Allocator, out: *Io.Writer, path: []const u8, 
         const want = std.meta.stringToEnum(Verdict, it.next() orelse "") orelse fatal("{s}: bad line `{s}`", .{ path, line });
         var got: ?Verdict = null;
         for (rows) |row| if (std.mem.eql(u8, row.name, name)) {
-            got = if (got) |g| @enumFromInt(@max(@intFromEnum(g), @intFromEnum(row.verdict))) else row.verdict;
+            got = if (got) |g| @fromBackingInt(@intCast(@max(@backingInt(g), @backingInt(row.verdict)))) else row.verdict;
         };
         const verdict = got orelse {
             try out.print("expected {s} {t}, but it was not checked at all\n", .{ name, want });
@@ -297,6 +315,8 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
         }
         if (std.mem.eql(u8, a, "--summary")) {
             o.summary = true;
+        } else if (std.mem.eql(u8, a, "--effects")) {
+            o.effects = true;
         } else if (std.mem.eql(u8, a, "--dump")) {
             o.dump = true;
         } else {
@@ -331,7 +351,7 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only TEXT] [--files PREFIX] [--expect FILE] [--pins FILE] [--max-unproven N] [--max-trusted N] [--summary] [--dump] PACK|INDEX_DIR...\n", .{});
+    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only TEXT] [--files PREFIX] [--expect FILE] [--pins FILE] [--max-unproven N] [--max-trusted N] [--summary] [--effects] [--dump] PACK|INDEX_DIR...\n", .{});
     std.process.exit(2);
 }
 
@@ -376,7 +396,7 @@ fn readManifests(
             const key = try std.fmt.allocPrint(arena, "{s}:{s}", .{ pack.str(rec.module), pack.str(rec.path) });
             if (!(try missing.getOrPut(arena, key)).found_existing) {
                 const mod = pack.str(rec.module);
-                if (!std.mem.eql(u8, mod, "root") and !std.mem.eql(u8, mod, "")) unread.* += 1;
+                if (!std.mem.eql(u8, mod, "root") and !std.mem.eql(u8, mod, "") and !std.mem.eql(u8, mod, "std") and !std.mem.eql(u8, mod, "ubsan_rt")) unread.* += 1;
             }
             continue;
         };

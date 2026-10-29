@@ -1,0 +1,47 @@
+# The probes of the first adversarial review (docs/reviews/own-1.md): one line per function.
+# bad*: ownership bugs the checker used to call clean. fp*: correct programs it used to report. ctrl*: controls.
+# badIteratorAfterGrow and okPutAssumeCapacity are correct and clean.
+# ctrlGetPtrThenPut is correct only because a hash map's first allocation has spare slots (std's growth policy): a known false positive.
+# badLinearInList is clean and counted: the footer says "1 linear values handed to memory it does not follow" (tools/run_own.sh checks it).
+# badLinearBytes is unproven: a pointer to a linear value goes to a function that copies bytes.
+review1.badAddManyAsSlice error
+review1.badAddOne error
+review1.badAtomicLoad error
+review1.badAtomicRmw error
+review1.badComptimeSkipConsume error
+review1.badErrdeferLeak error
+review1.badFieldParentPtr error
+review1.badFreeSubslice error
+review1.badFromOwnedSlice error
+review1.badGetOrPutThenGrow error
+review1.badInsert error
+review1.badIteratorAfterGrow clean
+review1.badKeyIteratorAfterGrow error
+review1.badLabeledLeak error
+review1.badLinearBytes unproven
+review1.badLinearInList clean
+review1.badMultiSliceAfterGrow error
+review1.badRecFree error
+review1.badRecPool error
+review1.badTryLeak error
+review1.boxList clean
+review1.ctrlGetPtrThenPut error
+review1.ctrlSwitchLeak error
+review1.ctrlUseAfterFree error
+review1.fail clean
+review1.fpComptimeDeadDouble clean
+review1.fpEnsureNoGrow clean
+review1.fpExpandToCapacity clean
+review1.fpGetOrPutAssume clean
+review1.fpLockPointers clean
+review1.fpPopKeepsFirst clean
+review1.fpPutAfterEnsure clean
+review1.fpShrinkKeepsFirst clean
+review1.fpToOwnedAssert clean
+review1.freeHandleRec clean
+review1.freeRec clean
+review1.limitRemapZero error
+review1.limitResizeZero error
+review1.okDeferConsume clean
+review1.okIfOptional clean
+review1.okPutAssumeCapacity clean
