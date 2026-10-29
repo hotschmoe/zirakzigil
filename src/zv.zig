@@ -54,6 +54,112 @@ pub inline fn assume(ok: bool) void {
     if (checks and !ok) @panic("zv: assumption violated");
 }
 
+/// Termination measure of a loop. Place it right after the loop's `invariant` calls: `zvc` proves that the
+/// measure (an unsigned integer, or a ghost `Int`) is smaller at the end of every iteration than at its
+/// start, and, for an `Int`, that it never goes below zero. Several calls are ordered lexicographically.
+/// It does nothing when run.
+pub inline fn decreases(measure: anytype) void {
+    _ = measure;
+}
+
+/// Ghost integer, for specifications that must not wrap. `zvc` reads it as a mathematical integer; run in a
+/// ghost build it is an `i128` and panics on overflow. It does not exist outside ghost builds, so use it
+/// behind `zv.ghost`: `zv.ensures(r, !zv.ghost or zv.Int.of(r).le(zv.Int.of(x)))`.
+pub const Int = if (ghost) struct {
+    v: i128,
+
+    const Self = @This();
+
+    pub inline fn of(x: anytype) Self {
+        return .{ .v = x };
+    }
+    pub inline fn add(a: Self, b: Self) Self {
+        return .{ .v = a.v + b.v };
+    }
+    pub inline fn sub(a: Self, b: Self) Self {
+        return .{ .v = a.v - b.v };
+    }
+    pub inline fn mul(a: Self, b: Self) Self {
+        return .{ .v = a.v * b.v };
+    }
+    pub inline fn neg(a: Self) Self {
+        return .{ .v = -a.v };
+    }
+    /// Division rounding toward negative infinity; the divisor must not be zero.
+    pub inline fn divFloor(a: Self, b: Self) Self {
+        return .{ .v = @divFloor(a.v, b.v) };
+    }
+    /// The remainder of `divFloor`; the divisor must not be zero.
+    pub inline fn mod(a: Self, b: Self) Self {
+        return .{ .v = @mod(a.v, b.v) };
+    }
+    pub inline fn lt(a: Self, b: Self) bool {
+        return a.v < b.v;
+    }
+    pub inline fn le(a: Self, b: Self) bool {
+        return a.v <= b.v;
+    }
+    pub inline fn gt(a: Self, b: Self) bool {
+        return a.v > b.v;
+    }
+    pub inline fn ge(a: Self, b: Self) bool {
+        return a.v >= b.v;
+    }
+    pub inline fn eq(a: Self, b: Self) bool {
+        return a.v == b.v;
+    }
+    pub inline fn ne(a: Self, b: Self) bool {
+        return a.v != b.v;
+    }
+} else void;
+
+/// Ghost sequence of ghost integers. `zvc` reads it as an unbounded sequence; run in a ghost build it holds
+/// at most `capacity` elements. Like `Int`, it exists only in ghost builds.
+pub const Seq = if (ghost) struct {
+    items: [capacity]i128 = undefined,
+    n: usize = 0,
+
+    pub const capacity = 64;
+    const Self = @This();
+
+    pub inline fn empty() Self {
+        return .{};
+    }
+    /// The sequence with `x` added at the end.
+    pub inline fn push(s: Self, x: Int) Self {
+        var r = s;
+        r.items[r.n] = x.v;
+        r.n += 1;
+        return r;
+    }
+    pub inline fn len(s: Self) Int {
+        return .{ .v = s.n };
+    }
+    /// Element `i`; it must be in range.
+    pub inline fn at(s: Self, i: Int) Int {
+        return .{ .v = s.items[@intCast(i.v)] };
+    }
+    pub inline fn concat(a: Self, b: Self) Self {
+        var r = a;
+        for (b.items[0..b.n]) |x| {
+            r.items[r.n] = x;
+            r.n += 1;
+        }
+        return r;
+    }
+    /// The `n` elements starting at `lo`; they must be in range.
+    pub inline fn sub(s: Self, lo: Int, n: Int) Self {
+        var r: Self = .{};
+        const first: usize = @intCast(lo.v);
+        const count: usize = @intCast(n.v);
+        for (s.items[first..][0..count]) |x| {
+            r.items[r.n] = x;
+            r.n += 1;
+        }
+        return r;
+    }
+} else void;
+
 /// Runtime check over [lo, hi): spec helper for quantified properties.
 pub fn forallRange(lo: usize, hi: usize, ctx: anytype, comptime pred: fn (@TypeOf(ctx), usize) bool) bool {
     var i = lo;

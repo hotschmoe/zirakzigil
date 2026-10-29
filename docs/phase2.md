@@ -36,9 +36,21 @@ One function is run symbolically (`src/zvc/vc.zig`):
 | `zv.ensures(v, p)` | obligation `pc => p`; the block's value is `v` |
 | `loop` with `zv.invariant(p)` | obligation that `p` holds on entry; every cell the body stores to is havoced; `p` is assumed; one iteration runs; at `repeat`, obligation that `p` holds again; exits leave with the havoced state, `p` and the exit condition |
 
-Each obligation is `pc => goal` and is then assumed (assert, then assume), so one failure is reported once and not again in everything after it. Loops with no invariant are cut with the trivial one; a counterexample that passes through a cut loop is marked, because the loop abstraction may have made it unreal. Termination is not checked yet.
+Each obligation is `pc => goal` and is then assumed (assert, then assume), so one failure is reported once and not again in everything after it. Loops with no invariant are cut with the trivial one; a counterexample that passes through a cut loop is marked, because the loop abstraction may have made it unreal. Termination is checked where a loop states a measure (below).
 
-Terms are hash-consed with constant folding (`src/zvc/term.zig`). Integers and booleans are bit-vectors and Bool; slices are arrays from 64-bit indexes; a slice parameter is assumed to fit the address space.
+Terms are hash-consed with constant folding (`src/zvc/term.zig`). Integers up to 128 bits are bit-vectors, booleans are Bool, slices are arrays from 64-bit indexes (a slice parameter is assumed to fit the address space), and a struct, optional or error union is kept apart field by field.
+
+## Beyond one function (M2)
+
+**Calls.** A call to a `.verified` (or `.trusted`) function does not run its body. Each function is run once and leaves a summary: its `zv.requires` conditions, and, over its `zv.ensures` calls, the disjunction of "the returned value is what that path computed and its condition holds". A return no `ensures` covers promises nothing, except one that returns a literal (an error code, `null`, a constant), which promises exactly that. At a call, the arguments replace the parameters in the summary, a callee slice is read at the caller's slice offset, the callee's internal variables are renamed per call, the precondition becomes an obligation (`precondition of X may not hold`) and the postcondition becomes an assumption. A callee that is `.checked`, absent, outside the fragment or recursive makes the caller UNPROVEN, with that as the reason. Loops inside a callee contribute through their invariants only.
+
+**Inlined contracts.** A `zv.requires` inside an inlined callee (`inline fn`, or a call the compiler inlined) is an obligation of the caller, its `zv.ensures` is re-proved there and assumed after.
+
+**Termination.** `zv.decreases(m)` placed after a loop's invariants states a measure: an unsigned integer, or a ghost `Int`. At the end of every iteration it must be smaller than at the head (several are ordered lexicographically); a ghost measure must also stay non-negative. A loop with no `decreases` leaves the function `proved`, with a note that only partial correctness holds; with `--total` the function is UNPROVEN.
+
+**Ghost integers and sequences.** `zv.Int` and `zv.Seq` exist only in ghost builds (`zv.ghost`), so a specification uses them behind it: `zv.ensures(r, !zv.ghost or zv.Int.of(r).le(zv.Int.of(x).mul(zv.Int.of(y))))`. `zvc` reads their operations as mathematics. A ghost integer is a signed 256-bit bit-vector, not a solver `Int`: mixing `bv2nat` with integer arithmetic made Z3 time out on `a + b <= 0xffffffff` implies no wrap, where the pure bit-vector form takes 20 ms. An operation that leaves 256 bits is an obligation, so a specification never wraps silently. When run, `Int` is an `i128` and `Seq` holds up to 64 elements.
+
+**Structs, optionals, errors.** A struct value is a set of fields created on first use, named from the source (`p.a`); optionals and error unions keep their tag and payload apart; `try`, `orelse`, `.?`, `switch` on integers, returning a struct and passing it to a verified function are covered by `tests/zvc/features.zig`.
 
 ## Output
 
@@ -54,7 +66,7 @@ A refuted obligation prints the function, the position the AIR carries mapped to
 
 ## The suite
 
-`tests/zvc/` holds the packs of `examples/search.zig` and `tests/zvc/cases.zig` and the pinned verdicts (`*.expect`). `cases.zig` is 32 functions that each exercise one rule on both sides: proved with a guard, refuted without it. A verdict that changes there is a soundness or completeness change of `zvc` and is reviewed as one. The packs are checked into the repository so CI needs neither the 8-minute compiler build nor 9 GB; `tests/zvc/SOURCES` pins the sources they were exported from, and the on-demand canary re-exports them with a fresh `zig-zv` and compares byte for byte.
+`tests/zvc/` holds the packs of `examples/search.zig`, `tests/zvc/cases.zig` (the rules of one function, 32 cases proved with a guard and refuted without it) and `tests/zvc/features.zig` (calls, structs, errors, termination, ghost values, `switch`, 36 cases), and the pinned verdicts (`*.expect`). A verdict that changes is a soundness or completeness change of `zvc` and is reviewed as one. The packs are checked into the repository so CI needs neither the 8-minute compiler build nor 9 GB. `tests/zvc/SOURCES` pins the sources they were exported from (`zvc --pins`: a changed source is an error, because the verdicts would be about another program), `tools/zvc_repin.sh` exports them again, and the on-demand canary re-exports them with a fresh `zig-zv` and compares byte for byte. A function the manifest marks `.verified` that the packs do not contain is reported UNPROVEN, so a claim cannot escape by being left out of the export.
 
 ## Spike parity (M1)
 

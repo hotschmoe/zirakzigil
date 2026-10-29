@@ -123,6 +123,32 @@ pub const Source = struct {
         return null;
     }
 
+    /// The name of field `index` of the struct this file declares as `const NAME = struct { ... }`, where `type_name`
+    /// ends in NAME.
+    pub fn fieldName(s: *const Source, type_name: []const u8, index: u32) ?[]const u8 {
+        const tree = &s.tree;
+        const want = if (std.mem.lastIndexOfScalar(u8, type_name, '.')) |i| type_name[i + 1 ..] else type_name;
+        var buf: [2]Ast.Node.Index = undefined;
+        for (0..tree.nodes.len) |i| {
+            const node: Ast.Node.Index = @fromBackingInt(@intCast(i));
+            switch (tree.nodeTag(node)) {
+                .simple_var_decl, .global_var_decl, .local_var_decl, .aligned_var_decl => {},
+                else => continue,
+            }
+            const decl = tree.fullVarDecl(node).?;
+            if (!std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), want)) continue;
+            const init_node = decl.ast.init_node.unwrap() orelse continue;
+            const container = tree.fullContainerDecl(&buf, init_node) orelse continue;
+            var k: u32 = 0;
+            for (container.ast.members) |member| {
+                const field = tree.fullContainerField(member) orelse continue;
+                if (k == index) return tree.tokenSlice(field.ast.main_token);
+                k += 1;
+            }
+        }
+        return null;
+    }
+
     /// Line `n` (1-based) without its newline.
     pub fn lineText(s: *const Source, n: u32) ?[]const u8 {
         var it = std.mem.splitScalar(u8, s.text, '\n');
