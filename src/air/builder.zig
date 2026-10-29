@@ -65,6 +65,7 @@ pub const Builder = struct {
     operands: std.ArrayList(schema.Operand) = .empty,
     attrs: std.ArrayList(schema.Attr) = .empty,
     bodies: std.ArrayList(schema.Body) = .empty,
+    fields: Set(schema.FieldRec) = .empty,
 
     pub fn init(gpa: Allocator) Builder {
         return .{ .gpa = gpa };
@@ -100,6 +101,11 @@ pub const Builder = struct {
     /// Children are interned before their parents: a type's `child` is always a smaller id.
     pub fn typeRec(b: *Builder, rec: schema.TypeRec) Error!TypeId {
         return @fromBackingInt(@intCast(try b.intern("types", rec)));
+    }
+
+    /// Records a field of `owner`. Fields may name types that are not interned yet: only `view` orders them.
+    pub fn addField(b: *Builder, rec: schema.FieldRec) Error!void {
+        _ = try b.intern("fields", rec);
     }
 
     pub fn constant(b: *Builder, rec: schema.ConstRec) Error!ConstId {
@@ -210,7 +216,39 @@ pub const Builder = struct {
             .operands = b.operands.items,
             .attrs = b.attrs.items,
             .bodies = b.bodies.items,
+            .fields = try b.sortedFields(),
         } };
+    }
+
+    /// The fields by (owner, index). Two records for one position that disagree mean the pack cannot tell two
+    /// types apart (same printed name): the owner then keeps only a `conflict` record.
+    fn sortedFields(b: *Builder) Error![]const schema.FieldRec {
+        const out = try b.gpa.dupe(schema.FieldRec, b.fields.keys());
+        std.mem.sortUnstable(schema.FieldRec, out, {}, struct {
+            fn lessThan(_: void, x: schema.FieldRec, y: schema.FieldRec) bool {
+                if (x.owner != y.owner) return @backingInt(x.owner) < @backingInt(y.owner);
+                if (x.index != y.index) return x.index < y.index;
+                if (x.name != y.name) return @backingInt(x.name) < @backingInt(y.name);
+                return @backingInt(x.ty) < @backingInt(y.ty);
+            }
+        }.lessThan);
+        var len: usize = 0;
+        var i: usize = 0;
+        while (i < out.len) {
+            var end = i;
+            while (end < out.len and out[end].owner == out[i].owner) end += 1;
+            var clash = false;
+            for (out[i + 1 .. end], i + 1..) |rec, k| clash = clash or rec.index == out[k - 1].index;
+            if (clash) {
+                out[len] = .{ .owner = out[i].owner, .index = schema.FieldRec.conflict, .name = out[i].name, .ty = .none };
+                len += 1;
+            } else for (out[i..end]) |rec| {
+                out[len] = rec;
+                len += 1;
+            }
+            i = end;
+        }
+        return out[0..len];
     }
 
     pub const no_meta: schema.Meta = .{ .zig_version = @fromBackingInt(@intCast(0)), .target = @fromBackingInt(@intCast(0)), .root = @fromBackingInt(@intCast(0)), .optimize = .debug };
@@ -237,6 +275,12 @@ pub const Builder = struct {
             if (rec.child != .none) copy.child = types[@backingInt(rec.child)];
             slot.* = try b.typeRec(copy);
         }
+        for (t.fields) |rec| try b.addField(.{
+            .owner = types[@backingInt(rec.owner)],
+            .index = rec.index,
+            .name = strs[@backingInt(rec.name)],
+            .ty = if (rec.ty == .none) .none else types[@backingInt(rec.ty)],
+        });
         const callees = try arena.alloc(CalleeId, t.callees.len);
         for (callees, t.callees) |*slot, name| slot.* = @fromBackingInt(@intCast(try b.intern("callees", strs[@backingInt(name)])));
         const consts = try arena.alloc(ConstId, t.consts.len);

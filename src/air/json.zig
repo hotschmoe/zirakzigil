@@ -16,7 +16,7 @@ pub const Options = struct {
 pub fn write(w: *std.Io.Writer, p: Pack, options: Options) Stringify.Error!void {
     var s: Stringify = .{ .writer = w, .options = .{ .whitespace = if (options.pretty) .indent_1 else .minified } };
     try s.beginObject();
-    try field(&s, "schema", schema.version);
+    try field(&s, "schema", p.meta.schema);
     try field(&s, "zig_version", p.str(p.meta.zig_version));
     try field(&s, "target", p.str(p.meta.target));
     try field(&s, "optimize", @tagName(p.meta.optimize));
@@ -29,7 +29,7 @@ pub fn write(w: *std.Io.Writer, p: Pack, options: Options) Stringify.Error!void 
 
     try s.objectField("types");
     try s.beginArray();
-    for (p.t.types) |ty| try writeType(&s, p, ty);
+    for (p.t.types, 0..) |ty, i| try writeType(&s, p, ty, @enumFromInt(i));
     try s.endArray();
 
     try s.objectField("callees");
@@ -52,7 +52,7 @@ fn field(s: *Stringify, name: []const u8, value: anytype) Stringify.Error!void {
     try s.write(value);
 }
 
-fn writeType(s: *Stringify, p: Pack, ty: schema.TypeRec) Stringify.Error!void {
+fn writeType(s: *Stringify, p: Pack, ty: schema.TypeRec, id: schema.TypeId) Stringify.Error!void {
     try s.beginObject();
     try field(s, "name", p.str(ty.name));
     try field(s, "kind", @tagName(ty.kind));
@@ -71,6 +71,17 @@ fn writeType(s: *Stringify, p: Pack, ty: schema.TypeRec) Stringify.Error!void {
             if (ty.flags.allow_zero) try field(s, "allowzero", true);
         },
         else => {},
+    }
+    if (p.fieldsOf(id)) |fields| {
+        try s.objectField("fields");
+        try s.beginArray();
+        for (fields) |fl| {
+            try s.beginObject();
+            try field(s, "name", p.str(fl.name));
+            try field(s, "ty", @backingInt(fl.ty));
+            try s.endObject();
+        }
+        try s.endArray();
     }
     try s.endObject();
 }

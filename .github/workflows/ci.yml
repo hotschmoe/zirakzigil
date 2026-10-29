@@ -35,6 +35,8 @@ jobs:
         run: echo "ZV_Z3=$(sh tools/install_z3.sh "$RUNNER_TEMP/z3")" >> "$GITHUB_ENV"
       - name: Verifier (zvc) against its pinned AIR packs and verdicts
         run: sh tools/run_zvc.sh
+      - name: Ownership checker (zv-own) against its pinned AIR packs and verdicts
+        run: sh tools/run_own.sh
 
   hook:
     runs-on: ubuntu-latest

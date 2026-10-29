@@ -1,0 +1,142 @@
+//! What the checker needs to know about types, read from a pack: which values are linear, which hold
+//! pointers, and which are allocators. Answers are memoized per type id.
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const zv_air = @import("zv_air");
+const schema = zv_air.schema;
+
+pub const Types = struct {
+    pack: *const schema.Pack,
+    tokens: []Memo,
+    pointers: []Memo,
+
+    const Memo = enum(u8) { unknown, busy, no, yes };
+
+    pub fn init(arena: Allocator, pack: *const schema.Pack) Allocator.Error!Types {
+        const n = pack.t.types.len;
+        const tokens = try arena.alloc(Memo, n);
+        const pointers = try arena.alloc(Memo, n);
+        @memset(tokens, .unknown);
+        @memset(pointers, .unknown);
+        return .{ .pack = pack, .tokens = tokens, .pointers = pointers };
+    }
+
+    pub fn rec(t: Types, id: schema.TypeId) schema.TypeRec {
+        return t.pack.t.types[@backingInt(id)];
+    }
+
+    pub fn name(t: Types, id: schema.TypeId) []const u8 {
+        return if (id == .none) "?" else t.pack.typeName(id);
+    }
+
+    pub fn kind(t: Types, id: schema.TypeId) schema.TypeKind {
+        return if (id == .none) .void else t.rec(id).kind;
+    }
+
+    /// `zv.Linear(T)`: a value that must be consumed exactly once.
+    pub fn isLinear(t: Types, id: schema.TypeId) bool {
+        if (id == .none) return false;
+        const r = t.rec(id);
+        return r.kind == .@"struct" and std.mem.startsWith(u8, t.pack.str(r.name), "zv.Linear(");
+    }
+
+    pub fn isPointer(t: Types, id: schema.TypeId) bool {
+        return t.kind(id) == .pointer;
+    }
+
+    pub fn isAllocator(t: Types, id: schema.TypeId) bool {
+        return id != .none and std.mem.eql(u8, t.pack.typeName(id), "mem.Allocator");
+    }
+
+    /// The type a pointer points to.
+    pub fn pointee(t: Types, id: schema.TypeId) ?schema.TypeId {
+        if (id == .none) return null;
+        const r = t.rec(id);
+        if (r.kind != .pointer or r.child == .none) return null;
+        return r.child;
+    }
+
+    /// The value inside an optional or an error union; the type itself otherwise.
+    pub fn payload(t: Types, id: schema.TypeId) schema.TypeId {
+        var at = id;
+        while (at != .none) {
+            const r = t.rec(at);
+            switch (r.kind) {
+                .optional, .error_union => at = r.child,
+                else => break,
+            }
+        }
+        return at;
+    }
+
+    /// Whether a value of this type holds a linear token somewhere by value. A struct whose fields the pack
+    /// does not know is taken to hold none; `fieldsKnown` says when that is a guess.
+    pub fn hasTokens(t: Types, id: schema.TypeId) bool {
+        if (id == .none) return false;
+        const slot = &t.tokens[@backingInt(id)];
+        switch (slot.*) {
+            .yes => return true,
+            .no, .busy => return false,
+            .unknown => {},
+        }
+        slot.* = .busy;
+        const r = t.rec(id);
+        const answer = switch (r.kind) {
+            .@"struct" => t.isLinear(id) or t.anyField(id, hasTokens),
+            .@"union" => t.anyField(id, hasTokens),
+            .optional, .error_union, .array, .vector => t.hasTokens(r.child),
+            else => false,
+        };
+        slot.* = if (answer) .yes else .no;
+        return answer;
+    }
+
+    /// Whether a value of this type holds a pointer or slice somewhere by value (so it can dangle).
+    pub fn hasPointers(t: Types, id: schema.TypeId) bool {
+        if (id == .none) return false;
+        const slot = &t.pointers[@backingInt(id)];
+        switch (slot.*) {
+            .yes => return true,
+            .no, .busy => return false,
+            .unknown => {},
+        }
+        slot.* = .busy;
+        const r = t.rec(id);
+        const answer = switch (r.kind) {
+            .pointer, .@"fn", .@"anyframe" => true,
+            .@"struct", .@"union" => if (t.pack.fieldsOf(id) == null) !t.isEmptyAggregate(id) else t.anyField(id, hasPointers),
+            .optional, .error_union, .array, .vector => t.hasPointers(r.child),
+            else => false,
+        };
+        slot.* = if (answer) .yes else .no;
+        return answer;
+    }
+
+    /// A struct or union whose fields the pack lacks reads as holding pointers (the safe guess for dangling)
+    /// unless it is a type the pack knows to be empty: there is no way to tell, so only `zv.Linear` is special.
+    fn isEmptyAggregate(t: Types, id: schema.TypeId) bool {
+        _ = t;
+        _ = id;
+        return false;
+    }
+
+    pub fn fieldsKnown(t: Types, id: schema.TypeId) bool {
+        return t.pack.fieldsOf(id) != null;
+    }
+
+    fn anyField(t: Types, id: schema.TypeId, comptime pred: fn (Types, schema.TypeId) bool) bool {
+        const fields = t.pack.fieldsOf(id) orelse return false;
+        for (fields) |f| if (f.ty != .none and pred(t, f.ty)) return true;
+        return false;
+    }
+
+    /// The name of a field, or its index when the pack gives none.
+    pub fn fieldName(t: Types, buf: []u8, id: schema.TypeId, index: u32) []const u8 {
+        if (t.pack.fieldsOf(id)) |fields| if (index < fields.len) {
+            const n = t.pack.str(fields[index].name);
+            if (n.len != 0) return n;
+        };
+        return std.fmt.bufPrint(buf, "{d}", .{index}) catch "?";
+    }
+};

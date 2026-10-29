@@ -50,9 +50,9 @@ zvi 2 pack 27986048 cfce1d4f214a654c 5869 /abs/path/to/cache/o/<digest>/zv_air.z
 
 `-fincremental` is unsupported and fails loudly (below). The build scripts (the project's `build.zig` and the dependencies') are never exported: `zig build` compiles it only when its configuration cache misses, so exporting it would make the set depend on that cache. A compile that analyzed no function leaves no entry.
 
-## Schema v2
+## Schema v3 (v2 plus `fields`)
 
-Defined once, in `src/air/schema.zig`. A pack is a header and fourteen tables of fixed-size little-endian records (extern structs without padding, 8-aligned sections), so a reader maps or reads the file and casts: there is no parse step beyond the header's section table. Every table is shared by all functions of the pack.
+Defined once, in `src/air/schema.zig`. A pack is a header and fifteen tables of fixed-size little-endian records (extern structs without padding, 8-aligned sections), so a reader maps or reads the file and casts: there is no parse step beyond the header's section table. Every table is shared by all functions of the pack.
 
 | Table | Record |
 | --- | --- |
@@ -68,6 +68,7 @@ Defined once, in `src/air/schema.zig`. A pack is a header and fourteen tables of
 | `operands` | one `u32`: none, an instruction `id`, or a constant |
 | `attrs` | `{key, value}`: the decoded payload (`index`, `field`, `callee`, `target`, `order`, ...); the key fixes whether `value` is an int, a string, a flag, an instruction or a callee |
 | `bodies` | `{label, items, ranges, insts}`: `then`/`else`, `error`, `block`, `loop`, `inline`, `case` |
+| `fields` | `{owner, index, name, ty}` (schema 3, sorted by owner and index): the fields of the structs, tuples and unions a function uses by value, and of what they hold by value. A type without records has no known fields (empty, or only ever behind a pointer): `Pack.fieldsOf`. Schema 2 packs have no such table and remain readable |
 
 The header carries the schema version (2), the Zig version, the target triple, the optimize mode and the root name of the compile.
 

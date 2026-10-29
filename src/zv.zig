@@ -361,8 +361,41 @@ pub const Slots = slots.Slots;
 // Zig copies structs silently, so a flag *inside* the token cannot detect a
 // double consume (the copy carries its own flag). The liveness bit lives
 // out-of-line in a ledger keyed by ticket, so every copy shares it.
-// The static analyzer (`zv-own`, designed in the doc) enforces the same rule
-// at compile time; this is the backstop that works today.
+// `zv-own` (docs/phase3.md) enforces the same rule at compile time, from the
+// AIR of the code; this ledger is the backstop for what a test run reaches.
+// The types are the annotations; nothing else is written:
+//
+//   fn f(t: Linear(T)) ...          takes ownership: f consumes `t` (or hands it on) on every path
+//   fn f(t: *const Linear(T)) ...   borrows: the caller keeps ownership; f cannot consume it
+//   fn f() Linear(T)                hands ownership to the caller
+//   struct { tok: Linear(T), ... }  a linear value too: consume or hand on every field
+//   ?Linear(T), E!Linear(T)         the token exists on the paths where the value does
+//   Linear(T).consume(self)         the one sink; `init` the one source
+//
+// Passing a linear value to a function by value consumes it. A linear value
+// read out of memory the function does not own (`out.*` through a parameter)
+// is outside what zv-own follows: it reports that function as unproven.
+
+/// Whether a value of type `T` holds a `Linear` by value, so it must be consumed or handed on. A pointer to a
+/// `Linear` holds none: it borrows. Use it in a `comptime` block to keep a generic container from silently
+/// accepting a type whose ownership it does not model: `comptime assert(!zv.holdsLinear(T))`.
+pub fn holdsLinear(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct" => |info| blk: {
+            if (@hasField(T, "ticket") and @hasField(T, "value") and T == Linear(@FieldType(T, "value"))) break :blk true;
+            for (info.field_types) |F| if (holdsLinear(F)) break :blk true;
+            break :blk false;
+        },
+        .@"union" => |info| blk: {
+            for (info.field_types) |F| if (holdsLinear(F)) break :blk true;
+            break :blk false;
+        },
+        .optional => |info| holdsLinear(info.child),
+        .error_union => |info| holdsLinear(info.payload),
+        .array => |info| holdsLinear(info.child),
+        else => false,
+    };
+}
 
 const ledger_capacity = 1 << 14;
 var ledger: std.StaticBitSet(ledger_capacity) = .empty;

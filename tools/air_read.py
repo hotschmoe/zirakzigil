@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reader for the JSON form of a zig-zv AIR pack (schema v2, see docs/phase1.md).
+"""Reader for the JSON form of a zig-zv AIR pack (schema v3, see docs/phase1.md).
 
 Loads every JSON file, validates it against the schema (every table reference in range, tag and
 attribute names known, unsupported counts consistent), re-serializes it and checks the result is
@@ -15,7 +15,7 @@ import re
 import sys
 from pathlib import Path
 
-SCHEMA = 2
+SCHEMA = 3
 TYPE_KINDS = {
     "type", "void", "bool", "noreturn", "int", "float", "pointer", "array", "struct", "comptime_float",
     "comptime_int", "undefined", "null", "optional", "error_union", "error_set", "enum", "union", "fn",
@@ -127,9 +127,12 @@ def validate(doc, where):
     for f in doc["files"]:
         check_keys(f, where + ".files", ["module", "path"])
     for i, t in enumerate(doc["types"]):
-        check_keys(t, where + ".types", ["name", "kind"], ["child", "bits", "signed", "len", "size", "const", "volatile", "allowzero"])
+        check_keys(t, where + ".types", ["name", "kind"], ["child", "bits", "signed", "len", "size", "const", "volatile", "allowzero", "fields"])
         need(t["kind"] in TYPE_KINDS, where, f"unknown type kind {t['kind']!r}")
         need("child" not in t or 0 <= t["child"] < i, where, "type child must come first")
+        for fl in t.get("fields", []):
+            check_keys(fl, where + ".types.fields", ["name", "ty"])
+            need(is_int(fl["ty"]) and 0 <= fl["ty"] < len(doc["types"]), where, "field type out of range")
     need(all(isinstance(c, str) for c in doc["callees"]), where, "bad callees")
     ctx = {
         "ntypes": len(doc["types"]), "nfiles": len(doc["files"]), "callees": set(doc["callees"]), "insts": 0,

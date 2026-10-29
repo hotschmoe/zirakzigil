@@ -3,11 +3,12 @@
 #   tools/zvc_export.sh OUT_DIR FILE.zig [--only PATH]...      writes OUT_DIR/<stem>.zvp
 # PATH is a dotted path in the file, as its root sees it (`wire.tcp.SeqNumber`): the container whose
 # functions to export. Without --only, every pub function of the file. The file's imports of other
-# modules must be named after the dependency: `zv` is src/zv.zig.
+# modules must be named after the dependency: `zv` is src/zv.zig. `--dep NAME=FILE.zig` adds a module of that name
+# (it may import `zv` too), for a file that imports a sibling the way a build.zig would wire it.
 # The compiler is zig-zv (tools/build_zig_zv.sh): ZIG_ZV, else compiler/.work/zig-src/zig-out/bin/zig-zv.
 set -eu
 
-[ $# -ge 2 ] || { echo "usage: $0 OUT_DIR FILE.zig [--only PATH]..." >&2; exit 2; }
+[ $# -ge 2 ] || { echo "usage: $0 OUT_DIR FILE.zig [--only PATH]... [--dep NAME=FILE.zig]..." >&2; exit 2; }
 root=$(cd "$(dirname "$0")/.." && { pwd -W 2>/dev/null || pwd; })
 zv=${ZIG_ZV:-}
 if [ -z "$zv" ]; then
@@ -22,9 +23,20 @@ out=$1
 file=$2
 shift 2
 items=
+deps=
+dep_modules=
 while [ $# -gt 0 ]; do
-    [ "$1" = --only ] && [ $# -ge 2 ] || { echo "usage: $0 OUT_DIR FILE.zig [--only PATH]..." >&2; exit 2; }
-    items="${items:+$items, }target.$2"
+    [ $# -ge 2 ] || { echo "usage: $0 OUT_DIR FILE.zig [--only PATH]... [--dep NAME=FILE.zig]..." >&2; exit 2; }
+    case $1 in
+        --only) items="${items:+$items, }target.$2" ;;
+        --dep)
+            name=${2%%=*}
+            path=${2#*=}
+            deps="$deps --dep $name"
+            dep_modules="$dep_modules --dep zv -M$name=$path"
+            ;;
+        *) echo "usage: $0 OUT_DIR FILE.zig [--only PATH]... [--dep NAME=FILE.zig]..." >&2; exit 2 ;;
+    esac
     shift 2
 done
 mkdir -p "$out"
@@ -40,7 +52,7 @@ mkdir -p "$index"
 # shellcheck disable=SC2086
 ZV_AIR_OUT=$index "$zv" test -fno-emit-bin -target "$target" -mcpu baseline $lib \
     --dep target --dep selection -Mroot="$root/tools/air_all.zig" \
-    --dep zv -Mtarget="$file" \
+    --dep zv$deps -Mtarget="$file"$dep_modules \
     --dep target -Mselection="$work/selection.zig" \
     --dep zv_options -Mzv="$root/src/zv.zig" \
     -Mzv_options="$work/zv_options.zig"
