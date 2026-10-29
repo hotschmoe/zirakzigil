@@ -206,7 +206,7 @@ Cost: `zv-own` checked the 986 production functions of zmoltcp in 0.3 s and the 
 
 ### Assumptions the verdict rests on (printed with every run)
 
-- Calls to functions outside the packs, or whose body could not be read to the end, with no entry in the table neither invalidate nor keep their arguments. zmoltcp: 223 such calls in the production pack (it was 879 in the pack of everything the tests reach), almost all into std's formatting, math and memory functions.
+- Calls to functions outside the packs, or whose body could not be read to the end, with no entry in the table neither invalidate nor keep their arguments. zmoltcp: 151 such call sites in the production pack (the count is per call site since M4, and was 879 per visit in the pack of everything the tests reach), almost all into std's formatting, math and memory functions.
 - A container method that is neither in the packs nor in the table is taken to invalidate and counted; an operation on memory the checker cannot name (the pointer came from a call and points into storage with no place of its own) is not applied and counted; `resize` and `remap` by a length it cannot show to be non-zero do not free, and are counted.
 - The first reallocation of an empty container moves everything: std's growth policy (spare slots) is not a rule the checker knows.
 - Room is followed only where a constant says it: `ensureTotalCapacity(n)` for a constant `n`, on a container made from `.empty` in the same function.
