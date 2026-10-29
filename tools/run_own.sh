@@ -23,7 +23,18 @@ for dir in tests/own tests/own/std; do
     $own --module target=tests/should_panic --module ledger=examples --expect tests/own/double_consume.expect $dir/double_consume.zvp
     $own --module target=tests/own --expect tests/own/review1.expect $dir/review1.zvp
     $own --module target=tests/own --expect tests/own/stdcode.expect $dir/stdcode.zvp
+    $own --module target=tests/own --expect tests/own/switchloop.expect $dir/switchloop.zvp
+    for suite in review2 review2b real fp_zls fp_zls2 fp_zls3 fp_zls4 fp_zls5 fp_zls6 fp_zls7 fp_idioms fp_loops; do
+        $own --module target=tests/own --expect tests/own/$suite.expect $dir/$suite.zvp
+    done
 done
+
+# Packs together: a function has the verdict of its own pack, and a function exported into two packs is one function.
+pins=tests/own/SOURCES
+cat tests/own/review2.expect tests/own/real.expect tests/own/switchloop.expect >"${TMPDIR:-/tmp}/own-together.expect"
+$own --module target=tests/own --expect "${TMPDIR:-/tmp}/own-together.expect" tests/own/review2.zvp tests/own/std/review2.zvp tests/own/real.zvp tests/own/std/real.zvp tests/own/switchloop.zvp
+$own --module target=tests/own --expect "${TMPDIR:-/tmp}/own-together.expect" tests/own/std/switchloop.zvp tests/own/std/real.zvp tests/own/std/review2.zvp tests/own/switchloop.zvp tests/own/review2.zvp tests/own/real.zvp
+rm -f "${TMPDIR:-/tmp}/own-together.expect"
 
 # The ratchet: a trusted function is exempt and counted, and the count can be capped.
 if $own --module target=tests/own --expect tests/own/trusted.expect --max-trusted 0 tests/own/trusted.zvp >/dev/null; then
@@ -41,4 +52,7 @@ counted() { # PACK FUNCTION PATTERN
 for dir in tests/own tests/own/std; do
     counted $dir/review1.zvp badLinearInList "1 linear values handed to memory it does not follow"
     counted $dir/stdcode.zvp okResizeInPlace "1 resizes by a length it cannot show to be non-zero"
+    counted $dir/review2b.zvp freeBoth "1 functions that assume two pointer parameters of one type do not overlap"
+    counted $dir/review2.zvp badPqSift "1 pointers stale only if a container had no room"
+    counted $dir/review2.zvp badPqPopMoves "1 pointers stale only if a container had no room"
 done

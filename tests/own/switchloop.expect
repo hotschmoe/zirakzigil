@@ -1,0 +1,9 @@
+# Labeled switch loops, and idioms of the validations. badTokenizeStale keeps a pointer into a list across the growth in the
+# loop, badFreeInSwitchLoop frees a block on every dispatch.
+switchloop.badFreeInSwitchLoop error
+switchloop.badTokenizeStale error
+switchloop.okFreeThroughArena clean
+switchloop.okIndirectKeeps clean
+switchloop.okIndirectResult clean
+switchloop.okTokenize clean
+switchloop.Source.at clean

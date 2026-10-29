@@ -1,6 +1,6 @@
 # Ordinary allocator-heavy code over std containers (tests/own/stdcode.zig): ok* must stay clean, bad* are mistakes.
 # gapConditionalFree is a mistake the checker does not see: freeIfSome frees on one path only, so no caller may rely on it.
-# fpOwnedAssertThenDeinit is correct and reported: toOwnedSliceAssert moves the buffer out without freeing it (a known false positive).
+# fpOwnedAssertThenDeinit is correct and clean: toOwnedSliceAssert moves the buffer out and leaves the list empty.
 # gapRemapIgnored is a mistake the checker does not see: the result of remap says whether the memory moved, and nothing looks.
 stdcode.Gadget.first clean
 stdcode.Gadget.push clean
@@ -38,7 +38,7 @@ stdcode.badValuePtrAcrossPut error
 stdcode.classOf clean
 stdcode.countA clean
 stdcode.countB clean
-stdcode.fpOwnedAssertThenDeinit error
+stdcode.fpOwnedAssertThenDeinit clean
 stdcode.freeA clean
 stdcode.freeB clean
 stdcode.freeIfSome clean

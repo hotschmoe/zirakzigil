@@ -5,6 +5,8 @@
 //!     --module NAME=DIR          a different directory for the sources of one module
 //!     --only PATH                only functions whose name has PATH as dotted components (`min` selects `a.min`, not `a.minMul`)
 //!     --files PREFIX             only functions declared in files whose module-relative path starts with PREFIX (repeatable)
+//!     --project NAME             a module whose functions are the project's (repeatable; default `target` and `root`): the
+//!                                others are dependencies, which are checked and printed but counted apart
 //!     --expect FILE              lines `NAME clean|error|unproven`; exit 0 iff every verdict equals the pinned one
 //!     --pins FILE                lines `SHA256 PATH`: the sources the packs were exported from; any difference is an error
 //!     --max-unproven N           fail when more than N functions are unproven
@@ -34,6 +36,7 @@ const Options = struct {
     dirs: sources.Dirs = .{},
     only: ?[]const u8 = null,
     files: []const []const u8 = &.{},
+    project: []const []const u8 = &.{ "target", "root" },
     expect: ?[]const u8 = null,
     pins: ?[]const u8 = null,
     max_unproven: ?usize = null,
@@ -59,7 +62,7 @@ const Names = struct {
     }
 };
 
-const Row = struct { name: []const u8, verdict: Verdict, result: *const check.Result, pack: *const schema.Pack };
+const Row = struct { name: []const u8, verdict: Verdict, result: *const check.Result, pack: *const schema.Pack, project: bool };
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -93,27 +96,39 @@ pub fn main(init: std.process.Init) !void {
         if (!selected(pack, f, opts)) continue;
         const name = try source.declaredName(arena, fqn);
         if (opts.only) |only| if (!zv_air.names.selects(name, only)) continue;
-        const key = try std.fmt.allocPrint(arena, "{s}#{x}", .{ fqn, f.id });
-        if ((try seen.getOrPut(arena, key)).found_existing) continue;
+        // The same function exported into several packs is one function.
+        const file = pack.t.files[@backingInt(f.file)];
+        var key: std.ArrayList(u8) = .empty;
+        try key.print(arena, "{s}:{s}:{d}:{s}", .{ pack.str(file.module), pack.str(file.path), f.line, fqn });
+        for (pack.t.params[f.params.off..][0..f.params.len]) |param| try key.print(arena, ",{s}", .{pack.typeName(param.ty)});
+        // Instances of a generic function that print alike are told apart by their ids, when there is one pack.
+        if (packs.items.len == 1) try key.print(arena, "#{x}", .{f.id});
+        if ((try seen.getOrPut(arena, key.items)).found_existing) continue;
         if (opts.dump) {
             try dump.func(out, pack, f);
             continue;
         }
         const result = try prog.analyze(.{ .pack = pack, .func = f });
         const verdict: Verdict = if (trusted.contains(name)) .trusted else if (result.errors() != 0) .@"error" else if (result.unsupported()) .unproven else .clean;
-        try rows.append(arena, .{ .name = name, .verdict = verdict, .result = result, .pack = pack });
+        const module = pack.str(file.module);
+        var project = false;
+        for (opts.project) |m| project = project or std.mem.eql(u8, m, module);
+        try rows.append(arena, .{ .name = name, .verdict = verdict, .result = result, .pack = pack, .project = project });
     };
     if (opts.dump) return out.flush();
 
     var counts: [4]usize = @splat(0);
+    var dep_counts: [4]usize = @splat(0);
     for (rows.items) |row| {
-        counts[@backingInt(row.verdict)] += 1;
+        (if (row.project) &counts else &dep_counts)[@backingInt(row.verdict)] += 1;
         try printRow(out, &srcs, row, opts.summary or opts.effects);
         if (opts.effects) try printEffects(out, row);
         try out.flush();
     }
     try out.print("\nzv-own: {d} clean, {d} with findings, {d} unproven, {d} trusted\n", .{ counts[0], counts[1], counts[2], counts[3] });
-    var ok = counts[1] == 0 and counts[2] == 0;
+    const dep_total = dep_counts[0] + dep_counts[1] + dep_counts[2] + dep_counts[3];
+    if (dep_total != 0) try out.print("zv-own: and in dependencies, which the line above does not count: {d} clean, {d} with findings, {d} unproven, {d} trusted\n", .{ dep_counts[0], dep_counts[1], dep_counts[2], dep_counts[3] });
+    var ok = counts[1] + dep_counts[1] == 0 and counts[2] + dep_counts[2] == 0;
     if (opts.expect) |path| ok = try compareExpected(io, arena, out, path, rows.items);
     if (opts.max_unproven) |limit| if (counts[2] > limit) {
         try out.print("zv-own: more unproven functions than the {d} allowed\n", .{limit});
@@ -125,6 +140,11 @@ pub fn main(init: std.process.Init) !void {
     };
     var total: check.Stats = .{};
     for (rows.items) |row| {
+        if (!row.project) continue;
+        total.maybe_alias += row.result.stats.maybe_alias;
+        total.maybe_stale += row.result.stats.maybe_stale;
+        total.summarized += row.result.stats.summarized;
+        total.alias_params += row.result.stats.alias_params;
         total.unknown_calls += row.result.stats.unknown_calls;
         total.transfers += row.result.stats.transfers;
         total.unmodelled += row.result.stats.unmodelled;
@@ -135,6 +155,8 @@ pub fn main(init: std.process.Init) !void {
     try out.print("zv-own: assumed, not checked: {d} calls to functions outside the packs or too odd to read, {d} linear values handed to memory it does not follow\n", .{ total.unknown_calls, total.transfers });
     if (total.unmodelled + total.blind + total.dynamic_len != 0)
         try out.print("zv-own: also assumed: {d} container methods with no model (taken to invalidate), {d} operations on memory it cannot name, {d} resizes by a length it cannot show to be non-zero\n", .{ total.unmodelled, total.blind, total.dynamic_len });
+    if (total.maybe_alias + total.maybe_stale + total.summarized + total.alias_params != 0)
+        try out.print("zv-own: undecided, counted and not reported: {d} uses of a pointer that may lead into freed memory, {d} pointers stale only if a container had no room, {d} ends of a site that stands for several allocations, {d} functions that assume two pointer parameters of one type do not overlap\n", .{ total.maybe_alias, total.maybe_stale, total.summarized, total.alias_params });
     try out.flush();
     if (!ok) std.process.exit(1);
 }
@@ -199,12 +221,33 @@ fn printRow(out: *Io.Writer, srcs: *sources.Sources, row: Row, all: bool) !void 
 /// What a call to the function does, as the checker derived it from the body.
 fn printEffects(out: *Io.Writer, row: Row) !void {
     const s = row.result.summary;
-    try out.print("      effects: complete={} ret_alloc={} frees={x} token_stores={x}\n", .{ s.complete, s.ret_alloc, s.frees, s.token_stores });
+    try out.print("      effects: complete={} frees={x} moves={x} token_stores={x}\n", .{ s.complete, s.frees, s.moves, s.token_stores });
     const st = row.result.stats;
-    if (st.blind + st.unknown_calls + st.unmodelled + st.dynamic_len != 0) try out.print("      assumed: {d} unknown calls, {d} unmodelled, {d} blind, {d} dynamic lengths\n", .{ st.unknown_calls, st.unmodelled, st.blind, st.dynamic_len });
-    for (s.kills) |k| try out.print("      kills param {d} path {any} ends={}\n", .{ k.param, k.path, k.ends });
-    for (s.ret) |q| try out.print("      returns param {d} path {any} stored={}\n", .{ q.param, q.path, q.stored });
-    for (s.stores) |q| try out.print("      stores param {d} into param {d} path {any}\n", .{ q.from, q.into, q.path });
+    if (st.blind + st.unknown_calls + st.unmodelled + st.dynamic_len + st.maybe_alias + st.maybe_stale != 0) try out.print("      assumed: {d} unknown calls, {d} unmodelled, {d} blind, {d} dynamic lengths, {d} may-alias, {d} may-stale\n", .{ st.unknown_calls, st.unmodelled, st.blind, st.dynamic_len, st.maybe_alias, st.maybe_stale });
+    for (s.kills) |k| try out.print("      kills param {d} {t} path {any}\n", .{ k.param, k.kind, k.path });
+    for (s.ret) |q| {
+        try out.print("      returns path {any} from", .{q.path});
+        for (q.descs) |d| try printDesc(out, d);
+        try out.writeByte(10);
+    }
+    for (s.writes) |q| {
+        try out.print("      writes param {d} {t} path {any} must={} from", .{ q.into.param, q.into.kind, q.into.path, q.must });
+        for (q.descs) |d| try printDesc(out, d);
+        try out.writeByte(10);
+    }
+    for (s.derefs) |q| {
+        try out.print("      derefs param {d} {t} path {any}", .{ q.param, q.kind, q.path });
+        try out.writeByte(10);
+    }
+}
+
+fn printDesc(out: *Io.Writer, d: check.Desc) !void {
+    const tag: []const u8 = if (d.obj) " obj" else "";
+    switch (d.src) {
+        .from => |x| try out.print(" [param {d} {t} {any}{s}]", .{ x.param, x.kind, x.path, tag }),
+        .fresh => |k| try out.print(" [fresh {d}{s}]", .{ k, tag }),
+        .gone => try out.print(" [gone{s}]", .{tag}),
+    }
 }
 
 fn printPos(out: *Io.Writer, srcs: *sources.Sources, pack: *const schema.Pack, loc: schema.LocId) !void {
@@ -306,6 +349,7 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
     var paths: std.ArrayList([]const u8) = .empty;
     var files: std.ArrayList([]const u8) = .empty;
     var modules: std.ArrayList([2][]const u8) = .empty;
+    var projects: std.ArrayList([]const u8) = .empty;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a: []const u8 = args[i];
@@ -329,6 +373,8 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
                 o.only = v;
             } else if (std.mem.eql(u8, a, "--files")) {
                 files.append(arena, v) catch return null;
+            } else if (std.mem.eql(u8, a, "--project")) {
+                projects.append(arena, v) catch return null;
             } else if (std.mem.eql(u8, a, "--expect")) {
                 o.expect = v;
             } else if (std.mem.eql(u8, a, "--pins")) {
@@ -346,12 +392,13 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
     if (paths.items.len == 0) return null;
     o.paths = paths.items;
     o.files = files.items;
+    if (projects.items.len != 0) o.project = projects.items;
     o.dirs.by_module = modules.items;
     return o;
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only PATH] [--files PREFIX] [--expect FILE] [--pins FILE] [--max-unproven N] [--max-trusted N] [--summary] [--effects] [--dump] PACK|INDEX_DIR...\n", .{});
+    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only PATH] [--files PREFIX] [--project NAME] [--expect FILE] [--pins FILE] [--max-unproven N] [--max-trusted N] [--summary] [--effects] [--dump] PACK|INDEX_DIR...\n", .{});
     std.process.exit(2);
 }
 

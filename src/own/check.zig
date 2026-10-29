@@ -4,9 +4,10 @@
 //!   linear tokens   every `zv.Linear` value a path creates, receives or gets back from a call is a token;
 //!                   a token is live until a sink ends it: passing it by value, returning it, storing it into
 //!                   memory the function does not own. Ending an ended token, or leaving a live one, is a finding.
-//!   owners          what a pointer's validity hangs on: a stack slot, an allocation, a region (an arena), the
-//!                   buffer behind a container field, a parameter. An operation ends owners (`free`, `deinit`, an
-//!                   invalidating method); using a value that depends on an ended owner is a finding.
+//!   identities      what a pointer's validity hangs on: a stack slot, an allocation, the storage a caller handed
+//!                   in, an object (an arena, a container). A value carries the set of identities it may lead
+//!                   into, and a copy of the value carries the same set: an operation that ends an identity ends
+//!                   it for every copy. Using a value that leads into an ended identity is a finding.
 //!
 //! A path is analyzed once; at joins the facts are unioned, so a finding means "on some path". Anything the
 //! interpreter does not model stops the run of that function with an `unsupported` finding: it is neither
@@ -21,6 +22,7 @@ const Types = @import("types.zig").Types;
 const spec = @import("spec.zig");
 const dom = @import("domain.zig");
 const diag = @import("diag.zig");
+const calls = @import("calls.zig");
 const Set = dom.Set;
 const Val = dom.Val;
 const PlaceId = dom.PlaceId;
@@ -32,7 +34,7 @@ pub const Ref = struct { pack: *const schema.Pack, func: schema.Func };
 pub const Stats = struct {
     insts: u32 = 0,
     /// Calls to functions that are not in the packs and that the checker has no model of: they are assumed
-    /// to neither end owners nor keep their arguments.
+    /// to neither end identities nor keep their arguments.
     unknown_calls: u32 = 0,
     /// Tokens handed to memory the function does not own: ownership passes on, the checker stops following it.
     transfers: u32 = 0,
@@ -42,59 +44,101 @@ pub const Stats = struct {
     blind: u32 = 0,
     /// `resize` or `remap` with a length the checker cannot show to be non-zero: assumed not to free.
     dynamic_len: u32 = 0,
+    /// A use or a free of something that is ended on some of the things a pointer may lead to, not on all: the
+    /// checker cannot tell which, and does not report it.
+    maybe_alias: u32 = 0,
+    /// A pointer into storage that an operation reallocates only if there is no room, and the room is not known.
+    maybe_stale: u32 = 0,
+    /// An end of an identity that stands for several allocations (one site run again before the last was ended).
+    summarized: u32 = 0,
+    /// Functions that end or change memory through two pointer parameters of one type, assumed not to overlap.
+    alias_params: u32 = 0,
 };
 
-/// What a caller needs to know about a function it calls, read from the function itself.
+/// What of a callee's parameter an effect names: the value passed (`value`: its identities, below `path` for a
+/// by-value aggregate), the memory a pointer parameter points to (`content`, at `path` below it), or the object
+/// (an arena, a container) at that place.
+pub const SlotKind = enum(u8) { value, content, object, view };
+
+pub const Slot = struct {
+    param: u32,
+    path: []const u32 = &.{},
+    kind: SlotKind = .value,
+
+    pub fn eql(a: Slot, b: Slot) bool {
+        return a.param == b.param and a.kind == b.kind and std.mem.eql(u32, a.path, b.path);
+    }
+};
+
+/// Where a value of the result or of a store comes from: a slot of an argument, or the `k`th fresh allocation of the
+/// callee. `obj`: it names the object identities of the value, not the identities its pointers lead into.
+pub const Desc = struct {
+    src: union(enum) { from: Slot, fresh: u32, gone },
+    obj: bool = false,
+
+    pub fn eql(a: Desc, b: Desc) bool {
+        if (a.obj != b.obj) return false;
+        return switch (a.src) {
+            .from => |x| b.src == .from and x.eql(b.src.from),
+            .fresh => |x| b.src == .fresh and x == b.src.fresh,
+            .gone => b.src == .gone,
+        };
+    }
+};
+
+/// The descriptors of the leaf `path` below a result (the field path inside a returned aggregate).
+pub const Leaf = struct { path: []const u32, descs: []const Desc };
+
+/// Memory below a pointer parameter holds `descs` when the callee returns. `must`: on every path that returns.
+pub const Write = struct { into: Slot, descs: []const Desc, must: bool };
+
+/// A fresh allocation of the callee ends with the objects `regions` (an arena it allocated from).
+pub const Fresh = struct { regions: []const Slot, many: bool = false };
+
+/// What a caller needs to know about a function it calls, read from the function itself: the effects it has on
+/// what its parameters lead into, expressed over access paths rooted at the parameters, and where its result comes from.
 pub const Summary = struct {
     /// False when the run stopped early: a caller falls back to the model of a function it cannot read.
     complete: bool = true,
-    /// What the result may point into or depend on, below the parameters.
-    ret: []const RetRef = &.{},
-    /// The result is a new allocation (a wrapper around an allocator call).
-    ret_alloc: bool = false,
-    /// Pointers into these places (below a parameter) are stale after the call.
-    kills: []const Kill = &.{},
-    /// Bit i: the allocation or handle behind parameter i is freed.
-    frees: u64 = 0,
-    /// Values that arrive in one parameter and are stored below another one.
-    stores: []const Store = &.{},
-    /// Bit i: a linear value passed in parameter i is stored into memory the function does not own.
-    token_stores: u64 = 0,
-    /// The result is the pointer passed as this parameter, possibly cast (`mem.asBytes`).
-    ret_same: ?u32 = null,
     /// A guess made while the function's own body is read (recursion), not something the body showed.
     assumed: bool = false,
+    /// Where the result comes from, per field.
+    ret: []const Leaf = &.{},
+    /// The result is the pointer passed as this parameter, at `path` below it, on every path that returns.
+    ret_place: ?Slot = null,
+    /// Ended or invalidated on some path that returns.
+    kills: []const Slot = &.{},
+    /// Bit i: the allocation or handle behind parameter i is freed on every path that returns.
+    frees: u64 = 0,
+    /// What the memory below the pointer parameters holds afterwards.
+    writes: []const Write = &.{},
+    fresh: []const Fresh = &.{},
+    /// What the function reads or writes through (the memory a pointer it was given leads into, at these slots).
+    derefs: []const Slot = &.{},
+    /// Bit i: a linear value passed in parameter i is stored into memory the function does not own.
+    token_stores: u64 = 0,
     /// Bit i: the function returns the result of a `realloc` or `remap` of parameter i, so the allocation is gone
     /// when the result holds a payload.
     moves: u64 = 0,
 
     pub fn eql(a: Summary, b: Summary) bool {
-        if (a.complete != b.complete or a.ret_alloc != b.ret_alloc or a.frees != b.frees or a.token_stores != b.token_stores or a.moves != b.moves) return false;
-        if (a.ret.len != b.ret.len or a.kills.len != b.kills.len or a.stores.len != b.stores.len) return false;
-        for (a.ret, b.ret) |x, y| if (x.param != y.param or x.stored != y.stored or x.interior != y.interior or !std.mem.eql(u32, x.path, y.path)) return false;
-        for (a.kills, b.kills) |x, y| if (x.param != y.param or x.ends != y.ends or !std.mem.eql(u32, x.path, y.path)) return false;
-        for (a.stores, b.stores) |x, y| {
-            if (x.from != y.from or x.into != y.into or !std.mem.eql(u32, x.path, y.path)) return false;
-            if ((x.from_path == null) != (y.from_path == null) or x.moves != y.moves) return false;
-            if (x.from_path) |xp| if (!std.mem.eql(u32, xp, y.from_path.?)) return false;
-        }
-        if (a.ret_same != b.ret_same) return false;
+        if (a.complete != b.complete or a.frees != b.frees or a.token_stores != b.token_stores or a.moves != b.moves) return false;
+        if (a.ret.len != b.ret.len or a.kills.len != b.kills.len or a.writes.len != b.writes.len or a.fresh.len != b.fresh.len or a.derefs.len != b.derefs.len) return false;
+        for (a.derefs, b.derefs) |x, y| if (!x.eql(y)) return false;
+        for (a.ret, b.ret) |x, y| if (!std.mem.eql(u32, x.path, y.path) or !eqlDescs(x.descs, y.descs)) return false;
+        for (a.kills, b.kills) |x, y| if (!x.eql(y)) return false;
+        for (a.writes, b.writes) |x, y| if (!x.into.eql(y.into) or x.must != y.must or !eqlDescs(x.descs, y.descs)) return false;
+        if ((a.ret_place == null) != (b.ret_place == null)) return false;
+        if (a.ret_place) |p| if (!p.eql(b.ret_place.?)) return false;
+        return true;
+    }
+
+    fn eqlDescs(a: []const Desc, b: []const Desc) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |x, y| if (!x.eql(y)) return false;
         return true;
     }
 };
-
-pub const Kill = struct { param: u32, path: []const u32, ends: bool };
-
-/// Parameter `from` (or something it points to) is stored at `path` below what parameter `into` points to.
-/// With `from_path`, what is stored is the storage that was read at that path below parameter `from` (`swap` moves
-/// the buffer of one container into another), not the parameter itself.
-/// `moves`: the storage went (`swap`), not a copy of the pointers that lead to it.
-pub const Store = struct { from: u32, into: u32, path: []const u32, from_path: ?[]const u32 = null, moves: bool = false };
-
-/// The result depends on parameter `param` (`stored`: on what was read out of it, not the parameter itself),
-/// at `path` below what it points to.
-/// `interior`: the pointer that comes back points inside what the parameter points to (a field, an element), not at it.
-pub const RetRef = struct { param: u32, path: []const u32, stored: bool, interior: bool = false };
 
 pub const Result = struct {
     name: []const u8,
@@ -125,7 +169,9 @@ pub const Program = struct {
     gpa: Allocator,
     /// Holds the results: lives as long as the program.
     arena: Allocator,
+    packs: []const *const schema.Pack,
     /// Every function by name: instances of one generic function share it, so a call picks by the types it passes.
+    /// The same function exported into several packs is listed once.
     funcs: std.StringHashMapUnmanaged(std.ArrayList(Ref)) = .empty,
     results: std.StringHashMapUnmanaged(*Result) = .empty,
     /// Functions being analyzed, with the summary assumed for them while their own body is read: a call back into
@@ -143,18 +189,45 @@ pub const Program = struct {
     param_names: ?ParamNames = null,
 
     pub fn init(gpa: Allocator, arena: Allocator, packs: []const *const schema.Pack) Allocator.Error!Program {
-        var p: Program = .{ .gpa = gpa, .arena = arena };
+        var p: Program = .{ .gpa = gpa, .arena = arena, .packs = packs };
         for (packs) |pack| for (pack.t.funcs) |f| {
             const gop = try p.funcs.getOrPut(arena, pack.str(f.fqn));
             if (!gop.found_existing) gop.value_ptr.* = .empty;
-            try gop.value_ptr.append(arena, .{ .pack = pack, .func = f });
+            const here: Ref = .{ .pack = pack, .func = f };
+            var dup = false;
+            for (gop.value_ptr.items) |other| if (sameFunc(other, here)) {
+                dup = true;
+            };
+            if (!dup) try gop.value_ptr.append(arena, here);
         };
         return p;
     }
 
+    /// Two exports of one function: the same declared name, file, line and parameter types.
+    fn sameFunc(a: Ref, b: Ref) bool {
+        if (a.func.line != b.func.line) return false;
+        const fa = a.pack.t.files[@backingInt(a.func.file)];
+        const fb = b.pack.t.files[@backingInt(b.func.file)];
+        if (!std.mem.eql(u8, a.pack.str(fa.path), b.pack.str(fb.path)) or !std.mem.eql(u8, a.pack.str(fa.module), b.pack.str(fb.module))) return false;
+        const pa = a.pack.t.params[a.func.params.off..][0..a.func.params.len];
+        const pb = b.pack.t.params[b.func.params.off..][0..b.func.params.len];
+        if (pa.len != pb.len) return false;
+        for (pa, pb) |x, y| if (!std.mem.eql(u8, a.pack.typeName(x.ty), b.pack.typeName(y.ty))) return false;
+        return true;
+    }
+
+    fn packIndex(p: *Program, pack: *const schema.Pack) usize {
+        for (p.packs, 0..) |q, i| if (q == pack) return i;
+        return 0;
+    }
+
+    fn keyOf(p: *Program, ref: Ref) Allocator.Error![]const u8 {
+        return std.fmt.allocPrint(p.arena, "{s}#{d}.{x}", .{ ref.pack.str(ref.func.fqn), p.packIndex(ref.pack), ref.func.id });
+    }
+
     /// The function a call names. Several functions of one name are instances of a generic function: the one whose
     /// parameters have the types of the arguments is meant, and when that does not settle it the call is unknown.
-    fn resolve(p: *Program, name: []const u8, pack: *const schema.Pack, arg_tys: []const schema.TypeId) ?Ref {
+    pub fn resolve(p: *Program, name: []const u8, pack: *const schema.Pack, arg_tys: []const schema.TypeId) ?Ref {
         const list = p.funcs.get(name) orelse return null;
         if (list.items.len == 1) return list.items[0];
         var found: ?Ref = null;
@@ -166,14 +239,14 @@ pub const Program = struct {
                 if (!std.mem.eql(u8, cand.pack.typeName(param.ty), if (ty == .none) "?" else pack.typeName(ty))) same = false;
             }
             if (!same) continue;
-            if (found) |f| if (f.func.id != cand.func.id) return null;
+            if (found != null) return null;
             found = cand;
         }
         return found;
     }
 
     pub fn analyze(p: *Program, ref: Ref) Allocator.Error!*const Result {
-        const key = try std.fmt.allocPrint(p.arena, "{s}#{x}", .{ ref.pack.str(ref.func.fqn), ref.func.id });
+        const key = try p.keyOf(ref);
         if (p.results.get(key)) |done| return done;
         if (p.tentative.get(key)) |t| {
             for (t.on) |k| try p.consulted.put(p.arena, k, {});
@@ -181,7 +254,7 @@ pub const Program = struct {
         }
         var outer = p.consulted;
         p.consulted = .empty;
-        // Start from the most optimistic summary: everything is freed, nothing is invalidated. Recursion that
+        // Start from the most optimistic summary: everything is freed, nothing else happens. Recursion that
         // frees on every path keeps it; recursion that does not loses it in the first round.
         var guess: Summary = .{ .frees = ~@as(u64, 0), .assumed = true };
         var rounds: u32 = 0;
@@ -231,8 +304,8 @@ pub const Program = struct {
 
     /// What a call to `ref` does, read from its body; the assumed summary while it is being analyzed (recursion);
     /// null when its run was cut short.
-    fn summaryOf(p: *Program, ref: Ref) Allocator.Error!?Summary {
-        const key = try std.fmt.allocPrint(p.arena, "{s}#{x}", .{ ref.pack.str(ref.func.fqn), ref.func.id });
+    pub fn summaryOf(p: *Program, ref: Ref) Allocator.Error!?Summary {
+        const key = try p.keyOf(ref);
         if (p.busy.get(key)) |assumed| {
             try p.consulted.put(p.arena, key, {});
             return assumed;
@@ -242,63 +315,78 @@ pub const Program = struct {
     }
 };
 
-const Error = Allocator.Error || error{Unsupported};
+pub const Error = Allocator.Error || error{Unsupported};
 
 const Token = struct { site: u32, sub: u32, loc: schema.LocId };
 
-const OwnerKind = enum {
-    /// A stack slot (`n` is its `alloc`). Pointers to it must not leave the function.
+pub const Kind = enum(u8) {
+    /// A stack slot (`a` is its `alloc`). Pointers to it must not leave the function.
     local,
-    /// The memory behind parameter `n`: the caller's.
-    param,
-    /// An allocation made at call `n`.
+    /// An allocation, handle or buffer made by call `a` (`b`: which of the call's results, and which of two recent
+    /// instances of the site, see `Run.mint`).
     heap,
-    /// The storage a pointer read out of `place` points into (`n` is the instruction that read it).
-    buffer,
-    /// The object stored at `place` (an arena, a container): while it lives, what it handed out is valid.
+    /// What the caller gave: `b == 0`, the value of the parameter place `a` (the pointer itself, or a part of a
+    /// by-value aggregate); `b == 1`, the memory behind the place `a`; `b == 2`, the elements inline in the place `a`
+    /// (a pointer to one of them is stale when an operation moves them).
+    init,
+    /// The incarnation of the aggregate (an arena, a container) stored at place `a`: while it lives, what it handed
+    /// out is valid.
     object,
-    /// Storage that the call `n` moved to `place` (`mem.swap`): it ends with whatever ends `place`, and the pointers
-    /// that were read from where it came from (`moved_origin`) end with it.
-    moved,
+    /// The end of identity `a` (`b == 1`: it stands for several blocks, or the end depends on room nobody could
+    /// read): a value that holds it leads into memory that is gone.
+    tomb,
 };
 
-const Owner = struct { kind: OwnerKind, n: u32, place: PlaceId };
+pub const Ident = struct { kind: Kind, a: u32, b: u32 };
 
-const Event = struct { loc: schema.LocId, text: []const u8, trail: ?*const diag.Trail };
+pub const Event = struct { loc: schema.LocId, text: []const u8, trail: ?*const diag.Trail, soft: bool = false };
 
-const Pending = struct { loc: schema.LocId, place: PlaceId, site: u32 };
+pub const Pending = struct { loc: schema.LocId, ident: dom.Id, site: u32 };
 
 /// `cap_lb`: the container holds at least this many elements without reallocating. `len_ub`: it holds at most this
 /// many now, when that is known.
-const Cap = struct { cap_lb: u64 = 0, len_ub: ?u64 = null };
+/// A second free of a handle that may only be an ignored error: reported where the error is propagated.
+pub const Cancel = struct { tomb: dom.Id };
 
-const Pred = struct { subject: Val, ptr: bool, present_if_true: bool };
+pub const Over = struct { val: Val, stamp: u32 };
 
-const Trail = diag.Trail;
+pub const Cap = struct { cap_lb: u64 = 0, len_ub: ?u64 = null, sym: bool = false };
 
-const State = struct {
+pub const Pred = struct { subject: Val, ptr: bool, present_if_true: bool, ty: schema.TypeId };
+
+pub const Trail = diag.Trail;
+
+pub const State = struct {
     alive: bool = true,
     mem: std.AutoArrayHashMapUnmanaged(PlaceId, Val) = .empty,
     live: Set = .empty,
     ended: Set = .empty,
-    /// Parameters freed on every path that led here (the dead set is the paths' union).
+    /// Parameter values freed on every path that led here (the dead set is the paths' union).
     freed: Set = .empty,
-    /// Owners that no longer exist, and why (the first cause on this path).
+    /// Identities that no longer exist, and why (the first cause on this path).
     dead: std.AutoArrayHashMapUnmanaged(dom.Id, Event) = .empty,
+    /// Allocations and objects that exist now (on some path): a new one of the same site gets another name.
+    alloced: Set = .empty,
+    /// Identities that stand for several allocations: ending one does not end the others.
+    multi: Set = .empty,
     /// Stack slots whose address went into a container that outlives them: fine if the entry is removed before
     /// the function returns (a registry for the duration of a call).
     pending: std.AutoArrayHashMapUnmanaged(dom.Id, Pending) = .empty,
     /// What is known of the room in a container (an array list, a hash map) at a place: how many elements fit without
     /// reallocating, and how many are in it at most. A place without an entry is known to hold nothing of the sort.
     caps: std.AutoArrayHashMapUnmanaged(PlaceId, Cap) = .empty,
+    /// The values computed so far that an end or a rename changed on this path (by instruction; the stamp says which
+    /// definition of the instruction it belongs to).
+    over: std.AutoArrayHashMapUnmanaged(u32, Over) = .empty,
     trail: ?*const Trail = null,
 
-    fn clone(s: State, arena: Allocator) Allocator.Error!State {
+    pub fn clone(s: State, arena: Allocator) Allocator.Error!State {
         var c = s;
         c.mem = try s.mem.clone(arena);
         c.dead = try s.dead.clone(arena);
         c.pending = try s.pending.clone(arena);
         c.caps = try s.caps.clone(arena);
+        c.over = try s.over.clone(arena);
         return c;
     }
 
@@ -311,6 +399,8 @@ const State = struct {
         out.live = try a.live.merge(arena, b.live);
         out.freed = try a.freed.minus(arena, try a.freed.minus(arena, b.freed));
         out.ended = try a.ended.merge(arena, b.ended);
+        out.alloced = try a.alloced.merge(arena, b.alloced);
+        out.multi = try a.multi.merge(arena, b.multi);
         var pending_it = b.pending.iterator();
         while (pending_it.next()) |e| {
             const gop = try out.pending.getOrPut(arena, e.key_ptr.*);
@@ -319,7 +409,9 @@ const State = struct {
         var dead_it = b.dead.iterator();
         while (dead_it.next()) |e| {
             const gop = try out.dead.getOrPut(arena, e.key_ptr.*);
-            if (!gop.found_existing) gop.value_ptr.* = e.value_ptr.*;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = e.value_ptr.*;
+            } else if (gop.value_ptr.soft and !e.value_ptr.soft) gop.value_ptr.* = e.value_ptr.*;
         }
         var k: usize = 0;
         while (k < out.caps.count()) {
@@ -338,23 +430,21 @@ const State = struct {
             const gop = try out.mem.getOrPut(arena, e.key_ptr.*);
             gop.value_ptr.* = if (gop.found_existing) try gop.value_ptr.join(arena, e.value_ptr.*) else e.value_ptr.*;
         }
+        var over_it = b.over.iterator();
+        while (over_it.next()) |e| {
+            const gop = try out.over.getOrPut(arena, e.key_ptr.*);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = e.value_ptr.*;
+            } else if (gop.value_ptr.stamp == e.value_ptr.stamp) gop.value_ptr.val = try gop.value_ptr.val.join(arena, e.value_ptr.val);
+        }
         return out;
-    }
-
-    fn die(s: *State, arena: Allocator, id: dom.Id, event: Event) Allocator.Error!void {
-        const gop = try s.dead.getOrPut(arena, id);
-        if (!gop.found_existing) gop.value_ptr.* = event;
-    }
-
-    fn revive(s: *State, id: dom.Id) void {
-        _ = s.dead.swapRemove(id);
     }
 
     fn eql(a: State, b: State) bool {
         if (a.alive != b.alive) return false;
         if (!a.alive) return true;
         if (!a.live.eql(b.live) or !a.ended.eql(b.ended)) return false;
-        if (!a.freed.eql(b.freed)) return false;
+        if (!a.freed.eql(b.freed) or !a.alloced.eql(b.alloced) or !a.multi.eql(b.multi)) return false;
         if (a.caps.count() != b.caps.count()) return false;
         var caps_it = a.caps.iterator();
         while (caps_it.next()) |e| {
@@ -364,7 +454,15 @@ const State = struct {
         if (a.pending.count() != b.pending.count()) return false;
         for (a.pending.keys()) |k| if (!b.pending.contains(k)) return false;
         if (a.dead.count() != b.dead.count()) return false;
-        for (a.dead.keys()) |k| if (!b.dead.contains(k)) return false;
+        for (a.dead.keys(), a.dead.values()) |k, v| {
+            const other = b.dead.get(k) orelse return false;
+            if (other.soft != v.soft) return false;
+        }
+        if (a.over.count() != b.over.count()) return false;
+        for (a.over.keys(), a.over.values()) |k, v| {
+            const other = b.over.get(k) orelse return false;
+            if (v.stamp != other.stamp or !v.val.eql(other.val)) return false;
+        }
         if (a.mem.count() != b.mem.count()) return false;
         var it = a.mem.iterator();
         while (it.next()) |e| {
@@ -381,7 +479,20 @@ const BlockCtx = struct { incoming: std.ArrayList(Incoming) = .empty };
 
 const LoopCtx = struct { back: std.ArrayList(State) = .empty };
 
-const Run = struct {
+/// What one `ret` instruction showed about the function, kept until the run ends: the last execution of the
+/// instruction is the one with the settled facts.
+const Snap = struct {
+    kills: []const Slot,
+    frees: u64,
+    moves: u64,
+    ret: []const Leaf,
+    ret_place: ?Slot,
+    writes: []const SnapWrite,
+};
+
+const SnapWrite = struct { into: Slot, descs: []const Desc };
+
+pub const Run = struct {
     prog: *Program,
     arena: Allocator,
     pack: *const schema.Pack,
@@ -392,8 +503,15 @@ const Run = struct {
     places: Places = .{},
     tokens: std.ArrayList(Token) = .empty,
     token_map: std.AutoHashMapUnmanaged(u64, dom.Id) = .empty,
-    owners: std.ArrayList(Owner) = .empty,
-    owner_map: std.AutoHashMapUnmanaged(Owner, dom.Id) = .empty,
+    idents: std.ArrayList(Ident) = .empty,
+    ident_map: std.AutoHashMapUnmanaged(Ident, dom.Id) = .empty,
+    /// The objects (arenas, pools) an allocation was made from: it ends with them.
+    region_of: std.AutoHashMapUnmanaged(dom.Id, Set) = .empty,
+    /// How each tombstone came to be (the first time, on any path).
+    tomb_events: std.AutoHashMapUnmanaged(dom.Id, Event) = .empty,
+    /// The allocations that flow out of the function (into the result or into memory the caller owns), in order of
+    /// appearance: the `k` of `Desc.fresh`.
+    fresh_ids: std.ArrayList(dom.Id) = .empty,
     vals: []Val,
     by_id: []?*const Inst,
     names: std.AutoHashMapUnmanaged(u32, []const u8) = .empty,
@@ -402,23 +520,30 @@ const Run = struct {
     tok_cells: std.AutoHashMapUnmanaged(dom.Id, u32) = .empty,
     /// Names of the fields places stand for.
     field_names: std.AutoHashMapUnmanaged(PlaceId, []const u8) = .empty,
-    /// For the summary: what the function does to what its parameters point into.
-    kills: std.ArrayList(Kill) = .empty,
-    /// Parameters freed on every path that returns (a conditional free is not one the caller can rely on).
-    frees_all: u64 = ~@as(u64, 0),
-    moves_all: u64 = ~@as(u64, 0),
-    any_ret: bool = false,
-    stores: std.ArrayList(Store) = .empty,
-    ret_refs: std.ArrayList(RetRef) = .empty,
-    ret_alloc: bool = false,
+    snaps: std.AutoArrayHashMapUnmanaged(u32, Snap) = .empty,
+    /// The state before a call to a container operation that can fail by running out of memory.
+    pre_state: std.AutoHashMapUnmanaged(u32, State) = .empty,
+    /// The slots of the parameters that the function dereferenced.
+    derefs: std.ArrayList(Slot) = .empty,
+    /// The parameter place a fresh block was last stored into: a store through a pointer into it lands below that place.
+    holder_of: std.AutoHashMapUnmanaged(dom.Id, PlaceId) = .empty,
+    cancels: std.AutoHashMapUnmanaged(u32, Cancel) = .empty,
+    /// The pointer to a field that a pointer to its parent (`@fieldParentPtr`) was made from, by that parent.
+    up_of: std.AutoHashMapUnmanaged(PlaceId, PlaceId) = .empty,
+    /// The instructions whose value has ever held an identity: the only ones an end or a rename can change.
+    carriers: std.ArrayList(u32) = .empty,
+    carries: []bool = &.{},
+    /// Which definition of each instruction `vals` holds (0: none yet), and how many there have been.
+    stamps: []u32 = &.{},
+    defs: u32 = 0,
+    /// The state of the instruction being run.
+    cur: ?*State = null,
+    /// Stores through a pointer into storage a parameter holds (`list.items[i] = x`): the elements of a container
+    /// are not followed in memory, but the summary says they were written.
+    elem_stores: std.AutoArrayHashMapUnmanaged(PlaceId, Val) = .empty,
     /// For the summary: bit i is set when a linear value that came in as parameter i went into memory the function
     /// does not own.
     token_stored: u64 = 0,
-    /// Where the storage of a `.moved` owner was read: the owner itself is keyed by where it was put.
-    moved_origin: std.AutoHashMapUnmanaged(dom.Id, PlaceId) = .empty,
-    /// For the summary: the parameter the result is the pointer of, on every path that returns.
-    ret_same: ?u32 = null,
-    ret_same_conflict: bool = false,
     /// The parameter a token came in as.
     param_of_tok: std.AutoHashMapUnmanaged(dom.Id, u32) = .empty,
     /// What a call that may move its argument did to it, for when the payload turns out to exist.
@@ -443,6 +568,10 @@ const Run = struct {
         @memset(vals, .none);
         const by_id = try arena.alloc(?*const Inst, max_id + 1);
         @memset(by_id, null);
+        const stamps = try arena.alloc(u32, max_id + 1);
+        @memset(stamps, 0);
+        const carries = try arena.alloc(bool, max_id + 1);
+        @memset(carries, false);
         var r: Run = .{
             .prog = prog,
             .arena = arena,
@@ -452,6 +581,8 @@ const Run = struct {
             .func = ref.func,
             .name = ref.pack.str(ref.func.fqn),
             .vals = vals,
+            .stamps = stamps,
+            .carries = carries,
             .by_id = by_id,
         };
         r.index(ref.pack.instsOf(ref.func.insts));
@@ -484,32 +615,10 @@ const Run = struct {
         const arena = r.prog.arena;
         const diags = try arena.alloc(diag.Diag, r.diags.items.len);
         for (diags, r.diags.items) |*out, d| out.* = try r.persist(arena, d);
-        const kills = try arena.alloc(Kill, r.kills.items.len);
-        for (kills, r.kills.items) |*out, k| out.* = .{ .param = k.param, .path = try arena.dupe(u32, k.path), .ends = k.ends };
-        return .{
-            .name = try arena.dupe(u8, r.name),
-            .diags = diags,
-            .stats = r.stats,
-            .summary = .{ .complete = complete, .ret = try r.persistRefs(arena), .ret_alloc = r.ret_alloc, .kills = kills, .frees = if (r.any_ret) r.frees_all else 0, .stores = try r.persistStores(arena), .token_stores = r.token_stored, .moves = if (r.any_ret) r.moves_all else 0, .ret_same = if (r.ret_same_conflict) null else r.ret_same },
-        };
-    }
-
-    fn persistStores(r: *Run, arena: Allocator) Allocator.Error![]const Store {
-        const out = try arena.alloc(Store, r.stores.items.len);
-        for (out, r.stores.items) |*slot, s| slot.* = .{
-            .from = s.from,
-            .into = s.into,
-            .path = try arena.dupe(u32, s.path),
-            .from_path = if (s.from_path) |fp| try arena.dupe(u32, fp) else null,
-            .moves = s.moves,
-        };
-        return out;
-    }
-
-    fn persistRefs(r: *Run, arena: Allocator) Allocator.Error![]const RetRef {
-        const out = try arena.alloc(RetRef, r.ret_refs.items.len);
-        for (out, r.ret_refs.items) |*slot, ref| slot.* = .{ .param = ref.param, .path = try arena.dupe(u32, ref.path), .stored = ref.stored, .interior = ref.interior };
-        return out;
+        var summary = try r.merge(arena);
+        summary.complete = complete;
+        summary.token_stores = r.token_stored;
+        return .{ .name = try arena.dupe(u8, r.name), .diags = diags, .stats = r.stats, .summary = summary };
     }
 
     fn persist(r: *Run, arena: Allocator, d: diag.Diag) Allocator.Error!diag.Diag {
@@ -531,7 +640,7 @@ const Run = struct {
     }
 
     /// Counts an assumption once per instruction, however many times the loop around it is run.
-    fn tally(r: *Run, comptime field: []const u8, inst: *const Inst) Allocator.Error!void {
+    pub fn tally(r: *Run, comptime field: []const u8, inst: *const Inst) Allocator.Error!void {
         const kind: u64 = comptime @intCast(std.meta.fieldIndex(Stats, field).?);
         const gop = try r.tallied.getOrPut(r.arena, (@as(u64, inst.id) << 8) | kind);
         if (!gop.found_existing) @field(r.stats, field) += 1;
@@ -539,7 +648,7 @@ const Run = struct {
 
     // Findings.
 
-    fn report(r: *Run, st: *const State, kind: diag.Kind, loc: schema.LocId, extra: []const diag.Note, comptime fmt: []const u8, args: anytype) Error!void {
+    pub fn report(r: *Run, st: *const State, kind: diag.Kind, loc: schema.LocId, extra: []const diag.Note, comptime fmt: []const u8, args: anytype) Error!void {
         if (r.quiet != 0) return;
         const text = try std.fmt.allocPrint(r.arena, fmt, args);
         const key = try std.fmt.allocPrint(r.arena, "{t}@{d}:{s}", .{ kind, @backingInt(loc), text });
@@ -548,25 +657,21 @@ const Run = struct {
         try r.diags.append(r.arena, .{ .kind = kind, .loc = loc, .text = text, .notes = extra, .trail = st.trail });
     }
 
-    fn reportAt(r: *Run, st: *const State, kind: diag.Kind, loc: schema.LocId, extra: []const diag.Note, comptime fmt: []const u8, args: anytype) Error!void {
-        return r.report(st, kind, loc, extra, fmt, args);
-    }
-
-    fn unsupported(r: *Run, inst: *const Inst, comptime fmt: []const u8, args: anytype) Error {
+    pub fn unsupported(r: *Run, inst: *const Inst, comptime fmt: []const u8, args: anytype) Error {
         const text = try std.fmt.allocPrint(r.arena, fmt, args);
         try r.diags.append(r.arena, .{ .kind = .unsupported, .loc = if (inst.loc != .none) inst.loc else r.cur_loc, .text = text });
         return error.Unsupported;
     }
 
-    fn note(r: *Run, loc: schema.LocId, comptime fmt: []const u8, args: anytype) Allocator.Error!diag.Note {
+    pub fn note(r: *Run, loc: schema.LocId, comptime fmt: []const u8, args: anytype) Allocator.Error!diag.Note {
         return .{ .loc = loc, .text = try std.fmt.allocPrint(r.arena, fmt, args) };
     }
 
-    fn noteList(r: *Run, items: []const diag.Note) Allocator.Error![]const diag.Note {
+    pub fn noteList(r: *Run, items: []const diag.Note) Allocator.Error![]const diag.Note {
         return r.arena.dupe(diag.Note, items);
     }
 
-    // Tokens and owners.
+    // Tokens and identities.
 
     fn token(r: *Run, site: u32, sub: u32, loc: schema.LocId) Allocator.Error!dom.Id {
         const key = (@as(u64, site) << 32) | sub;
@@ -578,14 +683,170 @@ const Run = struct {
         return gop.value_ptr.*;
     }
 
-    fn owner(r: *Run, kind: OwnerKind, n: u32, place: PlaceId) Allocator.Error!dom.Id {
-        const key: Owner = .{ .kind = kind, .n = n, .place = place };
-        const gop = try r.owner_map.getOrPut(r.arena, key);
+    pub fn ident(r: *Run, kind: Kind, a: u32, b: u32) Allocator.Error!dom.Id {
+        const key: Ident = .{ .kind = kind, .a = a, .b = b };
+        const gop = try r.ident_map.getOrPut(r.arena, key);
         if (!gop.found_existing) {
-            gop.value_ptr.* = @intCast(r.owners.items.len);
-            try r.owners.append(r.arena, key);
+            gop.value_ptr.* = @intCast(r.idents.items.len);
+            try r.idents.append(r.arena, key);
         }
         return gop.value_ptr.*;
+    }
+
+    /// A new allocation or object of `a`, result `sub`. Each site has two names: the most recent block, and the
+    /// summary of every older one. A site that runs again while its block is still alive demotes what the first name
+    /// stood for into the summary (in the state and in the values the path computed); a block that was ended is
+    /// already a tombstone wherever it is held, so its name is free to use.
+    pub fn mint(r: *Run, st: *State, kind: Kind, a: u32, sub: u32) Allocator.Error!dom.Id {
+        const cur = try r.ident(kind, a, sub * 2);
+        if (st.alloced.has(cur)) try r.demote(st, cur, try r.ident(kind, a, sub * 2 + 1));
+        st.alloced = try st.alloced.with(r.arena, cur);
+        _ = st.dead.swapRemove(cur);
+        return cur;
+    }
+
+    /// Whether `v` holds `from` anywhere.
+    fn holds(v: Val, from: dom.Id, moved: bool) bool {
+        if (v.ids.has(from) or v.obj.has(from) or (moved and v.moved.has(from))) return true;
+        if (v.parts) |parts| for (parts) |part| if (holds(part, from, moved)) return true;
+        return false;
+    }
+
+    /// `v` with `from` replaced by `to`, or with `to` added next to `from` when `keep`.
+    fn swapped(r: *Run, v: Val, from: dom.Id, to: dom.Id, keep: bool, moved: bool) Allocator.Error!Val {
+        if (!holds(v, from, moved)) return v;
+        var out = v;
+        for ([_]*Set{ &out.ids, &out.obj, &out.moved }, [_]bool{ true, true, moved }) |set_, on| {
+            if (on and set_.has(from)) set_.* = try (if (keep) set_.* else try set_.without(r.arena, from)).with(r.arena, to);
+        }
+        if (v.parts) |parts| {
+            const copy = try r.arena.alloc(Val, parts.len);
+            for (copy, parts) |*slot, part| slot.* = try r.swapped(part, from, to, keep, moved);
+            out.parts = copy;
+        }
+        return out;
+    }
+
+    /// Every value the path holds: the memory, the values computed so far.
+    /// Drops the changed values of definitions that have been replaced since.
+    fn pruneOver(r: *Run, st: *State) void {
+        var k: usize = 0;
+        while (k < st.over.count()) {
+            if (st.over.values()[k].stamp != r.stamps[st.over.keys()[k]]) st.over.swapRemoveAt(k) else k += 1;
+        }
+    }
+
+    fn swapAll(r: *Run, st: *State, from: dom.Id, to: dom.Id, keep: bool, moved: bool) Allocator.Error!void {
+        r.pruneOver(st);
+        for (st.mem.values()) |*v| v.* = try r.swapped(v.*, from, to, keep, moved);
+        for (st.pending.values()) |*v| if (v.ident == from) {
+            v.ident = to;
+        };
+        for (r.carriers.items) |i| {
+            if (r.stamps[i] == 0) continue;
+            const v = if (st.over.get(i)) |ov| (if (ov.stamp == r.stamps[i]) ov.val else r.vals[i]) else r.vals[i];
+            if (!holds(v, from, moved)) continue;
+            try st.over.put(r.arena, i, .{ .val = try r.swapped(v, from, to, keep, moved), .stamp = r.stamps[i] });
+        }
+    }
+
+    fn demote(r: *Run, st: *State, from: dom.Id, to: dom.Id) Allocator.Error!void {
+        if (st.alloced.has(to)) st.multi = try st.multi.with(r.arena, to);
+        st.alloced = try (try st.alloced.without(r.arena, from)).with(r.arena, to);
+        if (r.region_of.get(from)) |regions| {
+            const have = r.region_of.get(to) orelse Set.empty;
+            try r.region_of.put(r.arena, to, try have.merge(r.arena, regions));
+        }
+        try r.swapAll(st, from, to, false, true);
+    }
+
+    /// The tombstone of `id`: a value that holds it leads into memory that is gone. A soft one (`id` stands for several
+    /// blocks, or the end depends on room nobody could read) is only counted when used.
+    pub fn tomb(r: *Run, id: dom.Id, soft: bool) Allocator.Error!dom.Id {
+        return r.ident(.tomb, id, @intFromBool(soft));
+    }
+
+    /// Ends `id` on this path: every value that holds it holds its tombstone from now on.
+    pub fn kill(r: *Run, st: *State, id: dom.Id, event: Event) Allocator.Error!void {
+        if (r.identRec(id).kind == .tomb) return;
+        const soft = event.soft or st.multi.has(id);
+        var e = event;
+        e.soft = soft;
+        const t = try r.tomb(id, soft);
+        const gop = try r.tomb_events.getOrPut(r.arena, t);
+        if (!gop.found_existing) gop.value_ptr.* = e;
+        const marked = try st.dead.getOrPut(r.arena, id);
+        // Already gone at least as surely: every value holds its tombstone already.
+        if (marked.found_existing and (!marked.value_ptr.soft or soft)) return;
+        marked.value_ptr.* = e;
+        if (!soft) st.alloced = try st.alloced.without(r.arena, id);
+        try r.swapAll(st, id, t, soft, false);
+    }
+
+    pub fn identRec(r: *Run, id: dom.Id) Ident {
+        return r.idents.items[id];
+    }
+
+    /// The parameter a place hangs below, when it is rooted at one.
+    /// The step to the element at an index: its own place for a constant index (as a field of a struct), the place of
+    /// all of them otherwise.
+    fn elemStep(r: *Run, at: schema.Operand) u32 {
+        if (at.kind != .constant) return dom.elem_step;
+        const k = r.v.constant(at);
+        return if (k.kind == .int and k.a < (1 << 20)) dom.index_step + @as(u32, @intCast(k.a)) else dom.elem_step;
+    }
+
+    pub fn paramOf(r: *Run, pl: PlaceId) ?u32 {
+        const rec = r.places.rec(pl);
+        return if (rec.kind == .param) rec.n else null;
+    }
+
+    pub fn slotOfPlace(r: *Run, pl: PlaceId, kind: SlotKind) Allocator.Error!?Slot {
+        const n = r.paramOf(pl) orelse return null;
+        return .{ .param = n, .path = try r.places.path(r.arena, pl), .kind = kind };
+    }
+
+    /// The slot of the caller's world an identity stands for, if it stands for one.
+    pub fn slotOf(r: *Run, id: dom.Id) Allocator.Error!?Slot {
+        const rec = r.identRec(id);
+        return switch (rec.kind) {
+            .init => try r.slotOfPlace(rec.a, switch (rec.b) {
+                0 => .value,
+                1 => .content,
+                else => .view,
+            }),
+            .object => try r.slotOfPlace(rec.a, .object),
+            else => null,
+        };
+    }
+
+    /// The `k` of `Desc.fresh` for an allocation of this run.
+    fn freshIndex(r: *Run, id: dom.Id) Allocator.Error!u32 {
+        for (r.fresh_ids.items, 0..) |x, i| if (x == id) return @intCast(i);
+        try r.fresh_ids.append(r.arena, id);
+        return @intCast(r.fresh_ids.items.len - 1);
+    }
+
+    pub fn descsOf(r: *Run, v: Val) Allocator.Error![]const Desc {
+        var out: std.ArrayList(Desc) = .empty;
+        // Memory that is already gone is only reported as gone when nothing alive is left in the value.
+        var live = false;
+        for (v.ids.ids) |id| live = live or r.identRec(id).kind != .tomb;
+        for ([_]Set{ v.ids, v.obj }, [_]bool{ false, true }) |set_, is_obj| for (set_.ids) |id| {
+            const rec = r.identRec(id);
+            const d: Desc = .{ .src = switch (rec.kind) {
+                .heap => .{ .fresh = try r.freshIndex(id) },
+                .init, .object => .{ .from = (try r.slotOf(id)) orelse continue },
+                .tomb => if (rec.b == 0 and !live) .gone else continue,
+                .local => continue,
+            }, .obj = is_obj };
+            var dup = false;
+            for (out.items) |x| if (x.eql(d)) {
+                dup = true;
+            };
+            if (!dup) try out.append(r.arena, d);
+        };
+        return out.items;
     }
 
     fn nameOf(r: *Run, site: u32) []const u8 {
@@ -607,18 +868,30 @@ const Run = struct {
 
     // Values.
 
-    fn operand(r: *Run, o: schema.Operand) Val {
+    pub fn operand(r: *Run, o: schema.Operand) Val {
         return switch (o.kind) {
-            .inst => r.vals[o.value],
+            .inst => r.valueOf(o.value),
+            .constant => blk: {
+                // The address of a global: memory of its own that nothing ends.
+                const k = r.v.constant(o);
+                if (k.kind == .undef or k.kind == .null or !r.ty.isPointer(k.ty)) break :blk .none;
+                const pl = r.places.root(r.arena, .other, o.value) catch break :blk .none;
+                break :blk .{ .place = pl, .off = 0 };
+            },
             else => .none,
         };
     }
 
-    fn arg(r: *Run, inst: *const Inst, i: usize) Val {
+    fn valueOf(r: *Run, id: u32) Val {
+        if (r.cur) |st| if (st.over.get(id)) |ov| if (ov.stamp == r.stamps[id]) return ov.val;
+        return r.vals[id];
+    }
+
+    pub fn arg(r: *Run, inst: *const Inst, i: usize) Val {
         return r.operand(r.v.ops(inst)[i]);
     }
 
-    fn operandType(r: *Run, o: schema.Operand) schema.TypeId {
+    pub fn operandType(r: *Run, o: schema.Operand) schema.TypeId {
         return switch (o.kind) {
             .inst => if (r.by_id[o.value]) |i| i.ty else .none,
             .constant => r.v.constant(o).ty,
@@ -626,12 +899,19 @@ const Run = struct {
         };
     }
 
-    fn set(r: *Run, inst: *const Inst, val: Val) void {
+    pub fn set(r: *Run, inst: *const Inst, val: Val) void {
+        r.defs += 1;
+        r.stamps[inst.id] = r.defs;
         // A number points nowhere and holds nothing, whatever it was computed from.
         r.vals[inst.id] = switch (r.ty.kind(inst.ty)) {
             .int, .bool, .float, .@"enum", .error_set, .comptime_int, .comptime_float, .void, .noreturn, .enum_literal => Val.none,
             else => val,
         };
+        const v = r.vals[inst.id];
+        if (!r.carries[inst.id] and (!v.ids.isEmpty() or !v.obj.isEmpty() or !v.moved.isEmpty() or v.parts != null)) {
+            r.carries[inst.id] = true;
+            r.carriers.append(r.arena, inst.id) catch {};
+        }
     }
 
     /// A value of type `ty` made of fresh tokens, all of them live.
@@ -662,21 +942,76 @@ const Run = struct {
         }
     }
 
-    // Memory.
+    // Memory. A struct whose fields the pack knows lives in memory field by field, so that a copy of it copies the
+    // identities of every field and a write to one field leaves the others as they were.
 
-    fn readPlace(r: *Run, st: *const State, place: PlaceId) Allocator.Error!Val {
-        if (st.mem.get(place)) |v| {
+    /// The object identities stored at `pl` (not minted when there are none).
+    pub fn objAt(r: *Run, st: *const State, pl: PlaceId) Set {
+        const slot = r.places.find(pl, dom.obj_step) orelse return .empty;
+        return if (st.mem.get(slot)) |v| v.ids else .empty;
+    }
+
+    /// The object identities of the aggregate at `pl`; a new incarnation when it has none yet.
+    pub fn ensureObj(r: *Run, st: *State, pl: PlaceId) Allocator.Error!Set {
+        const have = r.objAt(st, pl);
+        if (!have.isEmpty()) return have;
+        const id = try r.mint(st, .object, pl, 0);
+        const ids = try Set.single(r.arena, id);
+        try st.mem.put(r.arena, try r.places.child(r.arena, pl, dom.obj_step), .{ .ids = ids });
+        return ids;
+    }
+
+    pub fn readVal(r: *Run, st: *State, pl: PlaceId, ty: schema.TypeId) Allocator.Error!Val {
+        return r.readDepth(st, pl, ty, 0);
+    }
+
+    fn readDepth(r: *Run, st: *State, pl: PlaceId, ty: schema.TypeId, depth: u32) Allocator.Error!Val {
+        if (depth < 6 and !st.mem.contains(pl)) if (r.ty.structFields(ty)) |fields| {
+            const parts = try r.arena.alloc(Val, fields.len);
+            for (parts, fields, 0..) |*part, f, k| part.* = try r.readDepth(st, try r.places.child(r.arena, pl, @intCast(k)), f.ty, depth + 1);
+            var out = try Val.aggregate(r.arena, parts);
+            out.obj = r.objAt(st, pl);
+            return out;
+        };
+        var out = try r.readLeaf(st, pl, ty, true);
+        out.obj = r.objAt(st, pl);
+        return out;
+    }
+
+    /// Everything stored at, above or below `pl`, as one value; nothing is made up for what was never touched.
+    pub fn peekFlat(r: *Run, st: *State, pl: PlaceId) Allocator.Error!Val {
+        return (try r.readLeaf(st, pl, .none, false)).flat();
+    }
+
+    /// `key` is a field of `pl`, not one of its elements (what a container holds is not what its storage is) and not
+    /// the bookkeeping of the object.
+    fn partOf(r: *Run, pl: PlaceId, key: PlaceId, elems: bool) bool {
+        if (key == pl) return false;
+        var at = key;
+        while (at != pl) {
+            const rec = r.places.rec(at);
+            if ((rec.step == dom.elem_step and !elems) or rec.step == dom.obj_step or rec.step == dom.len_step) return false;
+            at = rec.parent;
+            if (at == dom.no_place) return false;
+        }
+        return true;
+    }
+
+    pub fn readLeaf(r: *Run, st: *State, pl: PlaceId, ty: schema.TypeId, lazy: bool) Allocator.Error!Val {
+        // The elements of an array stored inline are part of the value; those of a slice are not part of the slice.
+        const elems = ty != .none and r.ty.kind(ty) != .pointer;
+        if (st.mem.get(pl)) |v| {
             // Parts written after the whole was stored are newer than it.
             var out = v;
             var it = st.mem.iterator();
             while (it.next()) |e| {
-                if (e.key_ptr.* != place and r.places.contains(place, e.key_ptr.*)) out = try out.flat().join(r.arena, e.value_ptr.flat());
+                if (r.partOf(pl, e.key_ptr.*, elems)) out = try out.flat().join(r.arena, e.value_ptr.flat());
             }
             return out;
         }
         // Stored whole in an ancestor: project the fields down.
         var path: std.ArrayList(u32) = .empty;
-        var at = place;
+        var at = pl;
         while (true) {
             const rec = r.places.rec(at);
             if (rec.parent == dom.no_place) break;
@@ -695,33 +1030,83 @@ const Run = struct {
         }
         // Stored piecewise below: everything under it, as one value.
         var out: Val = .none;
+        var found = false;
         var it = st.mem.iterator();
         while (it.next()) |e| {
-            if (r.places.contains(place, e.key_ptr.*)) out = try out.join(r.arena, e.value_ptr.flat());
+            if (r.places.contains(pl, e.key_ptr.*) and r.partOf(pl, e.key_ptr.*, elems)) {
+                out = try out.join(r.arena, e.value_ptr.flat());
+                found = true;
+            }
+        }
+        if (found) return out;
+        // What the caller put there: the storage behind a parameter that nothing in this run has touched yet.
+        if (lazy and r.paramOf(pl) != null and (ty == .none or r.ty.hasPointers(ty))) {
+            const v: Val = .{ .ids = try Set.single(r.arena, try r.ident(.init, pl, 1)) };
+            try st.mem.put(r.arena, pl, v);
+            return v;
         }
         return out;
     }
 
-    fn writePlace(r: *Run, st: *State, place: PlaceId, val: Val) Allocator.Error!void {
-        const root = r.places.rec(place);
-        const strong = root.kind == .cell and !r.places.hasElem(place);
+    pub fn writeVal(r: *Run, st: *State, pl: PlaceId, val: Val, ty: schema.TypeId) Allocator.Error!void {
+        return r.writeDepth(st, pl, val, ty, 0);
+    }
+
+    pub fn strongAt(r: *Run, pl: PlaceId) bool {
+        const kind = r.places.rec(pl).kind;
+        return (kind == .cell or kind == .param) and !r.places.hasElem(pl);
+    }
+
+    fn writeDepth(r: *Run, st: *State, pl: PlaceId, val: Val, ty: schema.TypeId, depth: u32) Allocator.Error!void {
+        if (depth < 6) if (r.ty.structFields(ty)) |fields| if (val.parts == null or val.parts.?.len == fields.len) {
+            if (r.strongAt(pl)) _ = st.mem.swapRemove(pl);
+            for (fields, 0..) |f, k| {
+                // A number holds nothing, whatever the value it was cut out of held.
+                const part: Val = if (r.ty.hasTokens(f.ty) or r.ty.hasPointers(f.ty)) val.field(k) else .none;
+                try r.writeDepth(st, try r.places.child(r.arena, pl, @intCast(k)), part, f.ty, depth + 1);
+            }
+            return r.writeObj(st, pl, val.obj);
+        };
+        try r.writeLeaf(st, pl, val);
+        try r.writeObj(st, pl, val.obj);
+    }
+
+    pub fn writeObj(r: *Run, st: *State, pl: PlaceId, obj: Set) Allocator.Error!void {
+        const slot = try r.places.child(r.arena, pl, dom.obj_step);
+        if (r.strongAt(pl)) {
+            // Below a parameter, no object says the caller's is gone and the next use starts a new one.
+            if (obj.isEmpty() and r.paramOf(pl) == null) _ = st.mem.swapRemove(slot) else try st.mem.put(r.arena, slot, .{ .ids = obj });
+        } else if (!obj.isEmpty()) {
+            const old = st.mem.get(slot) orelse Val.none;
+            try st.mem.put(r.arena, slot, .{ .ids = try old.ids.merge(r.arena, obj) });
+        }
+    }
+
+    fn writeLeaf(r: *Run, st: *State, pl: PlaceId, val: Val) Allocator.Error!void {
+        return r.writeLeafAs(st, pl, val, r.strongAt(pl));
+    }
+
+    pub fn writeLeafAs(r: *Run, st: *State, pl: PlaceId, val: Val, strong: bool) Allocator.Error!void {
         // Whatever was stored below is overwritten.
         if (strong) {
             var k: usize = 0;
             while (k < st.mem.count()) {
-                if (st.mem.keys()[k] != place and r.places.contains(place, st.mem.keys()[k])) {
+                if (st.mem.keys()[k] != pl and r.places.contains(pl, st.mem.keys()[k])) {
                     st.mem.swapRemoveAt(k);
                 } else k += 1;
             }
         }
-        const gop = try st.mem.getOrPut(r.arena, place);
-        gop.value_ptr.* = if (strong or !gop.found_existing) val else try gop.value_ptr.join(r.arena, val);
+        var stored = val;
+        stored.obj = .empty;
+        if (r.paramOf(pl) != null) for (val.ids.ids) |id| if (r.identRec(id).kind == .heap) try r.holder_of.put(r.arena, id, pl);
+        const gop = try st.mem.getOrPut(r.arena, pl);
+        gop.value_ptr.* = if (strong or !gop.found_existing) stored else try gop.value_ptr.join(r.arena, stored);
     }
 
-    fn isLocalPtr(r: *Run, p: Val) bool {
+    pub fn isLocalPtr(r: *Run, p: Val) bool {
         if (p.place) |pl| return r.places.rec(pl).kind == .cell;
-        if (p.owners.isEmpty()) return false;
-        for (p.owners.ids) |o| if (r.owners.items[o].kind != .local) return false;
+        if (p.ids.isEmpty()) return false;
+        for (p.ids.ids) |o| if (r.identRec(o).kind != .local) return false;
         return true;
     }
 
@@ -734,7 +1119,7 @@ const Run = struct {
     }
 
     /// Ends the tokens of `val` for `how` (a phrase for the finding): a sink.
-    fn sink(r: *Run, st: *State, inst: *const Inst, val: Val, comptime how: []const u8, callee: []const u8) Error!void {
+    pub fn sink(r: *Run, st: *State, inst: *const Inst, val: Val, comptime how: []const u8, callee: []const u8) Error!void {
         if (anyAlt(val) and val.toks.meets(st.ended))
             return r.unsupported(inst, "a linear value that may be one of several (a join merged them) is consumed, and one of them was consumed before: the checker cannot tell which", .{});
         for (val.toks.ids) |t| {
@@ -756,7 +1141,7 @@ const Run = struct {
     }
 
     /// A read of `val`: its tokens must not be consumed already, and what it points into must be alive.
-    fn use(r: *Run, st: *State, inst: *const Inst, val: Val, what: []const u8) Error!void {
+    pub fn use(r: *Run, st: *State, inst: *const Inst, val: Val, what: []const u8) Error!void {
         for (val.toks.ids) |t| if (st.ended.has(t)) {
             var items: std.ArrayList(diag.Note) = .empty;
             if (r.ends.get(t)) |e| try items.append(r.arena, .{ .loc = e.loc, .text = e.text });
@@ -765,35 +1150,696 @@ const Run = struct {
         try r.alive(st, inst, val, what);
     }
 
-    /// Everything `val` depends on must still exist.
-    fn alive(r: *Run, st: *State, inst: *const Inst, val: Val, what: []const u8) Error!void {
-        for (val.owners.ids) |o| {
-            if (!st.dead.contains(o)) continue;
-            var items: std.ArrayList(diag.Note) = .empty;
-            if (st.dead.get(o)) |e| try items.append(r.arena, .{ .loc = e.loc, .text = e.text });
-            if (try r.origin(o)) |where| try items.append(r.arena, where);
-            try r.report(st, .use_after_free, inst.loc, try r.noteList(items.items), "memory that was freed or invalidated is used here ({s})", .{what});
+    /// A read or a write through `val`: the caller must have what it leads into.
+    fn noteDeref(r: *Run, val: Val, what: []const u8) Allocator.Error!void {
+        const deref = std.mem.eql(u8, what, "read") or std.mem.eql(u8, what, "write") or std.mem.eql(u8, what, "read and written") or std.mem.eql(u8, what, "written") or std.mem.eql(u8, what, "read by a callee");
+        if (!deref) return;
+        for (val.ids.ids) |id| {
+            const rec = r.identRec(id);
+            if (rec.kind != .init or (rec.b == 0 and r.places.rec(rec.a).parent == dom.no_place)) continue;
+            const slot = (try r.slotOf(id)) orelse continue;
+            if (slot.kind == .view) continue;
+            var have = false;
+            for (r.derefs.items) |x| if (x.eql(slot)) {
+                have = true;
+            };
+            if (!have) try r.derefs.append(r.arena, slot);
         }
     }
 
-    /// Where the pointer that depends on owner `o` came from, for the finding that names it.
+    /// Everything `val` depends on must still exist. A tombstone of a block that stands for several, or of an end that
+    /// depends on room nobody could read, is counted and not reported.
+    pub fn alive(r: *Run, st: *State, inst: *const Inst, val: Val, what: []const u8) Error!void {
+        try r.noteDeref(val, what);
+        var soft = false;
+        var first: ?dom.Id = null;
+        for (val.ids.ids) |o| {
+            const rec = r.identRec(o);
+            if (rec.kind != .tomb) continue;
+            if (rec.b == 1) {
+                soft = true;
+            } else if (first == null) first = o;
+        }
+        const o = first orelse {
+            if (soft) try r.tally("maybe_stale", inst);
+            return;
+        };
+        var items: std.ArrayList(diag.Note) = .empty;
+        if (st.dead.get(r.identRec(o).a) orelse r.tomb_events.get(o)) |e| try items.append(r.arena, .{ .loc = e.loc, .text = e.text });
+        if (try r.origin(r.identRec(o).a)) |where| try items.append(r.arena, where);
+        try r.report(st, .use_after_free, inst.loc, try r.noteList(items.items), "memory that was freed or invalidated is used here ({s})", .{what});
+    }
+
+    /// Where the pointer that depends on identity `o` came from, for the finding that names it.
     fn origin(r: *Run, o: dom.Id) Allocator.Error!?diag.Note {
-        const rec = r.owners.items[o];
+        const rec = r.identRec(o);
         switch (rec.kind) {
-            .buffer => {
-                const at = if (r.by_id[rec.n]) |i| i.loc else .none;
-                return try r.note(at, "the pointer was read from `{s}` here", .{r.placeName(rec.place)});
-            },
-            .moved => {
-                const at = if (r.by_id[rec.n]) |i| i.loc else .none;
-                return try r.note(at, "the storage of `{s}` was moved here", .{r.placeName(rec.place)});
-            },
             .heap => {
-                const at = if (r.by_id[rec.n]) |i| i.loc else .none;
+                const at = if (r.by_id[rec.a]) |i| i.loc else .none;
                 return try r.note(at, "the memory was allocated here", .{});
             },
-            else => return null,
+            .init => if (rec.b == 1) return try r.note(.none, "the storage behind `{s}`", .{r.placeName(rec.a)}),
+            else => {},
         }
+        return null;
+    }
+
+    /// An object (an arena, a container) that was deinitialized must not be touched.
+    pub fn objectAlive(r: *Run, st: *State, inst: *const Inst, pl: PlaceId) Error!void {
+        return r.objectAliveFrom(st, inst, pl, true);
+    }
+
+    /// With `self` false the object at `pl` itself may be dead: a store of the whole of it starts it afresh.
+    pub fn objectAliveFrom(r: *Run, st: *State, inst: *const Inst, pl: PlaceId, self: bool) Error!void {
+        var at = pl;
+        var first = true;
+        while (true) : (first = false) {
+            if (first and !self) {
+                at = r.places.rec(at).parent;
+                if (at == dom.no_place) break;
+                continue;
+            }
+            for (r.objAt(st, at).ids) |id| {
+                if (r.identRec(id).kind != .tomb or r.identRec(id).b == 1) continue;
+                const e = st.dead.get(r.identRec(id).a) orelse r.tomb_events.get(id) orelse continue;
+                // What this very call ended is not a use of it.
+                if (e.loc == inst.loc) continue;
+                var items: std.ArrayList(diag.Note) = .empty;
+                try items.append(r.arena, .{ .loc = e.loc, .text = e.text });
+                try r.report(st, .use_after_free, inst.loc, try r.noteList(items.items), "`{s}` is used after it was deinitialized", .{r.placeName(at)});
+            }
+            at = r.places.rec(at).parent;
+            if (at == dom.no_place) break;
+        }
+    }
+
+    // Memory access.
+
+    fn elemType(r: *Run, ty: schema.TypeId) schema.TypeId {
+        const pt = r.ty.pointee(ty) orelse return .none;
+        const rec = r.ty.rec(pt);
+        return if (rec.kind == .array) rec.child else pt;
+    }
+
+    /// The number of elements a pointer to a fixed-size array covers; null for a slice or a pointer to one.
+    fn coveredLen(r: *Run, ty: schema.TypeId) ?u64 {
+        const pt = r.ty.pointee(ty) orelse return null;
+        const rec = r.ty.rec(pt);
+        return if (rec.kind == .array) rec.len else null;
+    }
+
+    /// `@memcpy` needs disjoint memory. Two ranges of one array whose offsets and sizes are constants are known to be
+    /// disjoint or not; anything dynamic is left to the safety check.
+    fn checkDisjoint(r: *Run, st: *State, inst: *const Inst, dst: Val, src: Val) Error!void {
+        const ops = r.v.ops(inst);
+        const dp = dst.place orelse return;
+        const sp = src.place orelse return;
+        if (dp != sp) return;
+        const do = dst.off orelse return;
+        const so = src.off orelse return;
+        const dl: i64 = @intCast(r.coveredLen(r.operandType(ops[0])) orelse return);
+        const sl: i64 = @intCast(r.coveredLen(r.operandType(ops[1])) orelse return);
+        if (do < so + sl and so < do + dl)
+            try r.report(st, .alias, inst.loc, &.{}, "the range [{d}, {d}) is copied onto [{d}, {d}) of `{s}`, which overlaps it", .{ so, so + sl, do, do + dl, r.placeName(dp) });
+    }
+
+    pub fn pointeeOf(r: *Run, ptr_ty: schema.TypeId) schema.TypeId {
+        return r.ty.pointee(ptr_ty) orelse .none;
+    }
+
+    /// The value of a by-value parameter: the identities of what the caller passed, field by field.
+    fn paramVal(r: *Run, st: *State, ty: schema.TypeId, pl: PlaceId, depth: u32) Allocator.Error!Val {
+        const holder = r.ty.kind(r.ty.payload(ty)) == .@"struct" and !r.ty.isAllocator(ty);
+        // A struct without pointers can still be a handle: freeing it frees what the caller gave.
+        if (!r.ty.hasPointers(ty)) return if (r.ty.kind(ty) == .@"struct") .{ .ids = try Set.single(r.arena, try r.ident(.init, pl, 0)) } else .none;
+        if (depth < 5 and holder) if (r.ty.structFields(ty)) |fields| {
+            const parts = try r.arena.alloc(Val, fields.len);
+            for (parts, fields, 0..) |*part, f, k| part.* = try r.paramVal(st, f.ty, try r.places.child(r.arena, pl, @intCast(k)), depth + 1);
+            var out = try Val.aggregate(r.arena, parts);
+            if (r.ty.hasPointers(ty)) out.obj = try Set.single(r.arena, try r.mint(st, .object, pl, 0));
+            return out;
+        };
+        var out: Val = .{ .ids = try Set.single(r.arena, try r.ident(.init, pl, 0)) };
+        if (holder and r.ty.hasPointers(ty)) out.obj = try Set.single(r.arena, try r.mint(st, .object, pl, 0));
+        return out;
+    }
+
+    fn stepArg(r: *Run, inst: *const Inst, st: *State) Error!void {
+        const i = r.next_arg;
+        r.next_arg += 1;
+        var sub: u32 = 0;
+        var val = try r.fresh(st, inst, inst.ty, &sub);
+        const given: ?[]const u8 = if (r.prog.param_names) |pn| pn.lookup(pn.context, .{ .pack = r.pack, .func = r.func }, i) else null;
+        for (val.toks.ids) |t| {
+            try r.tok_names.put(r.arena, t, given orelse try std.fmt.allocPrint(r.arena, "parameter {d}", .{i}));
+            try r.param_of_tok.put(r.arena, t, i);
+        }
+        const root = try r.places.root(r.arena, .param, i);
+        if (r.ty.isPointer(inst.ty)) {
+            val.place = root;
+            val.off = 0;
+            val.ids = try Set.single(r.arena, try r.ident(.init, root, 0));
+        } else if (!r.ty.hasTokens(inst.ty)) {
+            val = try r.paramVal(st, inst.ty, root, 0);
+        } else if (r.ty.hasPointers(inst.ty) or r.ty.kind(inst.ty) == .@"struct") {
+            val.ids = try Set.single(r.arena, try r.ident(.init, root, 0));
+        }
+        r.set(inst, val);
+    }
+
+    pub fn store(r: *Run, inst: *const Inst, st: *State, ptr: Val, val: Val, val_ty: schema.TypeId, undef: bool) Error!void {
+        try r.alive(st, inst, ptr, "write");
+        try r.escapes(st, inst, val, r.isLocalPtr(ptr), "stored into memory that outlives it");
+        if (ptr.place) |pl| {
+            try r.objectAliveFrom(st, inst, pl, false);
+            try r.dropCapsAt(st, pl);
+            const kind = r.places.rec(pl).kind;
+            if (kind == .cell) for (val.toks.ids) |t| {
+                const gop = try r.tok_cells.getOrPut(r.arena, t);
+                if (!gop.found_existing) gop.value_ptr.* = r.places.rec(pl).n;
+            };
+            if (kind != .cell and !val.toks.isEmpty()) {
+                try r.tally("transfers", inst);
+                r.noteTokenStored(val);
+                try r.sink(st, inst, val, "stored into memory the caller owns", "");
+            }
+            // Poison is not a fresh object: what ended stays ended.
+            const before = r.objAt(st, pl);
+            try r.writeVal(st, pl, val, val_ty);
+            if (undef) {
+                var k: usize = 0;
+                while (k < st.mem.count()) {
+                    const key = st.mem.keys()[k];
+                    if (r.places.rec(key).step == dom.obj_step and st.mem.values()[k].ids.isEmpty() and r.places.contains(pl, key)) st.mem.swapRemoveAt(k) else k += 1;
+                }
+                if (!before.isEmpty()) try r.writeObj(st, pl, before);
+            }
+        } else {
+            // A store through a pointer into the storage a parameter holds (`list.items[i] = x` by way of a pointer a
+            // callee returned) lands below that parameter: not followed in memory, but the summary says it.
+            for (ptr.ids.ids) |o| {
+                const rec = r.identRec(o);
+                const held: PlaceId = switch (rec.kind) {
+                    .init => if (rec.b == 1) rec.a else continue,
+                    .heap => r.holder_of.get(o) orelse continue,
+                    else => continue,
+                };
+                const at = try r.places.child(r.arena, held, dom.elem_step);
+                const gop = try r.elem_stores.getOrPut(r.arena, at);
+                gop.value_ptr.* = if (gop.found_existing) try gop.value_ptr.join(r.arena, val.flat()) else val.flat();
+            }
+            if (!val.toks.isEmpty()) {
+                try r.tally("transfers", inst);
+                r.noteTokenStored(val);
+                try r.sink(st, inst, val, "stored into memory the checker does not track", "");
+            }
+        }
+    }
+
+    /// For the summary: a linear value that came in as a parameter went into memory the function does not own.
+    fn noteTokenStored(r: *Run, val: Val) void {
+        for (val.toks.ids) |t| if (r.param_of_tok.get(t)) |pi| if (pi < 64) {
+            r.token_stored |= @as(u64, 1) << @intCast(pi);
+        };
+    }
+
+    pub fn load(r: *Run, st: *State, inst: *const Inst, ptr: Val, ty: schema.TypeId) Error!Val {
+        var out: Val = .none;
+        // A temporary the compiler built to return a fresh value is not a copy of anything the program named.
+        const temporary = if (ptr.place) |pl| r.places.rec(pl).kind == .cell and !r.names.contains(r.places.rec(pl).n) else false;
+        if (r.ty.isPinned(ty) and !temporary) try r.report(st, .pinned_copy, inst.loc, &.{}, "a value of the pinned type `{s}` is copied by value; pass a pointer to it", .{r.ty.name(ty)});
+        if (ptr.place) |pl| {
+            try r.objectAlive(st, inst, pl);
+            out = try r.readVal(st, pl, ty);
+            if (r.places.rec(pl).kind != .cell and r.ty.hasTokens(ty))
+                return r.unsupported(inst, "a linear value read out of memory this function does not own", .{});
+            const wrapped = r.ty.kind(ty) == .optional or r.ty.kind(ty) == .error_union;
+            if (out.src == null and r.ty.kind(r.ty.payload(ty)) == .@"struct") out.src = pl;
+            if (wrapped) out.from = pl;
+            if (r.ty.hasPointers(ty) and r.ty.kind(r.ty.payload(ty)) == .@"struct" and !r.ty.isAllocator(r.ty.payload(ty)) and out.obj.isEmpty())
+                out.obj = try r.ensureObj(st, pl);
+        } else if (r.ty.hasTokens(ty)) {
+            return r.unsupported(inst, "a linear value read through a pointer the checker cannot follow", .{});
+        }
+        if (ptr.many or (ptr.place != null and r.places.hasElem(ptr.place.?))) out.many = true;
+        // A number read out of a stale handle is data, not a use of what the handle names.
+        switch (r.ty.kind(ty)) {
+            .int, .bool, .float, .@"enum", .error_set => return Val.none,
+            else => {},
+        }
+        return out;
+    }
+
+    /// A pointer, slice, or an optional or error union of one: the result itself points somewhere.
+    pub fn topLevelPointer(r: *Run, ty: schema.TypeId) bool {
+        return switch (r.ty.kind(ty)) {
+            .pointer => true,
+            .optional, .error_union => r.topLevelPointer(r.ty.rec(ty).child),
+            else => false,
+        };
+    }
+
+    /// `ids` in the storage fields of a value of type `ty` and nowhere else (not in the allocator it was given, nor in
+    /// the table of functions it calls through); a flat value when the fields of the type are not known.
+    pub fn inStorage(r: *Run, ty: schema.TypeId, ids: Set, depth: u32) Allocator.Error!Val {
+        if (r.ty.isAllocator(r.ty.payload(ty))) return .none;
+        if (depth < 5) if (r.ty.structFields(ty)) |fields| {
+            const parts = try r.arena.alloc(Val, fields.len);
+            for (parts, fields) |*part, f| part.* = try r.inStorage(f.ty, ids, depth + 1);
+            return Val.aggregate(r.arena, parts);
+        };
+        const at = r.ty.payload(ty);
+        return if (r.ty.isStorage(ty) or r.ty.kind(at) == .@"struct" or r.ty.kind(at) == .array) .{ .ids = ids } else .none;
+    }
+
+    /// A value of struct type `ty` whose allocator fields hold `given` and whose other fields hold `held`; null when the
+    /// fields of the type are not known.
+    pub fn byField(r: *Run, ty: schema.TypeId, given: Set, held: Set, depth: u32) Allocator.Error!?Val {
+        if (depth >= 5) return null;
+        if (r.ty.isAllocator(r.ty.payload(ty))) return .{ .ids = given };
+        const fields = r.ty.structFields(ty) orelse return null;
+        const parts = try r.arena.alloc(Val, fields.len);
+        for (parts, fields) |*part, f| part.* = (try r.byField(f.ty, given, held, depth + 1)) orelse if (r.ty.hasPointers(f.ty)) Val{ .ids = held } else Val.none;
+        return try Val.aggregate(r.arena, parts);
+    }
+
+    pub fn escapes(r: *Run, st: *State, inst: *const Inst, val: Val, into_local: bool, how: []const u8) Error!void {
+        return r.escapesInto(st, inst, val, into_local, how, null);
+    }
+
+    /// A pointer to a stack slot must not end up where the function's caller can reach it. With a `container` place
+    /// the escape is only pending: removing the entry again clears it.
+    pub fn escapesInto(r: *Run, st: *State, inst: *const Inst, val: Val, into_local: bool, how: []const u8, container: ?PlaceId) Error!void {
+        if (into_local) return;
+        for (val.ids.ids) |o| {
+            const rec = r.identRec(o);
+            if (rec.kind != .local) continue;
+            if (container != null) {
+                const gop = try st.pending.getOrPut(r.arena, o);
+                if (!gop.found_existing) gop.value_ptr.* = .{ .loc = inst.loc, .ident = o, .site = inst.id };
+                continue;
+            }
+            const slot = r.names.get(rec.a) orelse "a local";
+            try r.report(st, .escape_local, inst.loc, &.{}, "a pointer to `{s}` is {s}", .{ slot, how });
+        }
+    }
+
+    pub fn placeName(r: *Run, pl: PlaceId) []const u8 {
+        const rec = r.places.rec(pl);
+        if (rec.parent == dom.no_place) return switch (rec.kind) {
+            .cell => r.names.get(rec.n) orelse "a local",
+            .param => r.paramName(rec.n),
+            .heap => "an allocation",
+            .other => "memory",
+        };
+        const base = r.placeName(rec.parent);
+        if (rec.step == dom.elem_step) return std.fmt.allocPrint(r.arena, "{s}[]", .{base}) catch base;
+        if (r.field_names.get(pl)) |f| return std.fmt.allocPrint(r.arena, "{s}.{s}", .{ base, f }) catch base;
+        return std.fmt.allocPrint(r.arena, "{s}.{d}", .{ base, rec.step }) catch base;
+    }
+
+    fn paramName(r: *Run, i: u32) []const u8 {
+        if (r.prog.param_names) |pn| if (pn.lookup(pn.context, .{ .pack = r.pack, .func = r.func }, i)) |n| return n;
+        return std.fmt.allocPrint(r.arena, "parameter {d}", .{i}) catch "a parameter";
+    }
+
+    // Room.
+
+    pub fn dropCapsAt(r: *Run, st: *State, pl: PlaceId) Allocator.Error!void {
+        var k: usize = 0;
+        while (k < st.caps.count()) {
+            if (r.places.overlaps(st.caps.keys()[k], pl)) st.caps.swapRemoveAt(k) else k += 1;
+        }
+    }
+
+    // Ending identities.
+
+    /// Ends `id`; one that stands for several allocations stays, and the end is counted.
+    pub fn end(r: *Run, st: *State, inst: *const Inst, id: dom.Id, event: Event) Allocator.Error!void {
+        if (st.multi.has(id)) try r.tally("summarized", inst);
+        try r.kill(st, id, event);
+    }
+
+    /// The allocations that came from the objects `objs` end with them.
+    pub fn endRegion(r: *Run, st: *State, inst: *const Inst, objs: Set, event: Event) Allocator.Error!void {
+        var it = r.region_of.iterator();
+        while (it.next()) |e| if (e.value_ptr.meets(objs)) try r.end(st, inst, e.key_ptr.*, event);
+    }
+
+    /// The payload exists: what the call that made it moved is gone.
+    fn present(r: *Run, st: *State, p: Pred) Error!void {
+        var subject = p.subject;
+        if (p.ptr) subject = if (subject.place) |pl| try r.readVal(st, pl, p.ty) else .none;
+        try r.applyMoved(st, subject);
+    }
+
+    pub fn applyMoved(r: *Run, st: *State, val: Val) Error!void {
+        for (val.moved.ids) |o| {
+            const event = r.moved_events.get(o) orelse continue;
+            try r.kill(st, o, event);
+        }
+    }
+
+    /// On this path the optional or error union of `p` holds no payload, so its tokens and pointers do not exist.
+    fn absent(r: *Run, st: *State, p: Pred) Error!void {
+        var subject = p.subject;
+        var at: ?PlaceId = subject.from;
+        if (p.ptr) {
+            at = subject.place;
+            subject = if (subject.place) |pl| try r.readVal(st, pl, p.ty) else .none;
+        }
+        st.live = try st.live.minus(r.arena, subject.toks);
+        if (at) |pl| if (r.strongAt(pl)) try r.writeVal(st, pl, .none, p.ty);
+    }
+
+    // The summary.
+
+    /// What the function does, from what each of its `ret` instructions showed.
+    fn merge(r: *Run, arena: Allocator) Allocator.Error!Summary {
+        var out: Summary = .{};
+        const snaps = r.snaps.values();
+        if (snaps.len == 0) return out;
+        var kills: std.ArrayList(Slot) = .empty;
+        var writes: std.ArrayList(Write) = .empty;
+        var counts: std.ArrayList(usize) = .empty;
+        var leaves: std.ArrayList(Leaf) = .empty;
+        var frees: u64 = ~@as(u64, 0);
+        var moves: u64 = ~@as(u64, 0);
+        var place: ?Slot = null;
+        var place_ok = true;
+        for (snaps, 0..) |s, n| {
+            frees &= s.frees;
+            moves &= s.moves;
+            for (s.kills) |k| {
+                var have = false;
+                for (kills.items) |x| if (x.eql(k)) {
+                    have = true;
+                };
+                if (!have) try kills.append(arena, try dupeSlot(arena, k));
+            }
+            for (s.ret) |l| {
+                var at: ?usize = null;
+                for (leaves.items, 0..) |x, i| if (std.mem.eql(u32, x.path, l.path)) {
+                    at = i;
+                };
+                if (at) |i| {
+                    leaves.items[i].descs = try mergeDescs(arena, leaves.items[i].descs, l.descs);
+                } else try leaves.append(arena, .{ .path = try arena.dupe(u32, l.path), .descs = try dupeDescs(arena, l.descs) });
+            }
+            if (n == 0) {
+                place = s.ret_place;
+            } else if ((place == null) != (s.ret_place == null) or (place != null and !place.?.eql(s.ret_place.?))) place_ok = false;
+            for (s.writes) |w| {
+                var at: ?usize = null;
+                for (writes.items, 0..) |x, i| if (x.into.eql(w.into)) {
+                    at = i;
+                };
+                if (at) |i| {
+                    writes.items[i].descs = try mergeDescs(arena, writes.items[i].descs, w.descs);
+                    counts.items[i] += 1;
+                } else {
+                    try writes.append(arena, .{ .into = try dupeSlot(arena, w.into), .descs = try dupeDescs(arena, w.descs), .must = false });
+                    try counts.append(arena, 1);
+                }
+            }
+        }
+        for (writes.items, counts.items) |*w, c| w.must = c == snaps.len;
+        out.kills = kills.items;
+        out.writes = writes.items;
+        out.ret = leaves.items;
+        canonicalOrder(&out);
+        // A result that may be any of a great many allocations is one that stands for them all.
+        const many = try arena.alloc(bool, r.fresh_ids.items.len);
+        @memset(many, false);
+        for (leaves.items) |*l| l.descs = capFresh(arena, l.descs, many);
+        for (writes.items) |*w| w.descs = capFresh(arena, w.descs, many);
+        // Only the allocations that flow out, numbered by where they first appear.
+        const used = try arena.alloc(u32, r.fresh_ids.items.len);
+        @memset(used, std.math.maxInt(u32));
+        var count: u32 = 0;
+        for (out.ret) |l| {
+            for (l.descs) |*d| count = renumber(d, used, count);
+        }
+        for (out.writes) |w| {
+            for (w.descs) |*d| count = renumber(d, used, count);
+        }
+        const fresh_list = try arena.alloc(Fresh, count);
+        for (used, r.fresh_ids.items, many) |new, id, is_many| {
+            if (new == std.math.maxInt(u32)) continue;
+            var regions: std.ArrayList(Slot) = .empty;
+            if (r.region_of.get(id)) |objs| for (objs.ids) |o| if (try r.slotOf(o)) |sl| try regions.append(arena, try dupeSlot(arena, sl));
+            fresh_list[new] = .{ .regions = regions.items, .many = is_many };
+        }
+        for (out.ret) |l| std.mem.sort(Desc, @constCast(l.descs), {}, lessDesc);
+        for (out.writes) |w| std.mem.sort(Desc, @constCast(w.descs), {}, lessDesc);
+        out.frees = frees;
+        out.moves = moves;
+        const derefs = try arena.alloc(Slot, r.derefs.items.len);
+        for (derefs, r.derefs.items) |*d, x| d.* = try dupeSlot(arena, x);
+        std.mem.sort(Slot, derefs, {}, lessSlot);
+        out.derefs = derefs;
+        out.ret_place = if (place_ok) if (place) |p| try dupeSlot(arena, p) else null else null;
+        out.fresh = fresh_list;
+        // Two pointer parameters of one type are taken not to overlap; say so when something is done through them.
+        if (kills.items.len + writes.items.len != 0) {
+            const params = r.pack.t.params[r.func.params.off..][0..r.func.params.len];
+            for (params, 0..) |a, i| {
+                const pa = r.ty.pointee(a.ty) orelse continue;
+                if (r.ty.rec(a.ty).flags.is_const) continue;
+                for (params[i + 1 ..]) |b| {
+                    const pb = r.ty.pointee(b.ty) orelse continue;
+                    if (!r.ty.rec(b.ty).flags.is_const and r.ty.kind(pa) == .@"struct" and std.mem.eql(u8, r.ty.name(pa), r.ty.name(pb))) {
+                        r.stats.alias_params = 1;
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /// The kills, writes and results of a summary in one order, so that two runs that found the same thing compare equal.
+    fn canonicalOrder(out: *Summary) void {
+        std.mem.sort(Slot, @constCast(out.kills), {}, lessSlot);
+        std.mem.sort(Write, @constCast(out.writes), {}, lessWrite);
+        std.mem.sort(Leaf, @constCast(out.ret), {}, lessLeaf);
+        for (out.ret) |l| std.mem.sort(Desc, @constCast(l.descs), {}, lessDesc);
+        for (out.writes) |w| std.mem.sort(Desc, @constCast(w.descs), {}, lessDesc);
+    }
+
+    fn capFresh(arena: Allocator, descs: []const Desc, many: []bool) []const Desc {
+        var n: usize = 0;
+        for (descs) |d| n += @intFromBool(d.src == .fresh);
+        if (n <= 12) return descs;
+        var out: std.ArrayList(Desc) = .empty;
+        var kept = false;
+        for (descs) |d| {
+            if (d.src != .fresh) {
+                out.append(arena, d) catch return descs;
+            } else if (!kept) {
+                kept = true;
+                many[d.src.fresh] = true;
+                out.append(arena, d) catch return descs;
+            }
+        }
+        return out.items;
+    }
+
+    /// Gives the fresh allocation of `d` the next number if it has none; returns the count so far.
+    fn renumber(d: *const Desc, used: []u32, count: u32) u32 {
+        if (d.src != .fresh) return count;
+        const k = d.src.fresh;
+        if (used[k] != std.math.maxInt(u32)) {
+            @constCast(d).src = .{ .fresh = used[k] };
+            return count;
+        }
+        used[k] = count;
+        @constCast(d).src = .{ .fresh = count };
+        return count + 1;
+    }
+
+    fn lessSlot(_: void, a: Slot, b: Slot) bool {
+        if (a.param != b.param) return a.param < b.param;
+        if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+        return std.mem.order(u32, a.path, b.path) == .lt;
+    }
+
+    fn lessWrite(_: void, a: Write, b: Write) bool {
+        return lessSlot({}, a.into, b.into);
+    }
+
+    fn lessLeaf(_: void, a: Leaf, b: Leaf) bool {
+        return std.mem.order(u32, a.path, b.path) == .lt;
+    }
+
+    fn lessDesc(_: void, a: Desc, b: Desc) bool {
+        if (a.obj != b.obj) return !a.obj;
+        const ta = @intFromEnum(std.meta.activeTag(a.src));
+        const tb = @intFromEnum(std.meta.activeTag(b.src));
+        if (ta != tb) return ta < tb;
+        return switch (a.src) {
+            .from => |x| lessSlot({}, x, b.src.from),
+            .fresh => |x| x < b.src.fresh,
+            .gone => false,
+        };
+    }
+
+    fn dupeSlot(arena: Allocator, s: Slot) Allocator.Error!Slot {
+        return .{ .param = s.param, .path = try arena.dupe(u32, s.path), .kind = s.kind };
+    }
+
+    fn dupeDescs(arena: Allocator, ds: []const Desc) Allocator.Error![]const Desc {
+        const out = try arena.alloc(Desc, ds.len);
+        for (out, ds) |*o, d| o.* = .{ .src = switch (d.src) {
+            .from => |s| .{ .from = try dupeSlot(arena, s) },
+            .fresh => |k| .{ .fresh = k },
+            .gone => .gone,
+        }, .obj = d.obj };
+        return out;
+    }
+
+    fn mergeDescs(arena: Allocator, a: []const Desc, b: []const Desc) Allocator.Error![]const Desc {
+        var out: std.ArrayList(Desc) = .empty;
+        try out.appendSlice(arena, a);
+        for (b) |d| {
+            var have = false;
+            for (a) |x| if (x.eql(d)) {
+                have = true;
+            };
+            if (!have) try out.append(arena, (try dupeDescs(arena, &.{d}))[0]);
+        }
+        return out.items;
+    }
+
+    fn leavesOf(r: *Run, out: *std.ArrayList(Leaf), v: Val, path: []const u32, depth: u32) Allocator.Error!void {
+        if (v.parts) |parts| if (depth < 6) {
+            for (parts, 0..) |p, k| {
+                const sub = try r.arena.alloc(u32, path.len + 1);
+                @memcpy(sub[0..path.len], path);
+                sub[path.len] = @intCast(k);
+                try r.leavesOf(out, p, sub, depth + 1);
+            }
+            if (!v.obj.isEmpty()) {
+                const sub = try r.arena.alloc(u32, path.len + 1);
+                @memcpy(sub[0..path.len], path);
+                sub[path.len] = dom.obj_step;
+                try out.append(r.arena, .{ .path = sub, .descs = try r.descsOf(.{ .obj = v.obj }) });
+            }
+            return;
+        };
+        const descs = try r.descsOf(v);
+        if (descs.len != 0 or path.len == 0) try out.append(r.arena, .{ .path = path, .descs = descs });
+    }
+
+    /// Memory that holds nothing but the end of what the caller put there: the kill says so, and the caller's own
+    /// tombstone must not be written over.
+    fn onlyOwnTombs(r: *Run, v: Val, key: PlaceId) bool {
+        if (v.ids.isEmpty() or !v.toks.isEmpty()) return false;
+        for (v.ids.ids) |id| {
+            const rec = r.identRec(id);
+            if (rec.kind != .tomb) return false;
+            const of = r.identRec(rec.a);
+            const own = if (r.places.rec(key).step == dom.obj_step) of.kind == .object and of.a == r.places.rec(key).parent else of.kind == .init and of.a == key;
+            if (!own) return false;
+        }
+        return true;
+    }
+
+    /// Records what this `ret` shows of the function: what it ended, what the memory below its parameters holds, and
+    /// where the result comes from.
+    fn snapshot(r: *Run, inst: *const Inst, st: *State, val: Val) Allocator.Error!void {
+        var kills: std.ArrayList(Slot) = .empty;
+        var it = st.dead.iterator();
+        while (it.next()) |e| {
+            if (e.value_ptr.soft) continue;
+            const id = e.key_ptr.*;
+            const rec = r.identRec(id);
+            // The parameter's own value is a free when it is one on every path (below).
+            if (rec.kind == .init and rec.b == 0 and r.places.rec(rec.a).parent == dom.no_place) continue;
+            if (try r.slotOf(id)) |s| try kills.append(r.arena, s);
+        }
+        var frees: u64 = 0;
+        for (st.freed.ids) |id| {
+            const rec = r.identRec(id);
+            if (rec.kind == .init and rec.b == 0) {
+                const n = r.places.rec(rec.a).n;
+                if (n < 64) frees |= @as(u64, 1) << @intCast(n);
+            }
+        }
+        var moves: u64 = 0;
+                for (val.moved.ids) |id| {
+            const rec = r.identRec(id);
+            if (rec.kind == .init and rec.b == 0 and r.places.rec(rec.a).parent == dom.no_place) {
+                const n = r.places.rec(rec.a).n;
+                if (n < 64) moves |= @as(u64, 1) << @intCast(n);
+            }
+        }
+        var leaves: std.ArrayList(Leaf) = .empty;
+        try r.leavesOf(&leaves, val, &.{}, 0);
+        const ret_place: ?Slot = if (val.place) |pl| try r.slotOfPlace(pl, .content) else null;
+        var writes: std.ArrayList(SnapWrite) = .empty;
+        for (st.mem.keys(), st.mem.values()) |key, v| {
+            if (r.paramOf(key) == null) continue;
+            const rec = r.places.rec(key);
+            if (onlyOwnTombs(r, v, key)) continue;
+            if (rec.step == dom.obj_step) {
+                const into = (try r.slotOfPlace(rec.parent, .object)) orelse continue;
+                const descs = try r.descsOf(.{ .obj = v.ids });
+                if (descs.len == 1 and descs[0].src == .from and descs[0].src.from.eql(into)) continue;
+                try writes.append(r.arena, .{ .into = into, .descs = descs });
+                continue;
+            }
+            // Nothing in this run touched it: what the caller put there is still there.
+            if (v.ids.ids.len == 1 and v.ids.ids[0] == try r.ident(.init, key, 1) and v.toks.isEmpty() and v.parts == null) continue;
+            const into = (try r.slotOfPlace(key, .content)) orelse continue;
+            try writes.append(r.arena, .{ .into = into, .descs = try r.descsOf(v) });
+        }
+        for (r.elem_stores.keys(), r.elem_stores.values()) |key, v| {
+            const into = (try r.slotOfPlace(key, .content)) orelse continue;
+            try writes.append(r.arena, .{ .into = into, .descs = try r.descsOf(v) });
+        }
+        try r.snaps.put(r.arena, inst.id, .{ .kills = kills.items, .frees = frees, .moves = moves, .ret = leaves.items, .ret_place = ret_place, .writes = writes.items });
+    }
+
+    fn ret(r: *Run, inst: *const Inst, st: *State, val: Val) Error!void {
+        try r.use(st, inst, val, "returned");
+        for (val.ids.ids) |o| {
+            const rec = r.identRec(o);
+            if (rec.kind == .local) {
+                const slot = r.names.get(rec.a) orelse "a local";
+                try r.report(st, .escape_local, inst.loc, &.{}, "a pointer to `{s}` is returned, but `{s}` ends with the function", .{ slot, slot });
+            }
+        }
+        for (st.pending.values()) |p| {
+            const slot = r.names.get(r.identRec(p.ident).a) orelse "a local";
+            const where: diag.Note = .{ .loc = inst.loc, .text = "it is still there when the function returns here" };
+            try r.report(st, .escape_local, p.loc, try r.noteList(&.{where}), "a pointer to `{s}` is stored into a container that outlives it", .{slot});
+        }
+        try r.snapshot(inst, st, val);
+        // Handing the value to the caller ends the function's ownership of its tokens.
+        st.live = try st.live.minus(r.arena, val.toks);
+        for (st.live.ids) |t| {
+            const made = try r.created(t);
+            try r.report(st, .leak, inst.loc, try r.noteList(&.{made}), "linear value `{s}` is not consumed on this path", .{r.tokenName(t)});
+        }
+        st.alive = false;
+    }
+
+    fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
+        return calls.call(r, inst, st);
+    }
+
+    pub fn callName(r: *Run, inst: *const Inst) []const u8 {
+        return r.v.attrStr(inst, .callee) orelse "a call";
+    }
+
+    pub fn freshTokens(r: *Run, st: *State, inst: *const Inst, sub: *u32) Error!Val {
+        return r.fresh(st, inst, inst.ty, sub);
+    }
+
+    pub fn noteTokensOf(r: *Run, a: Val) void {
+        for (a.toks.ids) |t| if (r.param_of_tok.get(t)) |pi| if (pi < 64) {
+            r.token_stored |= @as(u64, 1) << @intCast(pi);
+        };
     }
 
     // Control flow.
@@ -806,6 +1852,7 @@ const Run = struct {
     }
 
     fn step(r: *Run, inst: *const Inst, st: *State) Error!void {
+        r.cur = st;
         r.stats.insts += 1;
         if (inst.loc != .none) r.cur_loc = inst.loc;
         if (inst.ty == .none) return r.unsupported(inst, "instruction {t} is not decoded by the exporter", .{inst.tag});
@@ -839,20 +1886,20 @@ const Run = struct {
                 while (i < st.mem.count()) {
                     if (r.places.contains(cell, st.mem.keys()[i])) st.mem.swapRemoveAt(i) else i += 1;
                 }
-                const local = try r.owner(.local, inst.id, dom.no_place);
-                st.revive(local);
-                // A slot that is made again (in a loop) holds a new object.
-                for (r.owners.items, 0..) |o, id| {
-                    if (o.kind == .object and r.places.contains(cell, o.place)) st.revive(@intCast(id));
-                }
-                r.set(inst, .{ .place = cell, .owners = try Set.single(r.arena, local), .off = 0 });
+                const local = try r.ident(.local, inst.id, 0);
+                r.set(inst, .{ .place = cell, .ids = try Set.single(r.arena, local), .off = 0 });
             },
             .store, .store_safe => {
                 const dst = r.arg(inst, 0);
-                try r.store(inst, st, dst, r.arg(inst, 1), r.operandType(r.v.ops(inst)[1]));
+                const stored = r.v.ops(inst)[1];
+                const undef = stored.kind == .constant and r.v.constant(stored).kind == .undef;
+                try r.store(inst, st, dst, r.arg(inst, 1), r.operandType(stored), undef);
                 // A container made of a constant (`.empty`) holds nothing and has no room.
-                if (dst.place) |pl| if (r.v.ops(inst)[1].kind == .constant and r.isContainer(r.operandType(r.v.ops(inst)[1])))
-                    try st.caps.put(r.arena, pl, .{ .cap_lb = 0, .len_ub = 0 });
+                if (dst.place) |pl| {
+                    if (r.v.ops(inst)[1].kind == .constant and r.isContainer(r.operandType(r.v.ops(inst)[1])))
+                        try st.caps.put(r.arena, pl, .{ .cap_lb = 0, .len_ub = 0 })
+                    else if (r.arg(inst, 1).room) |n| try st.caps.put(r.arena, pl, .{ .cap_lb = n, .len_ub = 0 });
+                }
             },
             .load => {
                 const p = r.arg(inst, 0);
@@ -860,7 +1907,12 @@ const Run = struct {
                 r.set(inst, try r.load(st, inst, p, inst.ty));
             },
 
-            .ptr_cast, .bit_cast, .bit_cast_safe, .addrspace_cast, .slice_ptr, .array_to_slice, .slice, .ptr_slice_ptr_ptr, .ptr_slice_len_ptr => {
+            .ptr_slice_len_ptr => {
+                var v = r.arg(inst, 0);
+                if (v.place) |pl| v.place = try r.places.child(r.arena, pl, dom.len_step);
+                r.set(inst, v);
+            },
+            .ptr_cast, .bit_cast, .bit_cast_safe, .addrspace_cast, .slice_ptr, .array_to_slice, .slice, .ptr_slice_ptr_ptr => {
                 if (r.ty.hasPointers(inst.ty) or r.ty.hasTokens(inst.ty)) {
                     var v = r.arg(inst, 0);
                     // An offset counts elements: a cast to another element type changes the unit.
@@ -886,8 +1938,12 @@ const Run = struct {
             .slice_elem_ptr, .ptr_elem_ptr => {
                 var p = r.arg(inst, 0);
                 p.off = null;
-                p.many = true;
-                if (p.place) |pl| p.place = try r.places.child(r.arena, pl, dom.elem_step);
+                const elem = r.elemStep(r.v.ops(inst)[1]);
+                p.many = elem == dom.elem_step;
+                if (p.place) |pl| {
+                    p.ids = try p.ids.with(r.arena, try r.ident(.init, pl, 2));
+                    p.place = try r.places.child(r.arena, pl, elem);
+                }
                 r.set(inst, p);
             },
             .struct_field_ptr, .struct_field_ptr_index_0, .struct_field_ptr_index_1, .struct_field_ptr_index_2, .struct_field_ptr_index_3 => {
@@ -900,7 +1956,8 @@ const Run = struct {
                 };
                 var p = r.arg(inst, 0);
                 if (p.place) |pl| {
-                    p.place = try r.places.child(r.arena, pl, field);
+                    p.place = r.up_of.get(pl) orelse try r.places.child(r.arena, pl, field);
+                    if (r.up_of.contains(pl)) return r.set(inst, p);
                     if (r.ty.pointee(r.operandType(r.v.ops(inst)[0]))) |container| {
                         var buf: [32]u8 = undefined;
                         const name = r.ty.fieldName(&buf, container, field);
@@ -943,7 +2000,7 @@ const Run = struct {
                     r.set(inst, v);
                 } else {
                     var p = base;
-                    if (p.place) |pl| p.place = try r.places.child(r.arena, pl, dom.elem_step);
+                    if (p.place) |pl| p.place = try r.places.child(r.arena, pl, r.elemStep(r.v.ops(inst)[1]));
                     r.set(inst, try r.load(st, inst, p, inst.ty));
                 }
             },
@@ -962,7 +2019,8 @@ const Run = struct {
                     else => false,
                 };
                 if (ptr) try r.alive(st, inst, r.arg(inst, 0), "read");
-                try r.preds.put(r.arena, inst.id, .{ .subject = r.arg(inst, 0), .ptr = ptr, .present_if_true = present_if_true });
+                const subject_ty = r.operandType(r.v.ops(inst)[0]);
+                try r.preds.put(r.arena, inst.id, .{ .subject = r.arg(inst, 0), .ptr = ptr, .present_if_true = present_if_true, .ty = if (ptr) r.pointeeOf(subject_ty) else subject_ty });
                 r.set(inst, .none);
             },
             .not => {
@@ -981,13 +2039,13 @@ const Run = struct {
                 const target = r.v.attr(inst, .target) orelse return r.unsupported(inst, "br without a target", .{});
                 const ctx = r.blocks.get(target) orelse return r.unsupported(inst, "br to a block that is not open", .{});
                 const val = if (r.v.ops(inst).len != 0) r.arg(inst, 0) else Val.none;
-                try ctx.incoming.append(r.arena, .{ .state = try st.clone(r.arena), .val = val });
+                try ctx.incoming.append(r.arena, .{ .state = st.*, .val = val });
                 st.alive = false;
             },
             .repeat => {
                 const target = r.v.attr(inst, .target) orelse return r.unsupported(inst, "repeat without a target", .{});
                 const ctx = r.loops.get(target) orelse return r.unsupported(inst, "repeat outside its loop", .{});
-                try ctx.back.append(r.arena, try st.clone(r.arena));
+                try ctx.back.append(r.arena, st.*);
                 st.alive = false;
             },
             .cond_br => try r.condBr(inst, st),
@@ -1007,16 +2065,18 @@ const Run = struct {
                 if (inst.tag == .memcpy) try r.checkDisjoint(st, inst, dst, src);
                 try r.alive(st, inst, dst, "write");
                 try r.alive(st, inst, src, "read");
-                var content: Val = if (src.place) |pl| (try r.readPlace(st, pl)).flat() else .none;
+                var content: Val = if (src.place) |pl| (try r.readVal(st, pl, r.pointeeOf(r.operandType(r.v.ops(inst)[1])))).flat() else .none;
                 if (!content.toks.isEmpty()) return r.unsupported(inst, "a copy of linear values", .{});
                 content.place = null;
-                try r.store(inst, st, dst, content, .none);
+                content.obj = .empty;
+                try r.store(inst, st, dst, content, .none, false);
             },
             .memset, .memset_safe => {
                 try r.alive(st, inst, r.arg(inst, 0), "write");
             },
             .atomic_store_unordered, .atomic_store_monotonic, .atomic_store_release, .atomic_store_seq_cst => {
-                try r.alive(st, inst, r.arg(inst, 0), "write");
+                const stored = r.v.ops(inst)[1];
+                try r.store(inst, st, r.arg(inst, 0), r.arg(inst, 1), r.operandType(stored), false);
             },
             .atomic_load => {
                 const p = r.arg(inst, 0);
@@ -1034,18 +2094,31 @@ const Run = struct {
 
             .field_parent_ptr => {
                 // The parent is one level up from the field: the place when the pointer names a field, else only
-                // the owners (an operation on it is applied to everything those own).
+                // the identities (an operation on it is applied to everything those own).
                 var p = r.arg(inst, 0);
                 p.off = null;
                 p.many = false;
                 if (p.place) |pl| {
                     const up = r.places.rec(pl);
-                    p.place = if (up.parent != dom.no_place and up.step != dom.elem_step and up.step != dom.backing_step) up.parent else null;
+                    if (up.parent != dom.no_place and up.step != dom.elem_step and up.step != dom.obj_step) {
+                        p.place = up.parent;
+                    } else {
+                        // A parent nobody named: the field pointer it came from is what `&parent.field` leads back to.
+                        const parent = try r.places.root(r.arena, .other, pl);
+                        try r.up_of.put(r.arena, parent, pl);
+                        p.place = parent;
+                    }
                 }
                 r.set(inst, p);
             },
             .assembly => return r.unsupported(inst, "inline assembly", .{}),
-            .loop_switch_br, .switch_dispatch => return r.unsupported(inst, "a labeled switch loop", .{}),
+            .loop_switch_br => try r.loopSwitch(inst, st),
+            .switch_dispatch => {
+                const target = r.v.attr(inst, .target) orelse return r.unsupported(inst, "switch_dispatch without a target", .{});
+                const ctx = r.loops.get(target) orelse return r.unsupported(inst, "switch_dispatch outside its switch loop", .{});
+                try ctx.back.append(r.arena, st.*);
+                st.alive = false;
+            },
 
             .prefetch, .unwrap_errunion_err_ptr => {
                 try r.alive(st, inst, r.arg(inst, 0), "read");
@@ -1081,61 +2154,6 @@ const Run = struct {
         return r.ty.kind(ty) == .@"struct" and spec.family(spec.stripped(&buf, r.ty.name(ty))) != null;
     }
 
-    /// What a pointer or slice points at, looking through an array to its element.
-    fn elemType(r: *Run, ty: schema.TypeId) schema.TypeId {
-        const pt = r.ty.pointee(ty) orelse return .none;
-        const rec = r.ty.rec(pt);
-        return if (rec.kind == .array) rec.child else pt;
-    }
-
-    /// The number of elements a pointer to a fixed-size array covers; null for a slice or a pointer to one.
-    fn coveredLen(r: *Run, ty: schema.TypeId) ?u64 {
-        const pt = r.ty.pointee(ty) orelse return null;
-        const rec = r.ty.rec(pt);
-        return if (rec.kind == .array) rec.len else null;
-    }
-
-    /// `@memcpy` needs disjoint memory. Two ranges of one array whose offsets and sizes are constants are known to be
-    /// disjoint or not; anything dynamic is left to the safety check.
-    fn checkDisjoint(r: *Run, st: *State, inst: *const Inst, dst: Val, src: Val) Error!void {
-        const ops = r.v.ops(inst);
-        const dp = dst.place orelse return;
-        const sp = src.place orelse return;
-        if (dp != sp) return;
-        const do = dst.off orelse return;
-        const so = src.off orelse return;
-        const dl: i64 = @intCast(r.coveredLen(r.operandType(ops[0])) orelse return);
-        const sl: i64 = @intCast(r.coveredLen(r.operandType(ops[1])) orelse return);
-        if (do < so + sl and so < do + dl)
-            try r.report(st, .alias, inst.loc, &.{}, "the range [{d}, {d}) is copied onto [{d}, {d}) of `{s}`, which overlaps it", .{ so, so + sl, do, do + dl, r.placeName(dp) });
-    }
-
-    fn pointeeOf(r: *Run, ptr_ty: schema.TypeId) schema.TypeId {
-        return r.ty.pointee(ptr_ty) orelse .none;
-    }
-
-    fn stepArg(r: *Run, inst: *const Inst, st: *State) Error!void {
-        const i = r.next_arg;
-        r.next_arg += 1;
-        var sub: u32 = 0;
-        var val = try r.fresh(st, inst, inst.ty, &sub);
-        const given: ?[]const u8 = if (r.prog.param_names) |pn| pn.lookup(pn.context, .{ .pack = r.pack, .func = r.func }, i) else null;
-        for (val.toks.ids) |t| {
-            try r.tok_names.put(r.arena, t, given orelse try std.fmt.allocPrint(r.arena, "parameter {d}", .{i}));
-            try r.param_of_tok.put(r.arena, t, i);
-        }
-        const param_owner = try r.owner(.param, i, dom.no_place);
-        if (r.ty.isPointer(inst.ty)) {
-            val.place = try r.places.root(r.arena, .param, i);
-            val.off = 0;
-            val.owners = try val.owners.with(r.arena, param_owner);
-        } else if (r.ty.hasPointers(inst.ty) or r.ty.kind(inst.ty) == .@"struct") {
-            // A struct without pointers can still be a handle: freeing it frees what the caller gave.
-            val.owners = try val.owners.with(r.arena, param_owner);
-        }
-        r.set(inst, val);
-    }
-
     fn block(r: *Run, inst: *const Inst, st: *State) Error!void {
         const bodies = r.v.bodies(inst);
         if (bodies.len != 1) return r.unsupported(inst, "a block with {d} bodies", .{bodies.len});
@@ -1144,7 +2162,7 @@ const Run = struct {
         try r.blocks.put(r.arena, inst.id, ctx);
         const entry = st.trail;
         try r.exec(r.v.insts(bodies[0]), st);
-        if (st.alive) try ctx.incoming.append(r.arena, .{ .state = try st.clone(r.arena), .val = .none });
+        if (st.alive) try ctx.incoming.append(r.arena, .{ .state = st.*, .val = .none });
         var out: ?State = null;
         var val: Val = .none;
         for (ctx.incoming.items) |inc| {
@@ -1182,7 +2200,8 @@ const Run = struct {
             for (saved.items) |s| r.blocks.get(s.id).?.incoming.shrinkRetainingCapacity(s.len);
             var run = try head.clone(r.arena);
             try r.exec(r.v.insts(bodies[0]), &run);
-            var next = entry;
+            var next = head;
+            next = try next.join(r.arena, entry, entry.trail);
             for (ctx.back.items) |b| next = try next.join(r.arena, b, entry.trail);
             next.alive = true;
             if (next.eql(head)) break;
@@ -1199,6 +2218,7 @@ const Run = struct {
     }
 
     fn condBr(r: *Run, inst: *const Inst, st: *State) Error!void {
+        r.pruneOver(st);
         const bodies = r.v.bodies(inst);
         if (bodies.len != 2) return r.unsupported(inst, "a branch with {d} bodies", .{bodies.len});
         const c = r.v.ops(inst)[0];
@@ -1213,14 +2233,15 @@ const Run = struct {
         }
         const pred: ?Pred = if (c.kind == .inst) r.preds.get(c.value) else null;
         const decision = !(r.endsInUnreachable(bodies[0]) or r.endsInUnreachable(bodies[1]));
-        if (take_then) {
-            var s = try st.clone(r.arena);
+        // The failing side of a safety check never returns: nothing it does reaches the rest of the function.
+        if (take_then and !r.endsInUnreachable(bodies[0])) {
+            var s = if (take_else) try st.clone(r.arena) else st.*;
             if (decision) s.trail = try r.push(st.trail, inst.loc, .then);
             if (pred) |p| if (p.present_if_true) try r.present(&s, p) else try r.absent(&s, p);
             try r.exec(r.v.insts(bodies[0]), &s);
         }
-        if (take_else) {
-            var s = try st.clone(r.arena);
+        if (take_else and !r.endsInUnreachable(bodies[1])) {
+            var s = st.*;
             if (decision) s.trail = try r.push(st.trail, inst.loc, .@"else");
             if (pred) |p| if (p.present_if_true) try r.absent(&s, p) else try r.present(&s, p);
             try r.exec(r.v.insts(bodies[1]), &s);
@@ -1249,21 +2270,62 @@ const Run = struct {
         return node;
     }
 
-    /// On this path the optional or error union of `p` holds no payload, so its tokens do not exist.
-    fn absent(r: *Run, st: *State, p: Pred) Error!void {
-        var subject = p.subject;
-        if (p.ptr) subject = if (subject.place) |pl| try r.readPlace(st, pl) else .none;
-        st.live = try st.live.minus(r.arena, subject.toks);
+    /// A labeled switch loop: every case runs from the state at the head, `continue :label` goes back to the head.
+    fn loopSwitch(r: *Run, inst: *const Inst, st: *State) Error!void {
+        const bodies = r.v.bodies(inst);
+        const ctx = try r.arena.create(LoopCtx);
+        ctx.* = .{};
+        try r.loops.put(r.arena, inst.id, ctx);
+        const entry = try st.clone(r.arena);
+        var head = try entry.clone(r.arena);
+        var saved: std.ArrayList(struct { id: u32, len: usize }) = .empty;
+        var it = r.blocks.iterator();
+        while (it.next()) |e| try saved.append(r.arena, .{ .id = e.key_ptr.*, .len = e.value_ptr.*.incoming.items.len });
+
+        r.quiet += 1;
+        var rounds: u32 = 0;
+        while (true) {
+            rounds += 1;
+            if (rounds > 16) {
+                r.quiet -= 1;
+                return r.unsupported(inst, "a switch loop whose facts do not settle", .{});
+            }
+            ctx.back.clearRetainingCapacity();
+            for (saved.items) |s| r.blocks.get(s.id).?.incoming.shrinkRetainingCapacity(s.len);
+            for (bodies) |b| {
+                var run = try head.clone(r.arena);
+                run.trail = try r.push(head.trail, inst.loc, .case);
+                try r.exec(r.v.insts(b), &run);
+            }
+            var next = head;
+            next = try next.join(r.arena, entry, entry.trail);
+            for (ctx.back.items) |b| next = try next.join(r.arena, b, entry.trail);
+            next.alive = true;
+            if (next.eql(head)) break;
+            head = next;
+        }
+        r.quiet -= 1;
+        ctx.back.clearRetainingCapacity();
+        for (saved.items) |s| r.blocks.get(s.id).?.incoming.shrinkRetainingCapacity(s.len);
+        for (bodies) |b| {
+            var run = try head.clone(r.arena);
+            run.trail = try r.push(head.trail, inst.loc, .case);
+            try r.exec(r.v.insts(b), &run);
+        }
+        _ = r.loops.remove(inst.id);
+        st.alive = false;
     }
 
     fn tryOp(r: *Run, inst: *const Inst, st: *State) Error!void {
         const bodies = r.v.bodies(inst);
         if (bodies.len != 1) return r.unsupported(inst, "a try with {d} bodies", .{bodies.len});
         const eu = r.arg(inst, 0);
-        var failed = try st.clone(r.arena);
+        // A container operation that ran out of memory left the container as it was.
+        const before = if (r.v.ops(inst)[0].kind == .inst) r.pre_state.get(r.v.ops(inst)[0].value) else null;
+        var failed = if (before) |b| try b.clone(r.arena) else try st.clone(r.arena);
         failed.trail = try r.push(st.trail, inst.loc, .@"error");
         var subject = eu;
-        if (inst.tag == .try_ptr or inst.tag == .try_ptr_cold) subject = if (eu.place) |pl| try r.readPlace(st, pl) else .none;
+        if (inst.tag == .try_ptr or inst.tag == .try_ptr_cold) subject = if (eu.place) |pl| try r.readVal(st, pl, r.pointeeOf(r.operandType(r.v.ops(inst)[0]))) else .none;
         failed.live = try failed.live.minus(r.arena, subject.toks);
         // A call that failed did not do what it was asked to: nothing it stores is there.
         const operand_ref = r.v.ops(inst)[0];
@@ -1273,1009 +2335,14 @@ const Run = struct {
                 if (failed.pending.values()[k].site == operand_ref.value) failed.pending.swapRemoveAt(k) else k += 1;
             }
         }
+        if (operand_ref.kind == .inst) if (r.cancels.get(operand_ref.value)) |cancel| {
+            var items: std.ArrayList(diag.Note) = .empty;
+            if (st.dead.get(r.identRec(cancel.tomb).a)) |e| try items.append(r.arena, .{ .loc = e.loc, .text = e.text });
+            try r.report(st, .double_free, inst.loc, try r.noteList(items.items), "memory is freed twice", .{});
+        };
         try r.exec(r.v.insts(bodies[0]), &failed);
         if (failed.alive) return r.unsupported(inst, "the error path of a try falls through", .{});
         try r.applyMoved(st, subject);
         r.set(inst, eu);
-    }
-
-    fn store(r: *Run, inst: *const Inst, st: *State, ptr: Val, val: Val, val_ty: schema.TypeId) Error!void {
-        _ = val_ty;
-        try r.alive(st, inst, ptr, "write");
-        try r.escapes(st, inst, val, r.isLocalPtr(ptr), "stored into memory that outlives it");
-        if (ptr.place) |pl| {
-            try r.objectAlive(st, inst, pl);
-            try r.dropCapsAt(st, pl);
-            const kind = r.places.rec(pl).kind;
-            if (kind == .cell) for (val.toks.ids) |t| {
-                const gop = try r.tok_cells.getOrPut(r.arena, t);
-                if (!gop.found_existing) gop.value_ptr.* = r.places.rec(pl).n;
-            };
-            if (kind != .cell and !val.toks.isEmpty()) {
-                try r.tally("transfers", inst);
-                r.noteTokenStored(val);
-                try r.sink(st, inst, val, "stored into memory the caller owns", "");
-            }
-            try r.noteStores(pl, val);
-            try r.writePlace(st, pl, val);
-            // A new value in the place of an object (`arena = .init(gpa)`) starts it afresh.
-            for (r.owners.items, 0..) |o, id| {
-                if (o.kind == .object and r.places.contains(pl, o.place)) st.revive(@intCast(id));
-            }
-        } else {
-            // A store through a pointer into the storage behind a parameter's field (`list.items[i] = x` by way of a
-            // pointer a callee returned) lands below that parameter.
-            for (ptr.owners.ids) |o| {
-                const rec = r.owners.items[o];
-                if (rec.kind == .buffer) try r.noteStores(try r.places.child(r.arena, rec.place, dom.elem_step), val);
-            }
-            if (!val.toks.isEmpty()) {
-                try r.tally("transfers", inst);
-                r.noteTokenStored(val);
-                try r.sink(st, inst, val, "stored into memory the checker does not track", "");
-            }
-        }
-    }
-
-    /// For the summary: a linear value that came in as a parameter went into memory the function does not own.
-    fn noteTokenStored(r: *Run, val: Val) void {
-        for (val.toks.ids) |t| if (r.param_of_tok.get(t)) |pi| if (pi < 64) {
-            r.token_stored |= @as(u64, 1) << @intCast(pi);
-        };
-    }
-
-    /// For the summary: a value that came in through a parameter is stored below another parameter.
-    fn noteStores(r: *Run, into: PlaceId, val: Val) Allocator.Error!void {
-        const root = r.places.rec(into);
-        if (root.kind != .param) return;
-        for (val.owners.ids) |o| {
-            const rec = r.owners.items[o];
-            var from: u32 = undefined;
-            var from_path: ?[]const u32 = null;
-            var moves = false;
-            switch (rec.kind) {
-                .param => {
-                    if (rec.n == root.n) continue;
-                    from = rec.n;
-                },
-                .buffer, .moved => {
-                    const source = if (rec.kind == .moved) r.moved_origin.get(o) orelse continue else rec.place;
-                    const at = r.places.rec(source);
-                    if (at.kind != .param or at.n == root.n) continue;
-                    from = at.n;
-                    from_path = try r.places.path(r.arena, source);
-                    moves = rec.kind == .moved;
-                },
-                else => continue,
-            }
-            const path = try r.places.path(r.arena, into);
-            var known = false;
-            for (r.stores.items) |q| {
-                if (q.from != from or q.into != root.n or !std.mem.eql(u32, q.path, path)) continue;
-                if ((q.from_path == null) != (from_path == null) or q.moves != moves) continue;
-                if (from_path) |fp| if (!std.mem.eql(u32, fp, q.from_path.?)) continue;
-                known = true;
-            }
-            if (!known) try r.stores.append(r.arena, .{ .from = from, .into = root.n, .path = path, .from_path = from_path, .moves = moves });
-        }
-    }
-
-    fn withoutLocals(r: *Run, s: Set) Allocator.Error!Set {
-        var out = s;
-        for (s.ids) |o| if (r.owners.items[o].kind == .local) {
-            out = try out.without(r.arena, o);
-        };
-        return out;
-    }
-
-    /// An object (an arena, a container) that was deinitialized must not be touched.
-    fn objectAlive(r: *Run, st: *State, inst: *const Inst, pl: PlaceId) Error!void {
-        for (r.owners.items, 0..) |o, id| {
-            if (o.kind != .object or !r.places.contains(o.place, pl) or !st.dead.contains(@intCast(id))) continue;
-            var items: std.ArrayList(diag.Note) = .empty;
-            if (st.dead.get(@intCast(id))) |e| try items.append(r.arena, .{ .loc = e.loc, .text = e.text });
-            try r.report(st, .use_after_free, inst.loc, try r.noteList(items.items), "`{s}` is used after it was deinitialized", .{r.placeName(o.place)});
-        }
-    }
-
-    fn load(r: *Run, st: *State, inst: *const Inst, ptr: Val, ty: schema.TypeId) Error!Val {
-        var out: Val = .none;
-        // A temporary the compiler built to return a fresh value is not a copy of anything the program named.
-        const temporary = if (ptr.place) |pl| r.places.rec(pl).kind == .cell and !r.names.contains(r.places.rec(pl).n) else false;
-        if (r.ty.isPinned(ty) and !temporary) try r.report(st, .pinned_copy, inst.loc, &.{}, "a value of the pinned type `{s}` is copied by value; pass a pointer to it", .{r.ty.name(ty)});
-        if (ptr.place) |pl| {
-            try r.objectAlive(st, inst, pl);
-            out = try r.readPlace(st, pl);
-            if (r.places.rec(pl).kind != .cell and r.ty.hasTokens(ty))
-                return r.unsupported(inst, "a linear value read out of memory this function does not own", .{});
-            if (out.src == null and r.ty.kind(ty) == .@"struct") out.src = pl;
-        } else if (r.ty.hasTokens(ty)) {
-            return r.unsupported(inst, "a linear value read through a pointer the checker cannot follow", .{});
-        }
-        if (r.ty.hasPointers(ty)) {
-            // What was stored carries its own owners; a pointer found in memory nobody stored into depends on
-            // the storage it was read from, which is not the stack slot or parameter that holds its address.
-            // A struct read out of memory is a copy of what was stored: only a pointer or slice itself points into it.
-            // A pointer or slice read from a place points into storage the place holds. So does a struct read from a
-            // field (the header of a container, an iterator): its pointers are those of the fields. An element read out
-            // of an array or slice is a copy of what was stored there, whose pointers lead elsewhere.
-            if (ptr.place) |pl| if (r.topLevelPointer(ty) or !r.places.hasElem(pl)) {
-                out.owners = try out.owners.with(r.arena, try r.bufferOwner(st, inst.id, pl));
-            };
-            // Memory a container got from an allocator depends on it.
-            if (ptr.place) |pl| {
-                var at = pl;
-                while (true) {
-                    if (r.places.find(at, dom.backing_step)) |slot| if (st.mem.get(slot)) |b| {
-                        out.owners = try out.owners.merge(r.arena, b.owners);
-                    };
-                    at = r.places.rec(at).parent;
-                    if (at == dom.no_place) break;
-                }
-            }
-        }
-        if (ptr.many or (ptr.place != null and r.places.hasElem(ptr.place.?))) out.many = true;
-        // A number read out of a stale handle is data, not a use of what the handle names.
-        switch (r.ty.kind(ty)) {
-            .int, .bool, .float, .@"enum", .error_set => return Val.none,
-            else => {},
-        }
-        try r.alive(st, inst, out, "read");
-        return out;
-    }
-
-    fn isInsertion(callee: []const u8) bool {
-        const dot = std.mem.lastIndexOfScalar(u8, callee, '.') orelse 0;
-        const method = callee[if (dot == 0) 0 else dot + 1..];
-        const stores = [_][]const u8{ "append", "put", "insert", "add", "push", "enqueue", "getOrPut", "ensure", "resize", "reserve", "expand" };
-        for (stores) |s| if (std.mem.startsWith(u8, method, s)) return true;
-        return false;
-    }
-
-    fn noteRet(r: *Run, ref: RetRef) Allocator.Error!void {
-        for (r.ret_refs.items) |q| {
-            if (q.param == ref.param and q.stored == ref.stored and q.interior == ref.interior and std.mem.eql(u32, q.path, ref.path)) return;
-        }
-        try r.ret_refs.append(r.arena, ref);
-    }
-
-    fn ret(r: *Run, inst: *const Inst, st: *State, val: Val) Error!void {
-        var freed_here: u64 = 0;
-        for (st.freed.ids) |o| {
-            const rec = r.owners.items[o];
-            if (rec.kind == .param and rec.n < 64) freed_here |= @as(u64, 1) << @intCast(rec.n);
-        }
-        r.frees_all &= freed_here;
-        var moved_here: u64 = 0;
-        for (val.moved.ids) |o| {
-            const rec = r.owners.items[o];
-            if (rec.kind == .param and rec.n < 64) moved_here |= @as(u64, 1) << @intCast(rec.n);
-        }
-        r.moves_all &= moved_here;
-        r.any_ret = true;
-        try r.use(st, inst, val, "returned");
-        if (val.place) |pl| {
-            const rec = r.places.rec(pl);
-            const same: ?u32 = if (rec.kind == .param and rec.parent == dom.no_place) rec.n else null;
-            if (same == null or (r.ret_same != null and r.ret_same.? != same.?)) r.ret_same_conflict = true else r.ret_same = same;
-        } else r.ret_same_conflict = true;
-        for (val.owners.ids) |o| {
-            const rec = r.owners.items[o];
-            switch (rec.kind) {
-                .local => {
-                    const slot = r.names.get(rec.n) orelse "a local";
-                    try r.report(st, .escape_local, inst.loc, &.{}, "a pointer to `{s}` is returned, but `{s}` ends with the function", .{ slot, slot });
-                },
-                .param => {
-                    const inside = if (val.place) |pl| r.places.rec(pl).parent != dom.no_place else false;
-                    try r.noteRet(.{ .param = rec.n, .path = &.{}, .stored = false, .interior = inside });
-                },
-                .buffer, .object, .moved => {
-                    const source = if (rec.kind == .moved) r.moved_origin.get(o) orelse rec.place else rec.place;
-                    const root = r.places.rec(source);
-                    if (root.kind == .param) try r.noteRet(.{ .param = root.n, .path = try r.places.path(r.arena, source), .stored = true });
-                },
-                .heap => r.ret_alloc = true,
-            }
-        }
-        for (st.pending.keys(), st.pending.values()) |o, p| {
-            const slot = r.names.get(r.owners.items[o].n) orelse "a local";
-            const where: diag.Note = .{ .loc = inst.loc, .text = "it is still there when the function returns here" };
-            try r.reportAt(st, .escape_local, p.loc, try r.noteList(&.{where}), "a pointer to `{s}` is stored into a container that outlives it", .{slot});
-        }
-        // Handing the value to the caller ends the function's ownership of its tokens.
-        st.live = try st.live.minus(r.arena, val.toks);
-        for (st.live.ids) |t| {
-            const made = try r.created(t);
-            try r.report(st, .leak, inst.loc, try r.noteList(&.{made}), "linear value `{s}` is not consumed on this path", .{r.tokenName(t)});
-        }
-        st.alive = false;
-    }
-
-    fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
-        // A call through a function pointer is a call to a function nothing is known of.
-        const callee = r.v.attrStr(inst, .callee) orelse "(call through a function pointer)";
-        const ops = r.v.ops(inst);
-        var name_buf: [512]u8 = undefined;
-        const declared = spec.stripped(&name_buf, callee);
-        const n = ops.len - 1;
-        const args = try r.arena.alloc(Val, n);
-        const arg_tys = try r.arena.alloc(schema.TypeId, n);
-        for (args, arg_tys, ops[1..]) |*a, *t, o| {
-            a.* = r.operand(o);
-            t.* = r.operandType(o);
-        }
-        const known: ?Ref = r.prog.resolve(callee, r.pack, arg_tys);
-        var effect: spec.Effect = r.prog.annotations.get(declared) orelse spec.lookup(declared);
-        const body: ?Summary = if (known) |ref| try r.prog.summaryOf(ref) else null;
-
-        // A container method of std is read from its body when the pack has one; the documented model covers the rest.
-        var model: spec.Model = .{};
-        var summary: ?Summary = null;
-        const container_call = effect == .container;
-        if (container_call) {
-            model = spec.container(declared);
-            if (model.effect == .ends) {
-                effect = .ends;
-            } else if (body != null) {
-                effect = .none;
-                summary = body;
-            } else effect = switch (model.effect) {
-                .releases => .releases,
-                else => if (model.kill != .none) .invalidates else .reads,
-            };
-        } else if (effect == .none or effect == .reads) summary = body;
-
-        // `remap` to nothing is a free; `resize` to nothing too, to anything else it leaves the memory where it is.
-        if (effect == .realloc and std.mem.endsWith(u8, declared, "remap") and r.constantArg(ops, 2, 0)) effect = .free;
-        var resize_frees = false;
-        if (effect == .resize) {
-            const at = spec.lenArg(declared);
-            resize_frees = r.constantArg(ops, at, 0);
-            if (!resize_frees and !(at < n and ops[1 + at].kind == .constant)) try r.tally("dynamic_len", inst);
-        }
-        // The argument a free names is not a use but the end of one.
-        const freed: ?usize = switch (effect) {
-            .free => if (n > 1) (if (std.mem.endsWith(u8, declared, "rawFree") or std.mem.endsWith(u8, declared, "remap")) 1 else n - 1) else null,
-            .realloc => if (n > 1) 1 else null,
-            .resize => if (resize_frees and n > 1) 1 else null,
-            else => null,
-        };
-        var derived: Val = .none;
-        for (args, arg_tys, 0..) |a, aty, i| {
-            const ends_here = freed != null and freed.? == i;
-            if (!ends_here and effect != .query) try r.alive(st, inst, a, "passed to a call");
-            if (r.ty.isPointer(aty)) {
-                if (a.place) |pl| {
-                    const content = try r.readPlace(st, pl);
-                    if (!content.toks.isEmpty()) {
-                        if (known == null)
-                            return r.unsupported(inst, "a pointer to a linear value is passed to {s}, which is not analyzed", .{callee});
-                        try r.use(st, inst, content, "borrowed");
-                    }
-                    // What the callee can read through the pointer must still exist.
-                    if (!ends_here and effect != .query) try r.alive(st, inst, content, "reached through a pointer passed to a call");
-                }
-            }
-            if (!a.toks.isEmpty() and !r.ty.isPointer(aty)) {
-                try r.sink(st, inst, a, "passed on", callee);
-                try r.noteTokenPassed(inst, a, i, known, body, declared);
-            }
-            derived.owners = try derived.owners.merge(r.arena, a.owners);
-        }
-        if (r.ty.kind(inst.ty) == .noreturn) {
-            st.alive = false;
-            return;
-        }
-        if (effect == .none and (known == null or body == null) and (r.ty.hasPointers(inst.ty) or anyPointerLike(r, arg_tys))) try r.tally("unknown_calls", inst);
-        if (container_call and !model.modelled and body == null) try r.tally("unmodelled", inst);
-        var sub: u32 = 0;
-        var res = try r.fresh(st, inst, inst.ty, &sub);
-        const text = try std.fmt.allocPrint(r.arena, "`{s}`", .{declared});
-
-        // How much room the container has before and after, and whether this call can still reallocate.
-        var room_proven = false;
-        if (container_call) {
-            room_proven = try r.room(st, ops, args, model);
-        } else try r.dropCaps(st, args, arg_tys);
-        const skip_kills = container_call and room_proven;
-
-        switch (effect) {
-            .none, .reads, .query, .container => {},
-            .alloc, .realloc, .releases => {
-                if (effect == .realloc) {
-                    var moved: Set = .empty;
-                    try r.endAllocations(st, inst, args[1], text, &moved);
-                    res.moved = moved;
-                }
-                // From an arena: the allocation ends with it, or when it is reset.
-                var region: PlaceId = dom.no_place;
-                if (n > 0) for (args[0].owners.ids) |o| if (r.owners.items[o].kind == .object) {
-                    region = r.owners.items[o].place;
-                };
-                const heap = try r.owner(.heap, inst.id, region);
-                st.revive(heap);
-                var owners = try Set.single(r.arena, heap);
-                if (effect != .releases and n > 0) for (args[0].owners.ids) |o| {
-                    // Only a buffer on the stack (a fixed-buffer allocator over a local array) outlives nothing else.
-                    if (r.owners.items[o].kind == .local) owners = try owners.with(r.arena, o);
-                };
-                res.owners = owners;
-                res.place = try r.places.root(r.arena, .heap, inst.id);
-                if (effect == .releases) try r.invalidate(st, inst, args[0], text, false);
-            },
-            .handle => {
-                const slot = try r.owner(.heap, inst.id, dom.no_place);
-                st.revive(slot);
-                res.owners = try Set.single(r.arena, slot);
-            },
-            .free, .resize => if (freed) |i| try r.endAllocations(st, inst, args[i], text, null),
-            .swap => if (n >= 2) {
-                // The two objects trade contents: what one held is now reached through the other.
-                const pointee = r.pointeeOf(arg_tys[0]);
-                var first = try r.load(st, inst, args[0], pointee);
-                var second = try r.load(st, inst, args[1], pointee);
-                first.owners = try r.moveStorage(st, first.owners, args[0], args[1]);
-                second.owners = try r.moveStorage(st, second.owners, args[1], args[0]);
-                try r.store(inst, st, args[0], second, pointee);
-                try r.store(inst, st, args[1], first, pointee);
-            },
-            .allocator_of => if (n > 0) {
-                const pl = args[0].place orelse args[0].src;
-                if (pl) |p| {
-                    const obj = try r.owner(.object, 0, p);
-                    st.revive(obj);
-                    res.owners = try (try r.readPlace(st, p)).owners.with(r.arena, obj);
-                } else res.owners = args[0].owners;
-            },
-            .ends => if (n > 0) try r.invalidate(st, inst, args[0], text, true),
-            .resets => if (n > 0) if (args[0].place orelse args[0].src) |pl| {
-                const note_text = try std.fmt.allocPrint(r.arena, "{s} gives back what `{s}` handed out here", .{ text, r.placeName(pl) });
-                try r.killRegion(st, pl, inst.loc, note_text);
-            },
-            .invalidates => if (n > 0) {
-                if (!room_proven) try r.invalidate(st, inst, args[0], text, false);
-                try r.storeArgs(st, inst, args);
-                try r.learnBacking(st, args, arg_tys);
-            },
-        }
-        if (container_call and n > 0) {
-            // Elements that move or go away are stale even when the storage stays; a removal ends a pending entry.
-            if (summary != null) {
-                if (model.kill == .shift) try r.invalidate(st, inst, args[0], text, false);
-                try r.learnBacking(st, args, arg_tys);
-            }
-            if (spec.removes(declared)) try r.dropPending(st, args[0]);
-        }
-        if (effect == .none or effect == .reads or (container_call and effect == .invalidates)) {
-            if (summary) |s| try r.applySummary(st, inst, s, args, skip_kills, known != null and r.isLibrary(known.?));
-            if (summary) |s| if (s.moves != 0) {
-                var moved: Set = res.moved;
-                for (args, 0..) |a, i| {
-                    if (i < 64 and s.moves & (@as(u64, 1) << @intCast(i)) != 0) try r.endAllocations(st, inst, a, text, &moved);
-                }
-                res.moved = moved;
-            };
-            if (summary) |s| if (s.ret_same) |k| if (k < args.len) {
-                res.place = args[k].place;
-            };
-            // A handle holds no pointer but names an allocation: a callee that returns one hands out a new owner.
-            const hands_out = if (summary) |s| s.ret_alloc else false;
-            if (r.ty.hasPointers(inst.ty) or hands_out) {
-                var owners: Set = .empty;
-                var allocates = false;
-                if (summary) |s| {
-                    allocates = s.ret_alloc;
-                    for (s.ret) |ref| {
-                        if (ref.param >= args.len) continue;
-                        const given = args[ref.param];
-                        if (!ref.stored and !ref.interior and given.place != null) {
-                            // The pointer itself comes back (`iterator` hands out `self`): it is good while the
-                            // object it points to exists, whatever happens to the storage the object holds.
-                            owners = try owners.merge(r.arena, given.owners);
-                            owners = try owners.with(r.arena, try r.owner(.object, 0, given.place.?));
-                        } else owners = try owners.merge(r.arena, try r.dependsOn(st, inst, given, ref.path, ref.stored));
-                    }
-                    // What the documented model says the result points into, where the body's pointer arithmetic
-                    // over one block (a hash map's header, metadata, keys and values) hides it.
-                    if (container_call and (model.ptr != .none or model.adopts)) owners = try owners.merge(r.arena, try r.containerResult(st, inst, model, args, arg_tys));
-                    // A handle (a value with owners but no pointers) names what the result points to.
-                    for (args, arg_tys) |a, aty| if (!r.ty.hasPointers(aty) and !r.ty.isPointer(aty)) {
-                        owners = try owners.merge(r.arena, a.owners);
-                    };
-                } else if (container_call and (model.ptr != .none or model.adopts)) {
-                    owners = try r.containerResult(st, inst, model, args, arg_tys);
-                } else {
-                    // Nothing is known of the callee. Given an allocator, the result is an allocation from it
-                    // (who received the allocator that made the slice); otherwise it may point into any argument,
-                    // and a struct it returns may hold pointers into what an argument holds (a view, an iterator).
-                    allocates = r.hasAllocator(arg_tys);
-                    // A method the model knows hands out nothing of the container (`get` copies a value).
-                    const known_value = container_call and model.modelled;
-                    if (!allocates and !known_value) for (args, arg_tys) |a, aty| {
-                        const holds = if (r.ty.pointee(aty)) |pt| r.ty.hasPointers(pt) else false;
-                        var dep = a;
-                        // A pointer into something that holds pointers (a context, a table) is the callee's business,
-                        // unless the callee is known to hand out its storage.
-                        if (holds and effect != .reads and r.topLevelPointer(inst.ty)) dep.place = null;
-                        if (dep.place == null) dep.place = a.src;
-                        owners = try owners.merge(r.arena, try r.dependsOn(st, inst, dep, &.{}, holds));
-                        if (a.place) |pl| owners = try owners.merge(r.arena, try r.storageOwners(st, pl));
-                    };
-                }
-                if (allocates) {
-                    var region: PlaceId = dom.no_place;
-                    var from: Val = .none;
-                    for (args, arg_tys) |a, aty| if (r.ty.isAllocator(aty)) {
-                        from = a;
-                        for (a.owners.ids) |o| if (r.owners.items[o].kind == .object) {
-                            region = r.owners.items[o].place;
-                        };
-                    };
-                    const heap = try r.owner(.heap, inst.id, region);
-                    st.revive(heap);
-                    owners = try owners.with(r.arena, heap);
-                    for (from.owners.ids) |o| if (r.owners.items[o].kind == .local) {
-                        owners = try owners.with(r.arena, o);
-                    };
-                }
-                res.owners = owners;
-            }
-        }
-        r.set(inst, res);
-    }
-
-    /// What was read from the place `from` points to, as storage that now lives where `to` points: it ends with
-    /// whatever ends that place, and what was read from `from` ends with it.
-    fn moveStorage(r: *Run, st: *State, owners: Set, from: Val, to: Val) Allocator.Error!Set {
-        const source = from.place orelse return owners;
-        const dest = to.place orelse return owners;
-        var out: Set = .empty;
-        for (owners.ids) |o| {
-            const rec = r.owners.items[o];
-            if (rec.kind == .buffer and rec.place == source) {
-                // The read of this very call: the same storage under another name.
-                const gone = try r.owner(.moved, rec.n, dest);
-                st.revive(gone);
-                try r.moved_origin.put(r.arena, gone, source);
-                out = try out.with(r.arena, gone);
-            } else out = try out.with(r.arena, o);
-        }
-        return out;
-    }
-
-    /// Whether argument `at` is the constant `value`.
-    fn constantArg(r: *Run, ops: []const schema.Operand, at: usize, value: u64) bool {
-        if (at + 1 >= ops.len) return false;
-        const o = ops[1 + at];
-        if (o.kind != .constant) return false;
-        const k = r.v.constant(o);
-        return k.kind == .int and k.a == value;
-    }
-
-    /// A linear value went into a call: when the callee keeps it in memory the checker does not follow, that is a
-    /// transfer. A callee of the project counted it in its own run; std and the callees without a body did not.
-    fn noteTokenPassed(r: *Run, inst: *const Inst, a: Val, at: usize, known: ?Ref, body: ?Summary, declared: []const u8) Allocator.Error!void {
-        if (std.mem.startsWith(u8, declared, "zv.")) return;
-        const bit: u64 = if (at < 64) @as(u64, 1) << @intCast(at) else 0;
-        var stored = true;
-        if (body) |b| {
-            stored = b.token_stores & bit != 0;
-            if (stored) for (a.toks.ids) |t| if (r.param_of_tok.get(t)) |pi| if (pi < 64) {
-                r.token_stored |= @as(u64, 1) << @intCast(pi);
-            };
-            if (!r.isLibrary(known.?)) return;
-        }
-        if (!stored) return;
-        try r.tally("transfers", inst);
-        for (a.toks.ids) |t| if (r.param_of_tok.get(t)) |pi| if (pi < 64) {
-            r.token_stored |= @as(u64, 1) << @intCast(pi);
-        };
-    }
-
-    /// A function of std: not part of what is being checked, so its own run is not counted.
-    fn isLibrary(r: *Run, ref: Ref) bool {
-        _ = r;
-        const file = ref.pack.t.files[@backingInt(ref.func.file)];
-        return std.mem.eql(u8, ref.pack.str(file.module), "std");
-    }
-
-    /// The owners of what the callee can read through a pointer to `pl`: allocations and storage that were stored there.
-    fn storageOwners(r: *Run, st: *State, pl: PlaceId) Allocator.Error!Set {
-        const content = try r.readPlace(st, pl);
-        var out: Set = .empty;
-        for (content.owners.ids) |o| switch (r.owners.items[o].kind) {
-            .buffer, .heap, .moved => out = try out.with(r.arena, o),
-            else => {},
-        };
-        return out;
-    }
-
-    /// The result of a container method from the documented model (no body in the packs).
-    fn containerResult(r: *Run, st: *State, inst: *const Inst, model: spec.Model, args: []const Val, tys: []const schema.TypeId) Allocator.Error!Set {
-        var out: Set = .empty;
-        if (model.adopts) {
-            for (args, tys) |a, t| if (!r.ty.isAllocator(t)) {
-                out = try out.merge(r.arena, a.owners);
-            };
-            return out;
-        }
-        if (args.len == 0) return out;
-        switch (model.ptr) {
-            .none => {},
-            .storage => {
-                var a = args[0];
-                if (a.place == null) a.place = a.src;
-                out = try r.dependsOn(st, inst, a, &.{}, true);
-            },
-            .self => out = args[0].owners,
-            .content => for (args, tys) |a, t| {
-                out = try out.merge(r.arena, try r.withoutLocals(a.owners));
-                if (r.ty.isPointer(t)) if (a.place) |pl| {
-                    out = try out.merge(r.arena, try r.storageOwners(st, pl));
-                };
-            },
-        }
-        return out;
-    }
-
-    /// Updates what is known of the room in the container the first argument points to, and says whether the call
-    /// is known not to reallocate.
-    fn room(r: *Run, st: *State, ops: []const schema.Operand, args: []const Val, model: spec.Model) Allocator.Error!bool {
-        if (args.len == 0) return false;
-        const pl = args[0].place orelse args[0].src orelse return false;
-        const cur = st.caps.get(pl) orelse Cap{};
-        var next = cur;
-        var proven = false;
-        const count = r.countArg(ops);
-        switch (model.count) {
-            .keep => {},
-            .drop => {
-                try r.dropCapsAt(st, pl);
-                return false;
-            },
-            .insert1 => {
-                proven = cur.len_ub != null and cur.len_ub.? + 1 <= cur.cap_lb;
-                next.len_ub = if (cur.len_ub) |l| l + 1 else null;
-            },
-            // The contract of these methods: the room is there, nothing is reallocated.
-            .insert1_assume => {
-                proven = true;
-                next.len_ub = if (cur.len_ub) |l| l + 1 else null;
-            },
-            .many => next.len_ub = null,
-            .many_assume => {
-                proven = true;
-                next.len_ub = null;
-            },
-            .total => if (count) |c| {
-                proven = c <= cur.cap_lb;
-                next.cap_lb = @max(cur.cap_lb, c);
-            },
-            .unused => if (count) |c| {
-                proven = cur.len_ub != null and cur.len_ub.? + c <= cur.cap_lb;
-                next.cap_lb = @max(cur.cap_lb, c);
-            },
-        }
-        // Only a method that can reallocate has a reallocation to rule out.
-        proven = proven and (model.kill == .grow or model.count == .insert1_assume or model.count == .many_assume);
-        if (next.cap_lb == 0 and next.len_ub == null) {
-            _ = st.caps.swapRemove(pl);
-        } else try st.caps.put(r.arena, pl, next);
-        return proven;
-    }
-
-    /// The constant in the last integer argument of a call (the count of `ensureTotalCapacity`), if it is one.
-    fn countArg(r: *Run, ops: []const schema.Operand) ?u64 {
-        var i = ops.len;
-        while (i > 1) {
-            i -= 1;
-            if (r.ty.kind(r.operandType(ops[i])) != .int) continue;
-            if (ops[i].kind != .constant) return null;
-            const k = r.v.constant(ops[i]);
-            return if (k.kind == .int) k.a else null;
-        }
-        return null;
-    }
-
-    /// A call that can write through a pointer to a container leaves nothing known of its room.
-    fn dropCaps(r: *Run, st: *State, args: []const Val, tys: []const schema.TypeId) Allocator.Error!void {
-        if (st.caps.count() == 0) return;
-        for (args, tys) |a, t| if (r.ty.isPointer(t)) if (a.place) |pl| {
-            if (!r.places.hasElem(pl)) try r.dropCapsAt(st, pl);
-        };
-    }
-
-    fn dropCapsAt(r: *Run, st: *State, pl: PlaceId) Allocator.Error!void {
-        var k: usize = 0;
-        while (k < st.caps.count()) {
-            if (r.places.overlaps(st.caps.keys()[k], pl)) st.caps.swapRemoveAt(k) else k += 1;
-        }
-    }
-
-    /// A removal from the container at `obj` ends the entries that were put into it for the duration of a call.
-    fn dropPending(r: *Run, st: *State, obj: Val) Allocator.Error!void {
-        const pl = obj.place orelse obj.src orelse return;
-        var k: usize = 0;
-        while (k < st.pending.count()) {
-            if (r.places.overlaps(st.pending.values()[k].place, pl)) st.pending.swapRemoveAt(k) else k += 1;
-        }
-    }
-
-    /// A pointer, slice, or an optional or error union of one: the result itself points somewhere.
-    fn topLevelPointer(r: *Run, ty: schema.TypeId) bool {
-        return switch (r.ty.kind(ty)) {
-            .pointer => true,
-            .optional, .error_union => r.topLevelPointer(r.ty.rec(ty).child),
-            else => false,
-        };
-    }
-
-    /// A container that grew with an allocator holds memory from it: it ends with an arena, or the stack buffer
-    /// of a fixed-buffer allocator.
-    fn learnBacking(r: *Run, st: *State, args: []const Val, tys: []const schema.TypeId) Error!void {
-        const pl = args[0].place orelse return;
-        var owners: Set = .empty;
-        for (args[1..], tys[1..]) |a, t| if (r.ty.isAllocator(t)) {
-            for (a.owners.ids) |o| switch (r.owners.items[o].kind) {
-                .object, .local => owners = try owners.with(r.arena, o),
-                else => {},
-            };
-        };
-        if (owners.isEmpty()) return;
-        const slot = try r.places.child(r.arena, pl, dom.backing_step);
-        const old = st.mem.get(slot) orelse Val.none;
-        try st.mem.put(r.arena, slot, .{ .owners = try old.owners.merge(r.arena, owners) });
-    }
-
-    fn hasAllocator(r: *Run, tys: []const schema.TypeId) bool {
-        for (tys) |t| if (r.ty.isAllocator(t)) return true;
-        return false;
-    }
-
-    /// What a result that depends on argument `a` depends on: the argument's own owners and the storage behind
-    /// `path` below the place it points to. A pointer to something that holds pointers (a container, an iterator)
-    /// hands out what is stored in it, which does not live in the stack slot that holds the container.
-    fn dependsOn(r: *Run, st: *State, inst: *const Inst, a: Val, path: []const u32, strip_locals: bool) Allocator.Error!Set {
-        var out = a.owners;
-        if (strip_locals) out = try r.withoutLocals(out);
-        if (a.place orelse a.src) |pl| {
-            var at = pl;
-            for (path) |down| at = try r.places.child(r.arena, at, down);
-            out = try out.with(r.arena, try r.bufferOwner(st, inst.id, at));
-        }
-        return out;
-    }
-
-    /// The owner of the storage that pointers read from `pl` at `site` point into; it is fresh, so alive.
-    fn bufferOwner(r: *Run, st: *State, site: u32, pl: PlaceId) Allocator.Error!dom.Id {
-        const buf = try r.owner(.buffer, site, pl);
-        st.revive(buf);
-        return buf;
-    }
-
-    fn anyPointerLike(r: *Run, tys: []const schema.TypeId) bool {
-        for (tys) |t| if (r.ty.isPointer(t) or r.ty.hasPointers(t)) return true;
-        return false;
-    }
-
-    /// What the callee does to what its arguments point into, from its summary.
-    fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []const Val, room_proven: bool, library: bool) Error!void {
-        if (s.assumed) {
-            // Only what the intersection over the paths needs: the parameters a recursive call hands on and frees.
-            for (args, 0..) |a, i| {
-                if (i >= 64 or s.frees & (@as(u64, 1) << @intCast(i)) == 0) continue;
-                for (a.owners.ids) |o| {
-                    const rec = r.owners.items[o];
-                    if (rec.kind == .param and r.isParamItself(a, rec.n)) st.freed = try st.freed.with(r.arena, o);
-                }
-            }
-            return;
-        }
-        for (s.kills) |k| {
-            // A call that is known not to reallocate (room was made) moves nothing, whatever its body may do.
-            if (room_proven and !k.ends) continue;
-            if (k.param >= args.len) continue;
-            const named = try r.targets(args[k.param], k.path);
-            if (named.len == 0) {
-                try r.tally("blind", inst);
-                continue;
-            }
-            for (named) |place| {
-                const text = try std.fmt.allocPrint(r.arena, "`{s}` {s} `{s}` here", .{ r.callName(inst), if (k.ends) "ends" else "invalidates pointers into", r.placeName(place) });
-                try r.killPlace(st, place, k.ends, inst.loc, text);
-                try r.noteKill(place, k.ends);
-            }
-        }
-        for (s.stores) |put| {
-            if (put.from >= args.len or put.into >= args.len) continue;
-            // `getOrPut` hands back the slot for the caller to fill in, which is where a key is replaced by an owned
-            // copy: the key it was given is not kept.
-            if (library and put.from_path == null and std.mem.indexOf(u8, r.callName(inst), "getOrPut") != null) continue;
-            var value: Val = .{ .owners = args[put.from].owners };
-            if (put.from_path) |fp| {
-                // The storage read below the parameter moved: it is now reached through where it was stored.
-                value = .none;
-                if (args[put.from].place orelse args[put.from].src) |base| {
-                    var from_at = base;
-                    for (fp) |down| from_at = try r.places.child(r.arena, from_at, down);
-                    var kept = try r.owner(.buffer, inst.id, from_at);
-                    if (put.moves) if (args[put.into].place) |into| {
-                        var to_at = into;
-                        for (put.path) |down| to_at = try r.places.child(r.arena, to_at, down);
-                        kept = try r.owner(.moved, inst.id, to_at);
-                        try r.moved_origin.put(r.arena, kept, from_at);
-                    };
-                    st.revive(kept);
-                    value.owners = try Set.single(r.arena, kept);
-                }
-            }
-            const dst = args[put.into];
-            // An entry of a container that holds a pointer to a local may be taken out again before the return.
-            if (library) {
-                try r.escapesInto(st, inst, value, r.isLocalPtr(dst), "stored by the callee into memory that outlives it", dst.place);
-            } else try r.escapes(st, inst, value, r.isLocalPtr(dst), "stored by the callee into memory that outlives it");
-            if (dst.place) |base| {
-                var at = base;
-                for (put.path) |down| at = try r.places.child(r.arena, at, down);
-                try r.noteStores(at, value);
-                // What std's containers hold is not followed (an element is one of many); storage that moved is.
-                if (r.isLocalPtr(dst) and (put.from_path != null or !library)) {
-                    const old = st.mem.get(at) orelse Val.none;
-                    try st.mem.put(r.arena, at, try old.join(r.arena, value));
-                }
-            }
-        }
-        for (args, 0..) |a, i| {
-            if (i >= 64 or s.frees & (@as(u64, 1) << @intCast(i)) == 0) continue;
-            try r.endAllocations(st, inst, a, r.callName(inst), null);
-        }
-    }
-
-    fn callName(r: *Run, inst: *const Inst) []const u8 {
-        return r.v.attrStr(inst, .callee) orelse "a call";
-    }
-
-    /// The places a callee's effect on `val` (and `path` below what it points to) applies to: the place itself when
-    /// the checker knows it, else everything the owners of the value own. Empty when nothing can be named.
-    fn targets(r: *Run, val: Val, path: []const u32) Allocator.Error![]const PlaceId {
-        var out: std.ArrayList(PlaceId) = .empty;
-        if (val.place orelse val.src) |base| {
-            var at = base;
-            for (path) |down| at = try r.places.child(r.arena, at, down);
-            try out.append(r.arena, at);
-            return out.items;
-        }
-        // A pointer into the storage an object holds is not a pointer to the object.
-        for (val.owners.ids) |o| {
-            const rec = r.owners.items[o];
-            const from_call = if (r.by_id[rec.n]) |i| switch (i.tag) {
-                .call, .call_always_tail, .call_never_tail, .call_never_inline => true,
-                else => false,
-            } else false;
-            if (rec.kind == .moved or (rec.kind == .buffer and from_call)) return out.items;
-        }
-        for (val.owners.ids) |o| {
-            const rec = r.owners.items[o];
-            const root: PlaceId = switch (rec.kind) {
-                .local => try r.places.root(r.arena, .cell, rec.n),
-                .param => try r.places.root(r.arena, .param, rec.n),
-                .heap => try r.places.root(r.arena, .heap, rec.n),
-                // The storage a pointer was read from is not a place of its own: nothing to name.
-                .buffer, .object, .moved => continue,
-            };
-            if (root == dom.no_place) continue;
-            if (std.mem.indexOfScalar(PlaceId, out.items, root) == null) try out.append(r.arena, root);
-        }
-        return out.items;
-    }
-
-    /// For the summary: the call ended or invalidated pointers below a parameter.
-    fn noteKill(r: *Run, pl: PlaceId, ends: bool) Allocator.Error!void {
-        if (r.places.rec(pl).kind != .param) return;
-        const path = try r.places.path(r.arena, pl);
-        const n = r.places.rec(pl).n;
-        for (r.kills.items) |k| if (k.param == n and k.ends == ends and std.mem.eql(u32, k.path, path)) return;
-        try r.kills.append(r.arena, .{ .param = n, .path = path, .ends = ends });
-    }
-
-    /// An operation on the object `obj` points to that makes pointers into it stale (`ends`: the object itself
-    /// is gone too).
-    fn invalidate(r: *Run, st: *State, inst: *const Inst, obj: Val, what: []const u8, ends: bool) Error!void {
-        const places = try r.targets(obj, &.{});
-        if (places.len == 0) {
-            try r.tally("blind", inst);
-            return;
-        }
-        for (places) |pl| try r.invalidateAt(st, inst, pl, what, ends);
-    }
-
-    fn invalidateAt(r: *Run, st: *State, inst: *const Inst, pl: PlaceId, what: []const u8, ends: bool) Error!void {
-        if (!isInsertion(r.callName(inst))) {
-            var k: usize = 0;
-            while (k < st.pending.count()) {
-                if (r.places.overlaps(st.pending.values()[k].place, pl)) st.pending.swapRemoveAt(k) else k += 1;
-            }
-        }
-        // The object itself must still exist.
-        const owner_id = try r.owner(.object, 0, pl);
-        if (st.dead.contains(owner_id)) {
-            var items: std.ArrayList(diag.Note) = .empty;
-            if (st.dead.get(owner_id)) |e| try items.append(r.arena, .{ .loc = e.loc, .text = e.text });
-            try r.report(st, .use_after_free, inst.loc, try r.noteList(items.items), "`{s}` is used after it was deinitialized", .{r.placeName(pl)});
-        }
-        const text = try std.fmt.allocPrint(r.arena, "{s} {s} `{s}` here", .{ what, if (ends) "ends" else "invalidates pointers into", r.placeName(pl) });
-        try r.killPlace(st, pl, ends, inst.loc, text);
-        try r.noteKill(pl, ends);
-    }
-
-    /// Ends the buffers (and, for `ends`, the objects) at and below `pl`, and those above it that hold it. An object
-    /// that ends takes the allocations it holds with it (a list built by `fromOwnedSlice`).
-    fn killPlace(r: *Run, st: *State, pl: PlaceId, ends: bool, loc: schema.LocId, text: []const u8) Error!void {
-        for (r.owners.items, 0..) |o, id| {
-            const hit = switch (o.kind) {
-                .buffer, .moved => r.places.overlaps(o.place, pl),
-                .object => if (ends) r.places.contains(pl, o.place) else false,
-                .heap => ends and o.place != dom.no_place and r.places.contains(pl, o.place),
-                else => false,
-            };
-            if (!hit) continue;
-            try st.die(r.arena, @intCast(id), .{ .loc = loc, .text = text, .trail = st.trail });
-            // Pointers read from where the storage came from end with it.
-            if (o.kind == .moved) if (r.moved_origin.get(@intCast(id))) |from| {
-                for (r.owners.items, 0..) |q, qid| {
-                    if (q.kind == .buffer and r.places.overlaps(q.place, from))
-                        try st.die(r.arena, @intCast(qid), .{ .loc = loc, .text = text, .trail = st.trail });
-                }
-                try r.noteKill(from, false);
-            };
-        }
-        if (ends) {
-            const obj = try r.owner(.object, 0, pl);
-            try st.die(r.arena, obj, .{ .loc = loc, .text = text, .trail = st.trail });
-            // The allocations an object holds (a list built by `fromOwnedSlice`) go with it.
-            for ((try r.readPlace(st, pl)).owners.ids) |o| {
-                if (r.owners.items[o].kind == .heap) try st.die(r.arena, o, .{ .loc = loc, .text = text, .trail = st.trail });
-            }
-        }
-    }
-
-    /// Ends what the arena at `pl` handed out, not the arena.
-    fn killRegion(r: *Run, st: *State, pl: PlaceId, loc: schema.LocId, text: []const u8) Error!void {
-        for (r.owners.items, 0..) |o, id| {
-            if (o.kind != .heap or o.place == dom.no_place or !r.places.contains(pl, o.place)) continue;
-            try st.die(r.arena, @intCast(id), .{ .loc = loc, .text = text, .trail = st.trail });
-        }
-    }
-
-    /// `free(x)`: the allocations `x` points into end, and the storage `x` was read from with them; a second free
-    /// is a finding. With `deferred`, nothing ends yet: the owners that do when the call succeeds are collected
-    /// (`realloc` on an error that came back leaves the old memory alone).
-    fn endAllocations(r: *Run, st: *State, inst: *const Inst, val: Val, what: []const u8, deferred: ?*Set) Error!void {
-        // One of many (an element read out of an array): the site names them all, and only one was freed.
-        if (val.many) return;
-        for (val.owners.ids) |o| {
-            const rec = r.owners.items[o];
-            switch (rec.kind) {
-                .heap => {
-                    if (st.dead.contains(o)) {
-                        var items: std.ArrayList(diag.Note) = .empty;
-                        if (st.dead.get(o)) |e| try items.append(r.arena, .{ .loc = e.loc, .text = e.text });
-                        try r.report(st, .double_free, inst.loc, try r.noteList(items.items), "memory is freed twice", .{});
-                    }
-                    try r.endOne(st, inst, o, what, deferred);
-                },
-                .param => if (r.isParamItself(val, rec.n)) {
-                    if (deferred == null) st.freed = try st.freed.with(r.arena, o);
-                    try r.endOne(st, inst, o, what, deferred);
-                },
-                .buffer, .moved => {
-                    try r.noteKill(rec.place, false);
-                    if (rec.kind == .moved) if (r.moved_origin.get(o)) |from| try r.noteKill(from, false);
-                    try r.endOne(st, inst, o, what, deferred);
-                },
-                else => {},
-            }
-        }
-    }
-
-    fn endOne(r: *Run, st: *State, inst: *const Inst, o: dom.Id, what: []const u8, deferred: ?*Set) Error!void {
-        const text = try std.fmt.allocPrint(r.arena, "first freed here by {s}", .{what});
-        const event: Event = .{ .loc = inst.loc, .text = text, .trail = st.trail };
-        if (deferred) |collected| {
-            collected.* = try collected.with(r.arena, o);
-            try r.moved_events.put(r.arena, o, event);
-            return;
-        }
-        try r.endNow(st, o, event);
-    }
-
-    fn endNow(r: *Run, st: *State, o: dom.Id, event: Event) Error!void {
-        const rec = r.owners.items[o];
-        if (rec.kind == .buffer or rec.kind == .moved) {
-            // The storage went: so did every pointer read from it.
-            try r.killPlace(st, rec.place, false, event.loc, event.text);
-        } else try st.die(r.arena, o, event);
-    }
-
-    /// The payload exists: what the call that made it moved is gone.
-    fn present(r: *Run, st: *State, p: Pred) Error!void {
-        var subject = p.subject;
-        if (p.ptr) subject = if (subject.place) |pl| try r.readPlace(st, pl) else .none;
-        try r.applyMoved(st, subject);
-    }
-
-    fn applyMoved(r: *Run, st: *State, val: Val) Error!void {
-        for (val.moved.ids) |o| {
-            const event = r.moved_events.get(o) orelse continue;
-            try r.endNow(st, o, event);
-        }
-    }
-
-    /// Whether `val` is parameter `n`, or all that is known of it is that it comes from nothing else: freeing it
-    /// frees what the caller passed.
-    fn isParamItself(r: *Run, val: Val, n: u32) bool {
-        if (val.place) |pl| return r.places.rec(pl).kind == .param and r.places.rec(pl).n == n;
-        var params: usize = 0;
-        for (val.owners.ids) |o| if (r.owners.items[o].kind == .param) {
-            params += 1;
-        };
-        return params == 1;
-    }
-
-    /// The arguments of a container operation flow into the container: a pointer to a local that goes into
-    /// memory the caller owns outlives the local.
-    fn storeArgs(r: *Run, st: *State, inst: *const Inst, args: []const Val) Error!void {
-        // `appendSlice` and its kin copy the elements, not the slice they are read from.
-        const callee = r.callName(inst);
-        // `getOrPut` hands back the slot for the caller to fill in, which is where a key is replaced by an owned copy.
-        if (std.mem.indexOf(u8, callee, "getOrPut") != null) return;
-        if (std.mem.indexOf(u8, callee, "Slice") != null or std.mem.indexOf(u8, callee, "NTimes") != null or std.mem.indexOf(u8, callee, "Many") != null) return;
-        const self_val = args[0];
-        const into_local = r.isLocalPtr(self_val);
-        for (args[1..]) |a| {
-            try r.escapesInto(st, inst, a, into_local, "stored into a container that outlives it", self_val.place);
-            if (self_val.place) |pl| try r.noteStores(pl, a);
-        }
-    }
-
-    /// A pointer to a stack slot must not end up where the function's caller can reach it.
-    fn escapes(r: *Run, st: *State, inst: *const Inst, val: Val, into_local: bool, how: []const u8) Error!void {
-        return r.escapesInto(st, inst, val, into_local, how, null);
-    }
-
-    /// With a `container` place the escape is only pending: removing the entry again clears it.
-    fn escapesInto(r: *Run, st: *State, inst: *const Inst, val: Val, into_local: bool, how: []const u8, container: ?PlaceId) Error!void {
-        if (into_local) return;
-        for (val.owners.ids) |o| {
-            const rec = r.owners.items[o];
-            if (rec.kind != .local) continue;
-            if (container) |pl| {
-                const gop = try st.pending.getOrPut(r.arena, o);
-                if (!gop.found_existing) gop.value_ptr.* = .{ .loc = inst.loc, .place = pl, .site = inst.id };
-                continue;
-            }
-            const slot = r.names.get(rec.n) orelse "a local";
-            try r.report(st, .escape_local, inst.loc, &.{}, "a pointer to `{s}` is {s}", .{ slot, how });
-        }
-    }
-
-    fn placeName(r: *Run, pl: PlaceId) []const u8 {
-        const rec = r.places.rec(pl);
-        if (rec.parent == dom.no_place) return switch (rec.kind) {
-            .cell => r.names.get(rec.n) orelse "a local",
-            .param => r.paramName(rec.n),
-            .heap => "an allocation",
-            .other => "memory",
-        };
-        const base = r.placeName(rec.parent);
-        if (rec.step == dom.elem_step) return std.fmt.allocPrint(r.arena, "{s}[]", .{base}) catch base;
-        if (r.field_names.get(pl)) |f| return std.fmt.allocPrint(r.arena, "{s}.{s}", .{ base, f }) catch base;
-        return std.fmt.allocPrint(r.arena, "{s}.{d}", .{ base, rec.step }) catch base;
-    }
-
-    fn paramName(r: *Run, i: u32) []const u8 {
-        if (r.prog.param_names) |pn| if (pn.lookup(pn.context, .{ .pack = r.pack, .func = r.func }, i)) |n| return n;
-        return std.fmt.allocPrint(r.arena, "parameter {d}", .{i}) catch "a parameter";
     }
 };

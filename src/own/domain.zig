@@ -111,8 +111,14 @@ pub const RootKind = enum(u8) {
 /// One step down from a place: field `n`, or an element of an array or slice (all elements are one place).
 pub const elem_step: u32 = std.math.maxInt(u32);
 
-/// A step to the allocator whose memory a container holds: what `list.append(gpa, x)` learns about `list`.
-pub const backing_step: u32 = std.math.maxInt(u32) - 1;
+/// A step to the object identity of the aggregate stored at a place (see `Val.obj`).
+pub const obj_step: u32 = std.math.maxInt(u32) - 1;
+
+/// The steps from here up to `elem_step` name the elements at constant indices.
+pub const index_step: u32 = 1 << 30;
+
+/// A step to the length of the slice stored at a place: writing it leaves the pointer alone.
+pub const len_step: u32 = std.math.maxInt(u32) - 2;
 
 /// Places form a tree, interned so that equal places have equal ids.
 pub const Places = struct {
@@ -196,41 +202,54 @@ pub const Places = struct {
 pub const Val = struct {
     /// The linear tokens the value holds (all of its parts).
     toks: Set = .empty,
-    /// The owners (allocations, regions, buffers, stack slots) whose lifetime any pointer inside the value depends on.
-    owners: Set = .empty,
+    /// The identities (allocations, buffers, stack slots, objects) any pointer inside the value may lead into. A
+    /// value copied by value carries the same identities, so ending one through any copy ends it for all of them.
+    ids: Set = .empty,
+    /// The object identities of the aggregate itself (its incarnation: a container, an arena): what `deinit` ends.
+    obj: Set = .empty,
     /// For a pointer: the place it points to, when exactly one is known.
     place: ?PlaceId = null,
     /// For an aggregate read out of a place: that place (the way `arena.deinit()` names the arena it ends).
     src: ?PlaceId = null,
-    /// The fields of an aggregate, when known; `toks` and `owners` always cover them.
+    /// For an optional or error union read out of a place: that place, so a test of it can refine what is stored.
+    from: ?PlaceId = null,
+    /// The fields of an aggregate, when known; `toks` and `ids` always cover them.
     parts: ?[]const Val = null,
     /// For a pointer into an array: its constant offset (in elements) from the start of `place`, when known.
     off: ?i64 = null,
     /// One of many instances: read out of an array or slice. An allocation site names all of them at once, so
     /// freeing this value does not say that the next one is freed.
     many: bool = false,
-    /// Owners that end if this value (an optional or an error union from a call that may move its argument) holds a
+    /// Identities that end if this value (an optional or an error union from a call that may move its argument) holds a
     /// payload: `remap` and `realloc` succeeded, so the old allocation is gone.
     moved: Set = .empty,
     /// `toks` holds alternatives: a join merged values that held different tokens, so the value is one of them.
     alt: bool = false,
+    /// `ids` holds alternatives: a join merged pointers that led to different things, so the value is one of them.
+    maybe: bool = false,
+    /// A container made with room for this many elements and none in it (`initCapacity`).
+    room: ?u64 = null,
 
     pub const none: Val = .{};
 
     pub fn isEmpty(v: Val) bool {
-        return v.toks.isEmpty() and v.owners.isEmpty() and v.place == null and v.src == null and v.parts == null;
+        return v.toks.isEmpty() and v.ids.isEmpty() and v.obj.isEmpty() and v.place == null and v.src == null and v.parts == null;
     }
 
     pub fn join(a: Val, arena: Allocator, b: Val) Allocator.Error!Val {
         var out: Val = .{
             .toks = try a.toks.merge(arena, b.toks),
-            .owners = try a.owners.merge(arena, b.owners),
+            .ids = try a.ids.merge(arena, b.ids),
+            .obj = try a.obj.merge(arena, b.obj),
             .moved = try a.moved.merge(arena, b.moved),
             .place = if (a.place != null and a.place == b.place) a.place else null,
             .src = if (a.src != null and a.src == b.src) a.src else null,
+            .from = if (a.from != null and a.from == b.from) a.from else null,
             .off = if (a.off != null and a.off == b.off) a.off else null,
             .many = a.many or b.many,
             .alt = a.alt or b.alt or (!a.toks.isEmpty() and !b.toks.isEmpty() and !a.toks.eql(b.toks)),
+            .maybe = a.maybe or b.maybe or (!a.ids.isEmpty() and !b.ids.isEmpty() and !a.ids.eql(b.ids)),
+            .room = if (a.room != null and a.room == b.room) a.room else null,
         };
         if (a.parts) |pa| if (b.parts) |pb| if (pa.len == pb.len) {
             const parts = try arena.alloc(Val, pa.len);
@@ -241,7 +260,7 @@ pub const Val = struct {
     }
 
     pub fn eql(a: Val, b: Val) bool {
-        if (!a.toks.eql(b.toks) or !a.owners.eql(b.owners) or !a.moved.eql(b.moved) or a.place != b.place or a.src != b.src or a.alt != b.alt or a.off != b.off or a.many != b.many) return false;
+        if (!a.toks.eql(b.toks) or !a.ids.eql(b.ids) or !a.obj.eql(b.obj) or !a.moved.eql(b.moved) or a.place != b.place or a.src != b.src or a.from != b.from or a.alt != b.alt or a.maybe != b.maybe or a.room != b.room or a.off != b.off or a.many != b.many) return false;
         if (a.parts) |pa| {
             const pb = b.parts orelse return false;
             if (pa.len != pb.len) return false;
@@ -257,13 +276,14 @@ pub const Val = struct {
         return out;
     }
 
-    /// An aggregate of `parts`: the tokens and owners are theirs.
+    /// An aggregate of `parts`: the tokens and identities are theirs.
     pub fn aggregate(arena: Allocator, parts: []const Val) Allocator.Error!Val {
         var out: Val = .{ .parts = parts };
         for (parts) |part| {
             out.alt = out.alt or part.alt;
+            out.maybe = out.maybe or part.maybe;
             out.toks = try out.toks.merge(arena, part.toks);
-            out.owners = try out.owners.merge(arena, part.owners);
+            out.ids = try out.ids.merge(arena, part.ids);
             out.moved = try out.moved.merge(arena, part.moved);
         }
         return out;
@@ -272,7 +292,9 @@ pub const Val = struct {
     /// Field `i` of an aggregate. Without known parts the whole value stands for it.
     pub fn field(v: Val, i: usize) Val {
         if (v.parts) |parts| if (i < parts.len) return parts[i];
-        return v.flat();
+        var out = v.flat();
+        out.obj = .empty;
+        return out;
     }
 
     pub fn withoutToks(v: Val, arena: Allocator, gone: Set) Allocator.Error!Val {

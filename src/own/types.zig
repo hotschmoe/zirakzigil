@@ -65,6 +65,22 @@ pub const Types = struct {
         return t.kind(id) == .pointer;
     }
 
+    /// A slice or a many-item pointer, possibly behind an optional: a field whose value is storage an object owns.
+    pub fn isStorage(t: Types, id: schema.TypeId) bool {
+        const at = t.payload(id);
+        if (at == .none) return false;
+        const r = t.rec(at);
+        return r.kind == .pointer and r.flags.size != .one;
+    }
+
+    /// The fields of a struct (or the struct inside an optional or error union), when the pack knows them.
+    pub fn structFields(t: Types, id: schema.TypeId) ?[]const schema.FieldRec {
+        const at = t.payload(id);
+        if (at == .none or t.rec(at).kind != .@"struct" or t.isLinear(at) or t.isAllocator(at)) return null;
+        const fields = t.pack.fieldsOf(at) orelse return null;
+        return if (fields.len == 0) null else fields;
+    }
+
     pub fn isAllocator(t: Types, id: schema.TypeId) bool {
         return id != .none and std.mem.eql(u8, t.pack.typeName(id), "mem.Allocator");
     }
