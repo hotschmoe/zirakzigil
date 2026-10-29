@@ -510,6 +510,58 @@ pub const PointsTo = if (ghost) struct {
     }
 } else void;
 
+var block_set_ids: usize = 0;
+
+/// The right to use the blocks of one pool whose bits are set in `mask`, by index (at most 64 blocks). It exists only
+/// in ghost builds, is linear like `PointsTo`, and is what a pool hands out: a block's token has one bit, the pool
+/// keeps the free ones. `id` names the pool: two tokens of one pool that are both alive cannot share a block
+/// (`apart`), which is how a free of the same block twice is refused.
+pub const BlockSet = if (ghost) struct {
+    id: usize,
+    mask: u64,
+
+    const Self = @This();
+
+    pub const Pair = struct { head: Self, tail: Self };
+
+    /// The permission for the blocks of `mask` of a pool no one else uses. The trusted source of block tokens: the caller
+    /// states that the pool is its own, and `zvc` names every call as a premise.
+    pub inline fn own(mask: u64) Self {
+        block_set_ids += 1;
+        return .{ .id = block_set_ids, .mask = mask };
+    }
+
+    /// The blocks of `bits`, which must all be in the set, and the rest.
+    pub inline fn cut(self: Self, bits: u64) Pair {
+        requires(bits & ~self.mask == 0);
+        return .{
+            .head = .{ .id = self.id, .mask = bits },
+            .tail = .{ .id = self.id, .mask = self.mask & ~bits },
+        };
+    }
+
+    /// The inverse of `cut`: two sets of one pool that share no block make one.
+    pub inline fn join(head: Self, tail: Self) Self {
+        requires(head.id == tail.id and head.mask & tail.mask == 0);
+        return .{ .id = head.id, .mask = head.mask | tail.mask };
+    }
+
+    pub inline fn discard(self: Self) void {
+        _ = self;
+    }
+
+    /// The lemma of Verus' `points_to_disjoint`: two tokens that are alive together, of one pool, share no block. Both
+    /// are returned (they are consumed and made again). `zvc` assumes it of two distinct tokens and refuses the same
+    /// token twice; run, it is checked.
+    pub inline fn apart(a: Self, b: Self) Pair {
+        requires(a.id != b.id or a.mask & b.mask == 0);
+        return .{
+            .head = .{ .id = a.id, .mask = a.mask },
+            .tail = .{ .id = b.id, .mask = b.mask },
+        };
+    }
+} else void;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. Governance: assurance manifest + laws
 // ─────────────────────────────────────────────────────────────────────────────

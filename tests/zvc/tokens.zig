@@ -30,6 +30,7 @@ pub const assurance = .{
     .forgeField = .verified,
     .forgeAgain = .verified,
     .loopConsume = .verified,
+    .dupResult = .verified,
 };
 
 comptime {
@@ -262,4 +263,12 @@ pub fn loopConsume(r: Region, p: Piece, k: u8) Region {
         out = give(r, p);
     }
     return out;
+}
+
+pub const Both = struct { a: zv.PointsTo, b: zv.PointsTo };
+
+/// One token given back twice: the caller would own the same memory twice.
+pub fn dupResult(p: zv.PointsTo) Both {
+    const t: Both = .{ .a = p, .b = p };
+    return t;
 }

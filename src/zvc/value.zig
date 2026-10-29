@@ -140,7 +140,7 @@ pub const Ctx = struct {
 
     /// Whether `id` is `zv.PointsTo`: a permission token, linear and built only by its own operations.
     pub fn isToken(c: *const Ctx, id: schema.TypeId) bool {
-        return id != .none and std.mem.eql(u8, c.typeName(id), zv_air.tokens.type_name);
+        return id != .none and zv_air.tokens.isTokenType(c.typeName(id));
     }
 
     pub fn newToken(c: *Ctx) u32 {

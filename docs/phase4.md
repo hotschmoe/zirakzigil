@@ -6,6 +6,8 @@ Phase 4 is the Verus part of the plan: raw-memory code is verified by pairing th
 zv.PointsTo                          src/zv.zig       the token, ghost-only (void in production)
 src/air/tokens.zig                   the names of the token and its operations, shared by zvc and zv-own
 examples/bump.zig                    the allocator    7 methods .verified, a checked shell, 2 laws
+examples/pool.zig                    a pool of blocks 4 methods .verified, a checked shell, 2 laws
+tests/zvc/pools.zig                  17 verdicts      BlockSet: reuse, other pools, free-set corruption, forging
 tests/zvc/tokens.zig                 23 verdicts      what zvc must refuse about tokens, and their controls
 tests/zvc/pointers.zig               *Self cases      what a call may rely on of a pointee, aliasing, tokens in a field
 tests/own/tokens.zig                 zv-own cases     dropped, copied, reused tokens in code zvc does not verify
@@ -116,6 +118,28 @@ Found by these cases while building: the dead set of a path was a slice that poi
 
 Open questions: (a) a token inside a container the checker does not follow (`ArrayList(Block)`) is "handed to memory it does not follow"; for tokens that should be an error, not a count. (b) The whole-struct read of the second limit would need a ghost-read notion (a copy that cannot be consumed) shared with `zvc`'s `old = self.*`.
 
+## A pool of blocks (M3, 0.17.21)
+
+A pool hands out any free block and takes any block back, in any order. What its proof needs that the bump allocator's did not: the allocator owns **a collection of permissions** (one per free block) and must give one out and take one back by index. The options, and why the third:
+
+1. **Arrays or a ghost `Seq` of `PointsTo`.** A token per block, kept in a field. `zvc` has no arrays of structs, and a token in an array element is a place a call could read twice; the linearity rules (identity per value, consumption on passing) would need per-element tracking, and "give out the token of block `i`" needs `at(i)` on a sequence of linear values. The proof that the sequence holds no token twice is a quantified statement. Rejected: it needs both a new kind of place and quantifiers.
+2. **A typed token `PointsTo(T)`** (the usual Verus answer: one token per cell, with a value). It does not remove the collection: the pool still holds N of them.
+3. **A token over a set of blocks**, `zv.BlockSet { id, mask }` (at most 64 blocks): one linear value that stands for every block whose bit is set. `cut(bits)` splits off a subset, `join` puts two back (they must share no block and name one pool), and a block handed out is a `BlockSet` with one bit. The pool keeps the free blocks in one token (`spare`), so no collection exists, and the algebra is bit operations, which the solver is good at: no arithmetic identities, which is what made the bump proofs slow. Picked because it is the smallest thing that is sound: the same five rules of `zvc` (identity, consumption, use after consumption, forging, loops) apply unchanged to a second token type, and there is one new fact, the lemma below.
+
+**The lemma.** Disjointness of two blocks held at once is not an arithmetic fact of the allocator (the bump allocator had `next` for that); it is the statement "two live tokens of one pool share no block". That is Verus' `points_to_disjoint`, here `zv.BlockSet.apart(a, b)`: it returns the two tokens again and `zvc` assumes `a.id != b.id or a.mask & b.mask == 0` of them, after checking that they are two tokens and not the same one twice. It is sound under the premises already counted: a pool's token comes from `own` (one per pool, a premise; `zvc` gives it a fresh `id`), the operations only split and join, and linearity is enforced (a copy of a token cannot be alive next to its original: `dupBlock`, `copyAndHandOut` and `dupResult` are refused). Run in a ghost build, `apart` is a `requires`, so every law of the pool checks the lemma on real executions.
+
+`free` uses it internally: `lemma = apart(self.spare, blk.perm)` and then `join`, which requires the masks to be disjoint and the ids equal. So the caller proves nothing about disjointness; it only needs a block of this pool (`owns`: the id of its token is the pool's), and a block it already gave back has no token. The double free of `giveTwice` is refused at the caller as a token used after it was consumed; a block of another pool (`foreignFree`) fails the id equality; a block with no check at all (`giveUnchecked`) fails it too.
+
+**What is proved** (`examples/pool.zig`, 4 methods, 2.3 s): `alloc` returns the lowest free block `idx < count` with `off == idx << 6`, in bounds (`off + 64 <= cap`), aligned to the block size; `free_bits` loses exactly that bit; the pool stays well formed (`free_bits` is a subset of the blocks that exist, and equals the mask of the ghost token); an empty pool is refused unchanged. `free` joins the token back and sets exactly that bit, and the bit was clear before (the block was out). `pair` allocates twice: the two blocks are different, 64 bytes apart or more, aligned and in bounds, and if the second does not exist the first is freed and the pool is as it was. The shell `Heap` turns blocks into `*align(64) [64]u8` and keeps the permissions in `held`; `blocks_hold` runs it against real addresses and bytes, `pair_holds` runs `pair`.
+
+**What is not the intrusive free list the task named.** The free blocks are a bitmap, not a chain through the blocks. A chain needs two things `zvc` does not have: stores into array elements or into the bytes of a block (a slice's memory is a term of the solver whose update would have to reach every other slice of it, and the pointee model of M2 covers structs only), and an invariant over the whole chain (every link in range and no block twice), which is quantified; the bitmap states it as `free_bits == spare.mask`, a single equation. The route to the chain is the typed token (M4) for the stores, and a ghost predicate over arrays with a quantifier in the solver for the invariant; neither is built.
+
+**Soundness cases** (`tests/zvc/pools.zig`, 17 verdicts). Controls proved: `take`, `give`, `pairDistinct` (two takes give different blocks), `roundTrip` (`cut` then `join`), `twoMints`. Refused: `giveTwice` (token reuse), `foreignFree` and `giveUnchecked` (a block of another pool, a block nobody checked), `dupBlock` and `copyAndHandOut` (a token returned next to the one in the struct), `takeNoClear` (the free set says free, the token is gone), `takeFromEmpty` (a take from an empty pool), `giveWrongBit` (the wrong bit marked free), `apartSame` (the lemma on one token twice), `forgeSet`, `forgeMask` (a token written out or changed). A real gap found by writing these: a function could hand a live token out twice (`return .{ .a = p, .b = p }`); `zvc` now obliges everything a function gives back (its result and the pointees of its pointer parameters) to hold no token twice (`tokens.dupResult`, pinned).
+
+Two smaller changes of `zvc` that the pool needed: a null optional is a constant whatever its payload (a `return null` that follows no `zv.ensures` made the function promise nothing), and a shift by an amount of type `std.math.Log2Int` is not obliged to be small (the type says it).
+
+**What `zv-own` needs** (`src/own` was not touched this round). It does not know `zv.BlockSet`: a block's token is an ordinary struct to it, so a dropped or doubly-given block in `.checked` code is not reported. To do: (a) `isLinear` also for `zv.BlockSet__struct`; `src/air/tokens.zig` already has the name, the operations (`SetOp`) and `setConsumes`. (b) `tokenOp` for the set operations, where `cut` and `apart` consume their arguments and make two new tokens and `own` makes one; `opOf` returns null for them today on purpose, so the checker runs their bodies and sees no token. (c) The two rules for tokens in `*Self` (take out, put back) apply as they are. (d) `Heap.alloc` and `Heap.free` of `examples/pool.zig` are the first `.checked` code that moves a `BlockSet` through a `*Self`, and should be the seeded cases (`held` joined, taken, a double free, a forgotten `join`).
+
 ## What stays `.trusted`, and why
 
 | Item | Count | Why it is not proved |
@@ -125,6 +149,8 @@ Open questions: (a) a token inside a container the checker does not follow (`Arr
 | offset to slice in `Arena` (`@alignCast(self.region[blk.off..blk.end])`) | 1 shell, `.checked` | the base address alignment is a type (`[]align(64) u8`), the cast is checked in safe builds and by `blocks_hold` on real addresses. `zvc` cannot return a slice yet |
 | memory from the system, the `align(64)` of a stack array | outside the code | the trusted edge of the design (FFI, syscalls) |
 | Z3 | | as for every proof |
+
+M3 adds `Pool` (4 `.verified` methods, 1 premise `BlockSet.own`, 0 `.trusted`).
 
 M2 numbers: 7 `.verified` methods of `Bump` (`init`, `padTo`, `carve`, `alloc`, `free`, `reset`, `pair`), 3 `.checked` (`Arena`), 2 laws, 0 `.trusted` functions, 1 premise. The repository's `.trusted` count was 0 and stays 0, so the "falling" half of the exit gate is not measured by M1; the first measurement is the pilot below.
 
@@ -143,10 +169,11 @@ M2 numbers: 7 `.verified` methods of `Bump` (`init`, `padTo`, `carve`, `alloc`, 
 | | Scope | Gate |
 | --- | --- | --- |
 | **M1** (0.17.17) | `PointsTo` over byte ranges, linearity and forging rules in `zvc`, bump allocator proved, soundness cases | this document |
-| **M2** (0.17.19) | `zvc` takes `*Self` and `*const T` parameters (in/out summaries), the allocator is a set of methods on `*Bump` with its token in a field, `zv-own` checks tokens (shared names, tokens through `*Self`) | done. Not done: the fixed-size block pool (it needs the typed token of M3 for its free list, or arrays of tokens, which `zvc` does not have) |
-| **M3** | typed `PointsTo(T)` with a value and an initialization flag: `write(perm, ptr, v)` needs the permission and sets the value, `read` needs it initialized; `Tracked(T)` for ghost parameters; frame: a function that does not take a token cannot change its memory | a raw-pointer ring buffer proved with its read/write laws |
-| **M4** | region identity and epochs: a token belongs to one allocator instance; `reset` bumps the epoch and revokes outstanding tokens without collecting them | cross-allocator misuse refuted; shell needs no `used` |
-| **M5** | proof agents in CI (below) on the core | the pilot in the next section |
+| **M2** (0.17.19) | `zvc` takes `*Self` and `*const T` parameters (in/out summaries), the allocator is a set of methods on `*Bump` with its token in a field, `zv-own` checks tokens (shared names, tokens through `*Self`) | done |
+| **M3** (0.17.21) | `zv.BlockSet` (a token over a set of the blocks of a pool), the lemma `apart`, a pool of fixed-size blocks proved, 17 soundness verdicts | done, with a bitmap for the free set (above) |
+| **M4** | typed `PointsTo(T)` with a value and an initialization flag: `write(perm, ptr, v)` needs the permission and sets the value, `read` needs it initialized; `Tracked(T)` for ghost parameters; frame: a function that does not take a token cannot change its memory | a raw-pointer ring buffer proved with its read/write laws |
+| **M5** | region identity and epochs: a token belongs to one allocator instance; `reset` bumps the epoch and revokes outstanding tokens without collecting them | cross-allocator misuse refuted; shell needs no `used` |
+| **M6** | proof agents in CI (below) on the core | the pilot in the next section |
 
 ## Proof agents in CI (not built)
 

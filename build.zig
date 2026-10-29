@@ -304,8 +304,8 @@ pub fn build(b: *std.Build) void {
     const fuzz_step = b.step("fuzz", "Fuzz the laws; pass --fuzz=<n> (Linux only on Zig 0.17)");
     fuzz_step.dependOn(&b.addRunArtifact(zv_tests).step);
 
-    const examples = [_][]const u8{ "search", "ledger", "regress", "queries", "bump" };
-    const has_fuzz_targets = [_]bool{ false, true, true, false, false };
+    const examples = [_][]const u8{ "search", "ledger", "regress", "queries", "bump", "pool" };
+    const has_fuzz_targets = [_]bool{ false, true, true, false, false, false };
     var example_modules: [examples.len]*std.Build.Module = undefined;
     for (examples, has_fuzz_targets, &example_modules) |name, fuzzed, *module| {
         module.* = b.createModule(.{
@@ -344,7 +344,7 @@ pub fn build(b: *std.Build) void {
         .report = report,
         .src = b.path("examples"),
         .lib_name = "examples",
-        .laws = &.{ "search.zig", "ledger.zig", "regress.zig", "queries.zig", "bump.zig" },
+        .laws = &.{ "search.zig", "ledger.zig", "regress.zig", "queries.zig", "bump.zig", "pool.zig" },
     }, zv, b.path("src/gate/instrument.zig"));
 
     // Freestanding gate: zv must not grow an OS dependency.

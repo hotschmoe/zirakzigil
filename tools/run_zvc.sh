@@ -20,6 +20,8 @@ $zvc --src tests/zvc --expect tests/zvc/soundness3.expect tests/zvc/soundness3.z
 $zvc --src tests/zvc --expect tests/zvc/tokens.expect tests/zvc/tokens.zvp
 $zvc --src examples --timeout 60000 --expect tests/zvc/bump.expect tests/zvc/bump.zvp
 $zvc --src tests/zvc --expect tests/zvc/pointers.expect tests/zvc/pointers.zvp
+$zvc --src tests/zvc --expect tests/zvc/pools.expect tests/zvc/pools.zvp
+$zvc --src examples --expect tests/zvc/pool.expect tests/zvc/pool.zvp
 
 # --only names whole dotted components: packBit does not select packBit2.
 $zvc --src tests/zvc --only soundness3.packBit --expect tests/zvc/soundness3.only.expect tests/zvc/soundness3.zvp
@@ -92,3 +94,11 @@ case $shown in
         exit 1
         ;;
 esac
+
+# The same for the pool: the one source of block tokens is a premise.
+mint="$zvc --src examples --only pool.Pool.init tests/zvc/pool.zvp"
+$mint --max-assume 1 >/dev/null
+if $mint --max-assume 0 >/dev/null; then
+    echo "run_zvc: --max-assume 0 passed a proof that rests on zv.BlockSet.own" >&2
+    exit 1
+fi
