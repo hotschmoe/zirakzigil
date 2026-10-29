@@ -102,9 +102,11 @@ pub const Kill = struct {
     when: []const Cond = &.{},
     /// Some path that returns an error ends it too (the others may not).
     on_fail: bool = false,
+    /// A condition the callee had was lost on the way (it could not be said in the terms of the caller): the kill may not happen.
+    lost: bool = false,
 
     pub fn eql(a: Kill, b: Kill) bool {
-        return a.slot.eql(b.slot) and a.on_fail == b.on_fail and Cond.eqlAll(a.when, b.when);
+        return a.slot.eql(b.slot) and a.on_fail == b.on_fail and a.lost == b.lost and Cond.eqlAll(a.when, b.when);
     }
 };
 
@@ -385,7 +387,7 @@ pub const Ident = struct { kind: Kind, a: u32, b: u32 };
 /// `exact`: the end is of the one block a place holds, whichever of the names that stand for several it carries.
 /// `with`: the end is also subject to these conditions on the caller's own parameters (a callee's guard, translated).
 /// `when`: what the end depends on, set when it is recorded.
-pub const Event = struct { loc: schema.LocId, text: []const u8, trail: ?*const diag.Trail, soft: bool = false, exact: bool = false, with: []const Cond = &.{}, when: Alts = null };
+pub const Event = struct { loc: schema.LocId, text: []const u8, trail: ?*const diag.Trail, soft: bool = false, exact: bool = false, with: []const Cond = &.{}, when: Alts = null, open: bool = false, lost: bool = false };
 
 pub const Pending = struct { loc: schema.LocId, ident: dom.Id, site: u32 };
 
@@ -876,22 +878,30 @@ pub const Run = struct {
     /// Ends `id` on this path: every value that holds it holds its tombstone from now on.
     pub fn kill(r: *Run, st: *State, id: dom.Id, event: Event) Allocator.Error!void {
         if (r.identRec(id).kind == .tomb) return;
+        // An end that happens under a test the caller cannot settle (`open`) may not have happened: it is counted like any
+        // soft end, and the summary still says it.
         const soft = event.soft or (st.multi.has(id) and !event.exact);
+        const unsure = soft or event.open;
         var e = event;
-        e.soft = soft;
+        e.soft = unsure;
+        e.open = event.open and !soft;
         e.when = try r.guardOf(st, event.with);
-        const t = try r.tomb(id, soft);
+        const t = try r.tomb(id, unsure);
         const gop = try r.tomb_events.getOrPut(r.arena, t);
         if (!gop.found_existing) gop.value_ptr.* = e;
         const marked = try st.dead.getOrPut(r.arena, id);
         // Already gone at least as surely: every value holds its tombstone already.
-        if (marked.found_existing and (!marked.value_ptr.soft or soft)) {
-            if (!marked.value_ptr.soft and !soft) marked.value_ptr.when = try unite(r.arena, marked.value_ptr.when, e.when);
+        if (marked.found_existing and (!marked.value_ptr.soft or unsure)) {
+            const old_says = !marked.value_ptr.soft or marked.value_ptr.open;
+            if (old_says and !soft) {
+                marked.value_ptr.when = try unite(r.arena, marked.value_ptr.when, e.when);
+                marked.value_ptr.lost = marked.value_ptr.lost or e.lost;
+            }
             return;
         }
         marked.value_ptr.* = e;
-        if (!soft) st.alloced = try st.alloced.without(r.arena, id);
-        try r.swapAll(st, id, t, soft, false);
+        if (!unsure) st.alloced = try st.alloced.without(r.arena, id);
+        try r.swapAll(st, id, t, unsure, false);
     }
 
     pub fn identRec(r: *Run, id: dom.Id) Ident {
@@ -1770,7 +1780,7 @@ pub const Run = struct {
         try r.tally("ends", inst);
         // An end that may not have happened to this block (it stands for several, or is one of many, or depends on room)
         // is not decided.
-        if (event.soft or (st.multi.has(id) and !event.exact)) try r.tally("summarized", inst);
+        if (event.soft or event.open or (st.multi.has(id) and !event.exact)) try r.tally("summarized", inst);
         try r.kill(st, id, event);
     }
 
@@ -1854,7 +1864,7 @@ pub const Run = struct {
             moves &= s.moves;
             for (s.kills) |k| {
                 var at: ?usize = null;
-                for (kills.items, 0..) |x, i| if (x.slot.eql(k.slot) and Cond.eqlAll(x.when, k.when)) {
+                for (kills.items, 0..) |x, i| if (x.slot.eql(k.slot) and x.lost == k.lost and Cond.eqlAll(x.when, k.when)) {
                     at = i;
                 };
                 if (at) |i| {
@@ -1862,6 +1872,7 @@ pub const Run = struct {
                 } else {
                     var added = try dupeKill(arena, k);
                     added.on_fail = s.failed;
+                    added.lost = k.lost;
                     try kills.append(arena, added);
                 }
             }
@@ -2015,6 +2026,7 @@ pub const Run = struct {
         if (!a.slot.eql(b.slot)) return lessSlot({}, a.slot, b.slot);
         if (a.when.len != b.when.len) return a.when.len < b.when.len;
         for (a.when, b.when) |x, y| if (!x.eql(y)) return lessCond({}, x, y);
+        if (a.lost != b.lost) return !a.lost;
         return !a.on_fail and b.on_fail;
     }
 
@@ -2150,14 +2162,14 @@ pub const Run = struct {
         var it = st.dead.iterator();
         while (it.next()) |e| {
             // The caller's names for blocks that stand for several are not the callee's to end.
-            if (e.value_ptr.soft or (e.value_ptr.exact and st.multi.has(e.key_ptr.*))) continue;
+            if ((e.value_ptr.soft and !e.value_ptr.open) or (e.value_ptr.exact and st.multi.has(e.key_ptr.*))) continue;
             const id = e.key_ptr.*;
             const rec = r.identRec(id);
             // The parameter's own value is a free when it is one on every path (below).
             if (rec.kind == .init and rec.b == 0 and r.places.rec(rec.a).parent == dom.no_place) continue;
             if (try r.slotOf(id)) |s| {
                 const alts: []const []const Cond = e.value_ptr.when orelse &.{&.{}};
-                for (alts) |when| try kills.append(r.arena, .{ .slot = s, .when = when });
+                for (alts) |when| try kills.append(r.arena, .{ .slot = s, .when = when, .lost = e.value_ptr.lost });
             }
         }
         var frees: u64 = 0;

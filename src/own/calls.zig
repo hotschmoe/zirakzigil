@@ -1005,23 +1005,41 @@ fn readsEnded(r: *Run, st: *State, inst: *const Inst, args: []const Val, tys: []
         try r.report(st, .use_after_free, inst.loc, &.{}, "an argument of `{s}` points into storage that the call reallocates", .{callee});
     }
 }
+const Gate = struct {
+    with: []const check.Cond,
+    /// A test of a field of an aggregate (a tag) that the caller does not know the answer of.
+    open: bool,
+    /// A condition could not be said in the caller's terms and was left out of `with`.
+    lost: bool,
+};
 
 /// Whether an effect of the callee that holds only where `when` holds can happen here: null when a tag the caller knows
 /// says it cannot. Otherwise the conditions that stay open, in the caller's own parameters.
-fn gateOf(r: *Run, st: *State, when: []const check.Cond, args: []const Val, tys: []const schema.TypeId) Allocator.Error!?[]const check.Cond {
+fn gateOf(r: *Run, st: *State, when: []const check.Cond, args: []const Val, tys: []const schema.TypeId) Allocator.Error!?Gate {
     var open: std.ArrayList(check.Cond) = .empty;
+    var tag = false;
+    var lost = false;
     for (when) |c| {
-        const seen = (try scalarIn(r, st, c.slot, args, tys)) orelse continue;
+        const seen = (try scalarIn(r, st, c.slot, args, tys)) orelse {
+            tag = tag or c.slot.path.len != 0;
+            lost = true;
+            continue;
+        };
         if (seen.con) |k| {
             if ((k == c.value) != c.eq) return null;
             continue;
         }
-        const at = seen.at orelse continue;
-        if (!r.entryValued(st, at)) continue;
-        const slot = (try r.condSlot(at)) orelse continue;
-        try open.append(r.arena, .{ .slot = slot, .value = c.value, .eq = c.eq });
+        tag = tag or c.slot.path.len != 0;
+        const at = seen.at orelse {
+            lost = true;
+            continue;
+        };
+        const slot = if (r.entryValued(st, at)) try r.condSlot(at) else null;
+        if (slot) |s| {
+            try open.append(r.arena, .{ .slot = s, .value = c.value, .eq = c.eq });
+        } else lost = true;
     }
-    return open.items;
+    return .{ .with = open.items, .open = tag, .lost = lost };
 }
 
 /// The scalar a callee's slot is in the caller: what is known of it, and the place it is read from while that is current.
@@ -1183,8 +1201,6 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
     @memset(ended_by, .empty);
     var fail_ends: std.ArrayList(check.FailEnd) = .empty;
     var ok_ends: std.ArrayList(check.FailEnd) = .empty;
-    var group: ?Slot = null;
-    var before_group: Set = .empty;
     for (s.kills) |kill| {
         const k = kill.slot;
         // A kill that depends on a tag the caller knows to be otherwise does not happen here.
@@ -1196,16 +1212,14 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
         }
         const where = if (got.place) |pl| r.placeName(pl) else "its argument";
         // Another parameter of the call ended it, not another part of this one.
-        // The same slot under another condition is the same kill.
-        if (group == null or !group.?.eql(k)) {
-            group = k;
-            before_group = ended;
-        }
-        const earlier = before_group;
+        var earlier: Set = .empty;
+        for (ended_by, 0..) |gone, i| if (i != k.param) {
+            earlier = try earlier.merge(r.arena, gone);
+        };
         switch (k.kind) {
             .object => {
                 const many = got.flat or (if (got.place) |pl| r.places.hasElem(pl) else false);
-                const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "`{s}` ends `{s}` here", .{ opts.callee, where }), .trail = st.trail, .soft = many, .with = gate };
+                const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "`{s}` ends `{s}` here", .{ opts.callee, where }), .trail = st.trail, .soft = many, .with = gate.with, .open = gate.open or kill.lost, .lost = gate.lost or kill.lost };
                 if (got.place) |pl| try r.objectAlive(st, inst, pl);
                 for (got.obj.ids) |o| {
                     const rec = r.identRec(o);
@@ -1222,7 +1236,7 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
                 if (opts.skip_content_kills) continue;
                 if (got.place) |pl| try r.objectAlive(st, inst, pl);
                 const many = got.flat or (if (got.place) |pl| r.places.hasElem(pl) else false);
-                const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "`{s}` invalidates pointers into `{s}` here", .{ opts.callee, where }), .trail = st.trail, .soft = opts.soft or many, .with = gate };
+                const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "`{s}` invalidates pointers into `{s}` here", .{ opts.callee, where }), .trail = st.trail, .soft = opts.soft or many, .with = gate.with, .open = gate.open or kill.lost, .lost = gate.lost or kill.lost };
                 for (got.ids.ids) |id| if (!r.pointees.contains(id)) switch (r.identRec(id).kind) {
                     .object => {
                         try r.end(st, inst, id, event);

@@ -22,3 +22,20 @@ pub fn okTwoLists(allocator: Allocator, items: []const u32) !usize {
     for (items) |child| try context.append(child);
     return context.nodes.items.len;
 }
+
+// libvaxis `MouseHandler.updateMouse`: the old list is freed before the copy that can fail, and the caller frees it
+// again when `update` fails (Debug with a failing allocator: segmentation fault in the second free; the real function reports the same way).
+const Handler = struct {
+    last: []u8,
+
+    fn update(self: *Handler, gpa: Allocator) !void {
+        gpa.free(self.last);
+        self.last = try gpa.dupe(u8, "abc");
+    }
+};
+
+pub fn badFreeThenDupeFails(gpa: Allocator) !void {
+    var h: Handler = .{ .last = try gpa.dupe(u8, "x") };
+    defer gpa.free(h.last);
+    try h.update(gpa);
+}

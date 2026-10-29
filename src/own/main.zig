@@ -233,7 +233,7 @@ fn printEffects(out: *Io.Writer, row: Row) !void {
     const st = row.result.stats;
     if (st.blind + st.unknown_calls + st.unmodelled + st.dynamic_len + st.maybe_alias + st.maybe_stale != 0) try out.print("      assumed: {d} unknown calls, {d} unmodelled, {d} blind, {d} dynamic lengths, {d} may-alias, {d} may-stale\n", .{ st.unknown_calls, st.unmodelled, st.blind, st.dynamic_len, st.maybe_alias, st.maybe_stale });
     for (s.kills) |k| {
-        try out.print("      kills param {d} {t} path {any}", .{ k.slot.param, k.slot.kind, k.slot.path });
+        try out.print("      kills param {d} {t} path {any}{s}{s}", .{ k.slot.param, k.slot.kind, k.slot.path, if (k.on_fail) " on-fail" else "", if (k.lost) " lost" else "" });
         for (k.when, 0..) |c, i| try out.print("{s} param {d} path {any} {s} {d}", .{ if (i == 0) " when" else " and", c.slot.param, c.slot.path, if (c.eq) "==" else "!=", c.value });
         try out.writeByte(10);
     }
