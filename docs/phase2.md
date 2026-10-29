@@ -68,6 +68,23 @@ A refuted obligation prints the function, the position the AIR carries mapped to
 
 `tests/zvc/` holds the packs of `examples/search.zig`, `tests/zvc/cases.zig` (the rules of one function, 32 cases proved with a guard and refuted without it) and `tests/zvc/features.zig` (calls, structs, errors, termination, ghost values, `switch`, 36 cases), and the pinned verdicts (`*.expect`). A verdict that changes is a soundness or completeness change of `zvc` and is reviewed as one. The packs are checked into the repository so CI needs neither the 8-minute compiler build nor 9 GB. `tests/zvc/SOURCES` pins the sources they were exported from (`zvc --pins`: a changed source is an error, because the verdicts would be about another program), `tools/zvc_repin.sh` exports them again, and the on-demand canary re-exports them with a fresh `zig-zv` and compares byte for byte. A function the manifest marks `.verified` that the packs do not contain is reported UNPROVEN, so a claim cannot escape by being left out of the export.
 
+## A real kernel (M3): zmoltcp 0.5.2
+
+Seven functions of zmoltcp are `.verified` and proved by `zig build verify` (`zirakzigil.addVerifyGate`, [adoption.md](adoption.md)) from the checked-in export of its real `src/root.zig` (Z3 4.16.0, Windows and Linux, 1.0 s):
+
+| function | what is proved | time |
+| --- | --- | --- |
+| `wire.tcp.SeqNumber.add`, `sub` | no panic; `(a + n) - a == n` and `(a - n) + n == a` in modular 32-bit arithmetic | 13 ms each |
+| `wire.tcp.SeqNumber.diff` | given the precondition, `other + diff == self`; the `usize` to `i32` cast fits | 13 ms |
+| `wire.checksum.calculate` | no out-of-bounds read or overflow in the index arithmetic; terminates (`zv.decreases(data.len - i)`); for at most 131070 bytes and a start of at most 0xFFFF the 32-bit accumulator never wraps | 0.7 s |
+| `wire.checksum.finish` | terminates; the folded value is the input less a whole number of 0xFFFF, so it is congruent modulo 0xFFFF, and it is 0 only for 0 | 0.17 s |
+| `wire.checksum.internetChecksum` | no panic, through the contracts of the two above | 0 ms |
+| `socket.tcp.windowShiftFor` | the window scale is at most 14 and the scaled buffer fits the 16-bit window (or the scale is 14) | 66 ms |
+
+The proof of `windowShiftFor` first failed: `rx_cap = 1073741824` (1 GiB) gave scale 15, and 2 GiB gave 16, above `MAX_WINDOW_SCALE` (RFC 7323 section 2.3: a receiver uses 14, and smoltcp ignores the option). It is a plain upstream-shaped bug (smoltcp computes the same `log2 - 16`), fixed in zmoltcp by clamping.
+
+Two lessons about the solver, now in the design: a multiplication of a variable by a constant makes bit-blasted proofs of sums of such products time out (written as `(n << 16) - n`, the invariant step went from over 10 s to 0.25 s), and the pure bit-vector form of a ghost integer beats `bv2nat` with integer arithmetic by three orders of magnitude. The specification of `finish` uses a ghost counter (`zv.Ghost(u64)`) instead of `%`, because a 32-bit remainder by a constant does not terminate in useful time.
+
 ## Spike parity (M1)
 
 Every verdict of the Python spike on `examples/search.zig` reproduces from AIR:
