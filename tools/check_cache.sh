@@ -38,7 +38,7 @@ pub fn build(b: *std.Build) void {
 }
 ZIG
 mkdir -p "$proj/dep"
-printf '.{ .name = .dep, .version = "0.0.1", .fingerprint = 0x1c3a9f5e2b7d4a68, .paths = .{ "" } }
+printf '.{ .name = .dep, .version = "0.0.1", .fingerprint = 0xf81054301c3a9f5e, .paths = .{ "" } }
 ' >"$proj/dep/build.zig.zon"
 printf 'const std = @import("std");
 
@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
     _ = b;
 }
 ' >"$proj/dep/build.zig"
-printf '.{ .name = .proj, .version = "0.0.1", .fingerprint = 0x2d4b0a6f3c8e5b79, .dependencies = .{ .dep = .{ .path = "dep" } }, .paths = .{ "" } }
+printf '.{ .name = .proj, .version = "0.0.1", .fingerprint = 0x520c3c901ec752a6, .dependencies = .{ .dep = .{ .path = "dep" } }, .paths = .{ "" } }
 ' >"$proj/build.zig.zon"
 for name in a b; do
     printf 'export fn %s_one(x: u32) u32 {\n    return x +%% 1;\n}\nexport fn %s_two(x: u32) u32 {\n    return x *%% 2;\n}\n' "$name" "$name" >"$proj/$name.zig"
@@ -78,7 +78,7 @@ export ZIG_GLOBAL_CACHE_DIR=$work/global
 
 build cold "$zv" "$out"
 names "$out" >"$work/cold.names"
-has_all() { [ "$(sed -n '/^a\./p' "$1" | wc -l)" = 2 ] && [ "$(sed -n '/^b\./p' "$1" | wc -l)" = 2 ]; }
+has_all() { [ "$(wc -l <"$1")" = 4 ] && [ "$(sed -n '/^a\./p' "$1" | wc -l)" = 2 ] && [ "$(sed -n '/^b\./p' "$1" | wc -l)" = 2 ]; }
 check "cold build exports a_one a_two b_one b_two ($(wc -l <"$work/cold.names") files)" has_all "$work/cold.names"
 
 rm -rf "$out"

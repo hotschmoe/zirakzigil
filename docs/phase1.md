@@ -77,6 +77,8 @@ A `zig build` project of two objects (two exported functions each), run with `ZV
 | `--watch`, delete the output directory, edit one file | partial: only the rebuilt step writes; untouched steps are not run at all, so their files stay missing until the next `zig build` |
 | `-fincremental` (with or without `--watch`) | unsupported, fails loudly: `zv_air: ZV_AIR_OUT cannot be combined with -fincremental`. Under `--watch` the Maker then panics on the dead compiler child (upstream) |
 
+The set is asserted exact (4 files for the project, build scripts of the project and of a path dependency excluded). Found on zmoltcp (`1915b35`, `zig build test`): before dependency build scripts were excluded, a cold build exported 6829 functions and a cache hit 6821, because the 8 functions of a dependency's `build.zig` are compiled only when the configuration cache misses. A stray 8 also separates the earlier reports of 6186 and 6194. With the exclusion, cold, hit and cold-again runs give 6821 with an identical file list.
+
 Why `-fincremental` cannot work: an incremental update analyzes only what changed, so the hook sees only those functions. Measured with a prototype that wrote straight to the output directory: after editing `a.zig`, `a_one` was written again and `a_two`, `b_one`, `b_two` were not; after deleting the output directory and editing a comment, nothing was written at all. A cache-keyed location cannot repair that, because the incremental artifact directory is keyed by compilation inputs and is never replaced.
 
 ## Milestones
