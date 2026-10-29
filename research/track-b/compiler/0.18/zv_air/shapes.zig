@@ -180,3 +180,32 @@ pub const table = blk: {
 pub fn of(tag: Tag) Shape {
     return table.get(tag);
 }
+
+// Tripwire: a tag listed in shapes.snapshot must still derive the shape recorded there. A tag that
+// is new or gone is not an error (the dump handles it), but an existing tag whose Data field or
+// payload changes, for example because its doc comment was edited, stops the build.
+comptime {
+    @setEvalBranchQuota(100_000_000);
+    var lines = std.mem.splitScalar(u8, @embedFile("shapes.snapshot"), '\n');
+    while (lines.next()) |line| {
+        var parts = std.mem.splitScalar(u8, line, ' ');
+        const name = parts.next() orelse continue;
+        if (name.len == 0 or !@hasField(Tag, name)) continue;
+        const field = parts.next().?;
+        const payload = parts.next().?;
+        const now = derive(name);
+        if (!std.mem.eql(u8, now.field, field) or !std.mem.eql(u8, payloadName(now.payload), payload)) {
+            @compileError("shape of AIR tag '" ++ name ++ "' changed: snapshot has " ++ field ++ "/" ++ payload ++
+                ", Air.zig now gives " ++ now.field ++ "/" ++ payloadName(now.payload) ++ "; review reflect rules, then update shapes.snapshot");
+        }
+    }
+}
+
+pub fn payloadName(p: Payload) []const u8 {
+    return switch (p) {
+        .none => "-",
+        .string => "$string",
+        .elements => "$elements",
+        .extra => |name| name,
+    };
+}
