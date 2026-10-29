@@ -175,7 +175,7 @@ The SPARK playbook: a borrow-checker-like analysis in a separate tool, applied o
 - **Invalidating methods.** Methods declared `zv.invalidates` (for example `ArrayList.append`) end every live pointer derived from `self.items`. Using one afterwards is an error. This catches Zig's most common silent bug.
 - **Pinned types.** A type declaring `zv_pinned` may never appear in an AIR by-value load or store. The static version of `PinCheck`.
 
-The checker is modular like Rust's: each function is checked against callee signatures, never callee bodies. Its one hard dependency is AIR access, which means a pinned compiler fork.
+The checker is modular like Rust's: each function is checked against summaries of its callees, read from their bodies in the packs (never re-checked at the call). Its one hard dependency is AIR access, which means a pinned compiler fork. **Built in Phase 3**: see [`phase3.md`](phase3.md) for what it follows, what it assumes and what it misses. The marker-type sketch above became: types are the annotations for linearity (`zv.Linear`, `zv.holdsLinear`), allocator flow is inferred, and the `ownership` manifest (`zv.requireOwnership`) carries a project's own invalidation rules.
 
 ### E. Deductive verifier over AIR (`zvc`), the Verus vector
 
@@ -360,7 +360,7 @@ The stack cannot make Zig safe by default the way Rust is. It can make every fun
 
 **Open research questions worth an experiment each.**
 
-1. Can `zv-own` infer most ownership annotations from allocator flow (who received the allocator that produced this slice) so contributors write almost none?
+1. Can `zv-own` infer most ownership annotations from allocator flow (who received the allocator that produced this slice) so contributors write almost none? **Answered in Phase 3 (`docs/phase3.md`): yes.** Allocator flow, std containers, `zv.Pool` and `zv.Slots`, and function summaries read from the packs need no annotation; 92 seeded mistakes and about 6,900 function checks of real code needed one manifest line in total (a project type with its own invalidation rule). The cost is two documented limits: what a container holds is not followed, and a rule the checker was not told is not known.
 2. How much of AIR's structured control flow survives into a clean weakest-precondition encoding, especially `errdefer` and error unions?
 3. Can comptime-generated code (generic containers) be verified once per generic, or does it need verification per instantiation, as AIR suggests?
 4. What fraction of a real Zig codebase (TigerBeetle-style or one of ours) lands in each assurance level after a month of use?

@@ -142,7 +142,7 @@ fn selected(pack: *const schema.Pack, f: schema.Func, opts: Options) bool {
         return false;
     }
     if (std.mem.eql(u8, module, "zv")) return false;
-    if (std.mem.eql(u8, module, "root") and std.mem.eql(u8, path, "air_all.zig")) return false;
+    if (std.mem.eql(u8, module, "root") and std.mem.startsWith(u8, path, "air_")) return false;
     return true;
 }
 

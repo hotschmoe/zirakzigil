@@ -12,6 +12,10 @@ $own --module target=tests/own --expect tests/own/linear.expect tests/own/linear
 $own --module target=tests/own --expect tests/own/memory.expect tests/own/memory.zvp
 $own --module target=tests/own --expect tests/own/registry.expect tests/own/registry.zvp
 $own --module target=tests/own --expect tests/own/trusted.expect --max-trusted 1 tests/own/trusted.zvp
+$own --module target=tests/own --expect tests/own/pinned.expect tests/own/pinned.zvp
+$own --module target=tests/should_panic --expect tests/own/pin_copy.expect tests/own/pin_copy.zvp
+$own --module target=tests/own --files realish.zig --expect tests/own/realish.expect tests/own/realish.zvp
+$own --module target=tests/own --module realish=tests/own --files realish_bugs.zig --expect tests/own/realish_bugs.expect tests/own/realish_bugs.zvp
 $own --module target=tests/should_panic --module ledger=examples --expect tests/own/double_consume.expect tests/own/double_consume.zvp
 
 # The ratchet: a trusted function is exempt and counted, and the count can be capped.

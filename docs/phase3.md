@@ -6,7 +6,8 @@
 tools/zvc_export.sh OUT_DIR FILE.zig [--dep NAME=FILE.zig]...   AIR pack of a file (Debug, fixed target)
 zig build zv-own                                                 zig-out/bin/zv-own
 zv-own [--src DIR] [--module NAME=DIR] [--only TEXT] [--files PREFIX] [--expect FILE] [--pins FILE]
-       [--max-unproven N] [--summary] [--dump] PACK|INDEX_DIR...
+       [--max-unproven N] [--max-trusted N] [--summary] [--dump] PACK|INDEX_DIR...
+ZVC_DEEP=1 tools/zvc_export.sh OUT_DIR FILE.zig [--only PATH]...   a whole project: nested containers and imported files too
 tools/run_own.sh                                                 the suite: pinned packs against pinned verdicts (CI)
 zirakzigil.addOwnershipGate(b, .{ .packs = ..., .pins = ... })   `zig build own` in a consumer project
 ```
@@ -108,6 +109,8 @@ Kinds: `.invalidates`, `.ends`, `.resets`, `.releases`, `.reads`, `.handle`, `.f
 - A pointer to a local stored into a container that outlives the call is only an escape if it is still there when the function returns: `put(&ctx)` followed by `remove` is the registry-for-the-duration-of-a-call idiom, and a `try` that failed stored nothing.
 - A call through a function pointer is a call to a function nothing is known of; it is counted in the assumptions, not refused.
 - `reset` ends what the arena handed out, not the arena; a second `reset` is not a use after deinit.
+- An element read out of an array or slice is one of many: an allocation site names all of them, so freeing it does not say the next one is freed (a loop that cancels `handles[k]` for some k).
+- A callee is assumed to have freed a parameter only if it frees it on every path that returns; `isLive` is a question about a handle, not a use of it; a number read out of a stale handle is data.
 
 ### What is not followed (printed at the end of every run, never silent)
 
@@ -120,4 +123,89 @@ Kinds: `.invalidates`, `.ends`, `.resets`, `.releases`, `.reads`, `.handle`, `.f
 
 ### Running it on code that is not a test (false positives found and removed)
 
-The first run over `src/air`, `src/zvc` and `src/own` of this repository (612 functions of real, allocator-heavy Zig, exported with `ZVC_DEEP=1 tools/zvc_export.sh`) reported 23 findings and 9 unproven functions; every finding was a false positive (one was the registry idiom, which the code does on purpose and which is now recognized), and the changes above removed them. After them: 0 findings, 0 unproven on all 612, and `tests/own/memory.zig` still reports its 46 seeded mistakes (80 cases pinned in `tests/own/memory.expect`).
+The first run over `src/air`, `src/zvc` and `src/own` of this repository (about 520 functions of real, allocator-heavy Zig, exported with `ZVC_DEEP=1 tools/zvc_export.sh`) reported 23 findings and 9 unproven functions; every finding was a false positive (one was the registry idiom, which the code does on purpose and which is now recognized), and the changes above removed them. After them: 0 findings, 0 unproven on all of them, and `tests/own/memory.zig` still reports its 46 seeded mistakes (80 cases pinned in `tests/own/memory.expect`).
+
+## M3: the gate
+
+### Pinned types
+
+A struct that holds a `zv.PinCheck` by value records its own address, so copying it by value is a bug (`tests/should_panic/pin_copy.zig` panics at run time). `zv-own` reports a load of a pinned type from a named local, a parameter's pointee or any pointer (`const moved = original;`, `byValue(n.*)`, `return w.inner;`); the compiler's own temporary for a fresh `return .{ ... }` is not a copy of anything the program named and is not reported (`tests/own/pinned.zig`).
+
+### Aliasing writes
+
+`@memcpy` needs disjoint memory. Two ranges of one array whose offsets and sizes are constants (`buf[0..6]` onto `buf[2..8]`) are decided: overlapping is a finding. A dynamic range is left to the safety check, which Zig compiles into every Debug and ReleaseSafe build and which reports it at run time; only ReleaseFast loses it, and there it stays unseen (`okMemcpyDynamic`).
+
+### What is checked where
+
+| Mistake | `zv-own` (static, every path, every build mode) | Runtime ledger and safety checks (only what a test runs, only in safe builds) |
+| --- | --- | --- |
+| a `zv.Linear` consumed twice, not at all, or used after | yes, with the path | `zv.Linear` ledger panic, `zv.leakedTokens()` |
+| use after free, double free of an allocation | yes | DebugAllocator |
+| use after free of a `zv.Pool` or `zv.Slots` handle | yes (a pointer taken through the handle dies with it) | generational check: panic / `StaleHandle` |
+| pointer stale after `append`, `put`, `remove`, ... | yes (std; one manifest line for a project's own type) | nothing (silent in every mode) |
+| arena memory used or returned after `deinit` / `reset` | yes | DebugAllocator, if the arena's child frees the pages |
+| pointer to a local returned or kept | yes | nothing in release; sometimes a compile error |
+| pinned struct copied by value | yes | `zv.PinCheck.check()` on the next method call |
+| `@memcpy` of overlapping constant ranges | yes | safety panic in safe builds |
+| a leak of an allocation | no | DebugAllocator, `std.testing.allocator` |
+| anything through a pointer converted to an integer; memory a callee hands to a global | unproven / assumed (printed) | as above |
+
+The runtime layer stays: it covers what the static one does not follow (leaks, dynamic indices, data-dependent paths the abstraction merges), and it is what a build that compiles out checks needs a test for. `zv-own` replaces it only where the table says "yes".
+
+### Measurements
+
+Corpus (all pinned in `tests/own/*.expect`, run by `tools/run_own.sh`; CI on Linux and Windows):
+
+| Class of seeded mistake | Seeded | Finding | Unproven | Missed |
+| --- | --- | --- | --- | --- |
+| linearity: copy of a token, leak on a branch, on an error path, in a loop, overwrite, field, optional, use after consume | 20 | 18 | 2 (a token carried round a loop and left in it; a token copied out of `*T`) | 0 |
+| allocation: use after free, double free, free of a subslice, realloc, free in a branch or loop, defer order, through an alias, struct, optional, variable | 18 | 18 | 0 | 0 |
+| containers: pointer or slice kept across `append`, `put`, `orderedRemove`, `deinit`, in a loop, through a helper, through a parameter | 14 | 14 | 0 | 0 |
+| arenas and regions: escape after `deinit`, allocator after `deinit`, stale after `reset`, list in an arena | 5 | 5 | 0 | 0 |
+| stack: returned slice of a local, stash through `*[]u8`, fixed-buffer allocation, local pointer in a container, a buffer lent to a socket that outlives it, a socket returned with a local buffer, a global | 10 | 10 | 0 | 0 |
+| handles: `zv.Pool` and `zv.Slots` stale, double free, pointer after free, take then get | 7 | 7 | 0 | 0 |
+| pinned copies, aliasing `memcpy` | 5 | 5 | 0 | 0 |
+| a project's own invalidation rule | 2 | 1 (with the manifest line) | 0 | 1 (the same type without it) |
+| one-line mutations of a realistic program (`tests/own/realish_bugs.zig`) | 7 | 5 | 0 | 2 (use after free through a hash-map slot; through an element of a list) |
+| a pointer laundered through an integer | 1 | 0 | 1 | 0 |
+| freeing through an array element twice; a helper that frees only on one path | 2 | 0 | 0 | 2 |
+| zmoltcp-shaped (a stale DNS query handle, a socket kept over local buffers, stored or returned; `own/seeded.zig` in zmoltcp) | 4 | 4 | 0 | 0 |
+| **total** | **98** | **90 (91.8 percent)** | **3** | **5** |
+
+Not silently accepted: 93 of 98 (94.9 percent). The five misses are documented limits (`gap*` in the corpus): a rule the checker was not told, what is stored inside a container or behind a map slot, an element of an array (one of many), and a callee that frees on one path only. One correct program is reported (`fpCorrelatedBranches`: two branches on one condition are not correlated); it is pinned as a known false positive.
+
+Correct code, which must stay clean:
+
+| Code | Functions | Findings | Unproven |
+| --- | --- | --- | --- |
+| `tests/own`: the correct cases (`ok*`) and the idiomatic allocator-heavy program `realish.zig` (lexer, parser, interning, LRU, writer) | about 90 | 0 | 0 |
+| this repository: `src/air`, `src/zvc`, `src/own`, `examples/` | 540 | 0 | 0 |
+| zmoltcp 0.5.3, production code with its generics instantiated (`own/zmoltcp.zvp`) | 986 | 0 | 0 |
+| zmoltcp 0.5.3 as `zig build test` reaches it, tests and laws included | 5297 | 0 | 0 |
+
+During development the same code produced about 40 false positives and 9 unproven functions before the precision decisions above were made; each is recorded there. The final false-positive rate on about 6,900 function checks of code written without the checker (zmoltcp counted twice) is 0, with the usual caveat that the checker was shaped by that code; most seeded cases were written before the rules they exercise; four were corrected when the checker was right and the case was wrong (a loop that I thought was a gap and was a real stale pointer, a `memcpy` case that was correct, a carried token case, an unreachable `return &x` that Zig itself rejects), and none was weakened to pass.
+
+Annotation burden: zero lines in all of the above, except the one-line manifest of `tests/own/registry.zig`. zmoltcp, which has no allocator at all and takes every buffer from its caller, needed none and gets no findings; the interesting surface there is the DNS socket's `zv.Slots` handles and the lending of local buffers to sockets, both in the corpus.
+
+Cost: `zv-own` checks the 986 production functions of zmoltcp in 0.3 s and the 5297 reached by its tests in 1.9 s (Debug build of the checker, Windows).
+
+### Assumptions the verdict rests on (printed with every run)
+
+- Calls to functions outside the packs with no entry in the table neither invalidate nor keep their arguments. zmoltcp: 879 such calls, almost all into std's formatting, math and memory functions.
+- Distinct pointer parameters do not overlap.
+- A callee is assumed to have freed a parameter only if it frees it on every path that returns; a conditional free (a handle consumed when the query completed) is not one a caller can rely on.
+- Joins are path-insensitive (two branches on one condition are not correlated); a carried linear value that the join merged is unproven, not guessed.
+- What is stored inside a container or behind a map slot is not followed.
+- An allocation is one owner per allocation site: a pointer freed once on each iteration of a loop is a double free to the checker.
+
+### Dead ends
+
+- Tracking the owners of the elements a container holds (`list.append(gpa, x)` then `list.items[0]`) made the slice itself look like the elements: freeing `loaded.items[i]` in a loop killed the slice, with a false positive in `src/air/reader.zig`. Removed; it is the cause of two of the three misses.
+- Carrying a pointer's owners through every load made `self.items` depend on `self`, and `gpa.free(self.buf)` end the parameter itself.
+- A coarse owner for the result of every call (the whole object the callee was given) staled the arena allocator whenever any field was appended to: 14 of the false positives in `src/zvc`; summaries now say below which field a result depends.
+- A schema-3 `fields` table with a flag per type was dropped for one that lists only the types used by value: the others' layout may not be resolved when the exporter runs, and the table would then depend on which other functions the compile analyzed.
+
+### Upstream-looking bugs found on the way (not filed anywhere)
+
+- Zig 0.17.0 `std.Io.File.Writer` on Windows: writing to a pipe whose reader has exited (`zv-own --dump | head`) reaches `unreachable` in `writeFilePositionalWindows` and `fileWriteStreamingWindows` (`.PENDING => unreachable`, "wrong File nonblocking flag") instead of returning `error.BrokenPipe`.
+- `return &x` of a local `var` is a compile error, but the same address passed through any function (`firstOf(&buf)`) is accepted silently; this is the case `zv-own` exists for.

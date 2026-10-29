@@ -204,6 +204,11 @@ pub const Val = struct {
     src: ?PlaceId = null,
     /// The fields of an aggregate, when known; `toks` and `owners` always cover them.
     parts: ?[]const Val = null,
+    /// For a pointer into an array: its constant offset (in elements) from the start of `place`, when known.
+    off: ?i64 = null,
+    /// One of many instances: read out of an array or slice. An allocation site names all of them at once, so
+    /// freeing this value does not say that the next one is freed.
+    many: bool = false,
     /// `toks` holds alternatives: a join merged values that held different tokens, so the value is one of them.
     alt: bool = false,
 
@@ -219,6 +224,8 @@ pub const Val = struct {
             .owners = try a.owners.merge(arena, b.owners),
             .place = if (a.place != null and a.place == b.place) a.place else null,
             .src = if (a.src != null and a.src == b.src) a.src else null,
+            .off = if (a.off != null and a.off == b.off) a.off else null,
+            .many = a.many or b.many,
             .alt = a.alt or b.alt or (!a.toks.isEmpty() and !b.toks.isEmpty() and !a.toks.eql(b.toks)),
         };
         if (a.parts) |pa| if (b.parts) |pb| if (pa.len == pb.len) {
@@ -230,7 +237,7 @@ pub const Val = struct {
     }
 
     pub fn eql(a: Val, b: Val) bool {
-        if (!a.toks.eql(b.toks) or !a.owners.eql(b.owners) or a.place != b.place or a.src != b.src or a.alt != b.alt) return false;
+        if (!a.toks.eql(b.toks) or !a.owners.eql(b.owners) or a.place != b.place or a.src != b.src or a.alt != b.alt or a.off != b.off or a.many != b.many) return false;
         if (a.parts) |pa| {
             const pb = b.parts orelse return false;
             if (pa.len != pb.len) return false;

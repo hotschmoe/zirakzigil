@@ -25,7 +25,7 @@ Zig gives explicit *mechanics* (allocators, control flow, error handling) but no
 | **A. Contracts** `zv.requires` / `ensures` / `invariant` | Broken pre/postconditions, blamed on the side that broke them | Built |
 | **B. Refinement and brand types** `zv.Ranged`, `zv.Pool(..., struct {})` | Overflow in ranged arithmetic, out-of-range values, cross-pool handle mixups, unsafe narrowing | Built |
 | **C. Runtime ownership backstops** `zv.Linear`, generational handles (`zv.Pool`, and `zv.Slots` over borrowed storage), `zv.PinCheck` | Double consume, use-after-free via stale handle, copied self-referential structs, leaks | Built |
-| **D. Static ownership checker** `zv-own` (over AIR) | The bugs in C, at compile time, plus region escapes and pointer invalidation | Phase 3 in progress: linearity, regions and invalidation done (`docs/phase3.md`) |
+| **D. Static ownership checker** `zv-own` (over AIR) | The bugs in C, at compile time, plus region escapes, pointer invalidation, pinned copies and aliasing writes | Phase 3 done: 98 seeded mistakes, 90 found, 3 unproven and 5 missed, 0 false positives on about 6,900 function checks of real code (`docs/phase3.md`) |
 | **E. Deductive verifier** `zvc` (Verus-style, Z3) | Functional correctness and absence of every safety panic | Phase 2 done: reads AIR packs, bit-precise, Z3 over a pipe; seven zmoltcp functions proved in its build |
 | **F. C backend + CBMC** | Panic-freedom of bounded proof harnesses | C emission tested, checker not wired |
 | **H. Governance** assurance manifest + laws | Silent erosion of guarantees by contributors | Built |
@@ -114,6 +114,7 @@ zig build test --fuzz=100K              # the same, stopping after 100K iteratio
 ./tools/run_negative.sh                 # 6 must-fail + 36 must-not-compile cases
 ./tools/run_baseline.sh                 # the same bugs in plain Zig (about 1.5 min)
 tools/run_zvc.sh                        # the verifier against its pinned AIR packs and verdicts (needs Z3)
+tools/run_own.sh                         # the ownership checker against its pinned AIR packs and verdicts (no solver)
 ```
 
 To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, `zirakzigil.addAssuranceGate` for the Phase 0 gate (a root module and the names of your law and scenario files). Your own `zig build matrix` is one call to `zirakzigil.addTestMatrix`; see "Build matrix" there.
@@ -137,7 +138,7 @@ Integers of any width, bool, slices and arrays of integers, optionals, structs b
 ## Limits, honestly
 
 - `zvc` covers a fragment of AIR: pointers other than to locals, floats, enums, unions and recursion are reported UNPROVEN. A loop with no `zv.decreases` is proved only for partial correctness (`--total` refuses it), and a counterexample that passes through a loop cut by its invariant may not be a real execution.
-- Ownership is enforced only at runtime. The static checker `zv-own` is designed but not built.
+- Ownership is enforced at run time by layer C and, for what the abstraction follows, at compile time by `zv-own` (`docs/phase3.md` says which is which).
 - The `Linear` ledger is a fixed 16K-slot global with no thread safety. It is fine for tests, not for production.
 
 ## Roadmap
@@ -151,7 +152,7 @@ Each phase ships value before the next one starts. Phases are ordered by depende
 | **0. Adopt the comptime and runtime layers** (no fork) | `zv` contracts, `Ranged`, `Pool`, `Linear`; manifests; laws and fuzzing in CI | Every module has a manifest at floor `.tested` or higher, where `.tested` is measured: a law or scenario executes the function. **Met on the pilot** (zmoltcp 0.5.0: 549 of 549 classified functions evidenced; 185 had no evidence before); see [`docs/phase0-report.md`](docs/phase0-report.md) |
 | **1. AIR exporter** | One small compiler patch: per-function AIR as a versioned binary pack (JSON on request) | Every function in a pilot codebase exports and round-trips |
 | **2. `zvc` on AIR** | Port the spike: modular calls, structs, termination, ghost `Int` and `Seq` | Spike results reproduce from AIR, plus one real kernel verified |
-| **3. `zv-own`** | Linearity, allocator regions, pointer invalidation, pinned types | Catches seeded ownership bugs at a false-positive rate the team accepts |
+| **3. `zv-own`** | Linearity, allocator regions, pointer invalidation, pinned types | Catches seeded ownership bugs at a false-positive rate the team accepts. **Done** (0.17.11) |
 | **4. Verified core** | `PointsTo` permission tokens, a verified allocator, proof agents in CI | The core is `.verified` and the `.trusted` count is falling |
 | **Parallel track F** | C backend plus CBMC proof harnesses | Needs no fork, so it can start any time |
 

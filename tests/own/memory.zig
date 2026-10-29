@@ -602,3 +602,174 @@ pub fn advGlobalStash() void {
     var x: u8 = 1;
     stash_global = &x;
 }
+
+// Slots over caller-provided storage, the way zmoltcp's DNS socket keeps its queries.
+
+const Table = zv.Slots(u32, struct {});
+
+pub fn okSlotsUse(table: *Table) !u32 {
+    const h = try table.insert(5);
+    const v = (try table.get(h)).*;
+    try table.free(h);
+    return v;
+}
+
+pub fn badSlotsStaleGet(table: *Table) !u32 {
+    const h = try table.insert(5);
+    try table.free(h);
+    return (try table.get(h)).*;
+}
+
+pub fn badSlotsDoubleFree(table: *Table) !void {
+    const h = try table.insert(5);
+    try table.free(h);
+    try table.free(h);
+}
+
+pub fn badSlotsPointerAfterFree(table: *Table) !u32 {
+    const h = try table.insert(5);
+    const p = try table.get(h);
+    try table.free(h);
+    return p.*;
+}
+
+pub fn badSlotsTakeThenGet(table: *Table) !u32 {
+    const h = try table.insert(5);
+    const v = try table.take(h);
+    _ = v;
+    return (try table.get(h)).*;
+}
+
+pub fn okSlotsHandleKept(table: *Table, keep: *?Table.Handle) !void {
+    keep.* = try table.insert(5);
+}
+
+// Aliasing writes: @memcpy needs disjoint ranges. Constant ranges of one array are decided; a dynamic one is
+// left to the safety check.
+
+pub fn badMemcpyOverlap() void {
+    var buf: [16]u8 = undefined;
+    @memcpy(buf[0..6], buf[2..8]);
+}
+
+pub fn badMemcpySameRange(buf: *[8]u8) void {
+    @memcpy(buf[0..4], buf[0..4]);
+}
+
+pub fn okMemcpyDisjoint() void {
+    var buf: [16]u8 = undefined;
+    @memcpy(buf[0..4], buf[8..12]);
+}
+
+pub fn okMemcpyDynamic(buf: []u8, n: usize) void {
+    @memcpy(buf[0..n], buf[n..][0..n]);
+}
+
+pub fn okMemcpyTwoBuffers(a: *[8]u8, b: *const [8]u8) void {
+    @memcpy(a[0..8], b[0..8]);
+}
+
+// Caller-provided buffers, the way zmoltcp's sockets take them: a socket stores the slices it is given, so
+// the buffer must outlive the socket.
+
+const Sock = struct {
+    rx: []u8 = &.{},
+    tx: []u8 = &.{},
+
+    fn init(rx: []u8, tx: []u8) Sock {
+        return .{ .rx = rx, .tx = tx };
+    }
+
+    fn attach(self: *Sock, rx: []u8) void {
+        self.rx = rx;
+    }
+};
+
+pub fn badAttachLocalBuffer(sock: *Sock) void {
+    var buf: [64]u8 = undefined;
+    sock.attach(&buf);
+}
+
+pub fn okAttachParamBuffer(sock: *Sock, buf: []u8) void {
+    sock.attach(buf);
+}
+
+pub fn okAttachLocalSocket() usize {
+    var s: Sock = .{};
+    var buf: [64]u8 = undefined;
+    s.attach(&buf);
+    return s.rx.len;
+}
+
+pub fn badReturnSocketWithLocalBuffer() Sock {
+    var s: Sock = .{};
+    var buf: [64]u8 = undefined;
+    s.attach(&buf);
+    return s;
+}
+
+pub fn badInitReturnsLocalBuffer() Sock {
+    var rx: [64]u8 = undefined;
+    var tx: [64]u8 = undefined;
+    return Sock.init(&rx, &tx);
+}
+
+pub fn okInitFromParams(rx: []u8, tx: []u8) Sock {
+    return Sock.init(rx, tx);
+}
+
+pub fn badStoreSocketInOuter(outer: *Sock) void {
+    var rx: [64]u8 = undefined;
+    var tx: [64]u8 = undefined;
+    outer.* = Sock.init(&rx, &tx);
+}
+
+// Defer order: defers run last to first, so a container declared before the arena it allocates from must be
+// deinitialized before it.
+
+pub fn okDeferOrder(gpa: Allocator) !void {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var map: std.StringHashMapUnmanaged(u32) = .empty;
+    defer map.deinit(a);
+    try map.put(a, "x", 1);
+}
+
+pub fn badDeferOrder(gpa: Allocator) !void {
+    var map: std.StringHashMapUnmanaged(u32) = .empty;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    const a = arena.allocator();
+    defer map.deinit(a);
+    defer arena.deinit();
+    try map.put(a, "x", 1);
+}
+
+// Limits, pinned so they are visible: `gap*` is a real mistake the checker does not see, `fp*` is a correct
+// program it reports.
+
+fn maybeFree(gpa: Allocator, buf: []u8, c: bool) void {
+    if (c) gpa.free(buf);
+}
+
+pub fn gapConditionalFreeInHelper(gpa: Allocator, c: bool) !u8 {
+    const buf = try gpa.alloc(u8, 4);
+    maybeFree(gpa, buf, c);
+    return buf[0];
+}
+
+pub fn gapDoubleFreeOfElement(gpa: Allocator, items: []const []u8) void {
+    gpa.free(items[0]);
+    gpa.free(items[0]);
+}
+
+pub fn fpCorrelatedBranches(gpa: Allocator, c: bool) !u8 {
+    const buf = try gpa.alloc(u8, 4);
+    if (c) gpa.free(buf);
+    if (!c) {
+        const v = buf[0];
+        gpa.free(buf);
+        return v;
+    }
+    return 0;
+}

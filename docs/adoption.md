@@ -150,6 +150,31 @@ _ = zirakzigil.addVerifyGate(b, .{
 
 `zig build verify` builds `zvc` from this package, finds Z3 (`-Dz3=PATH`, `ZV_Z3` or `PATH`; `tools/install_z3.sh DEST` installs the pinned release) and fails when a `.verified` function is refuted, unproven, or missing from the pack, or when a pinned source changed since the export: a claim cannot outlive the code it was proved of, and a pack is cheap to regenerate but never trusted stale. A proof that uses another function's contract is only as good as that function: a `.verified` callee that fails fails the caller, and a `.trusted` one is listed in the run as an assumption (`max_trusted` in the gate options fails the run when there are more than N). Stock Zig runs the gate; only exporting needs the patched compiler.
 
+## Checking ownership: `zig build own`
+
+`zv-own` checks a project's code for ownership mistakes (a `zv.Linear` consumed twice, memory used after `free`, a pointer left stale by `append`, a pointer to a local that outlives it; [phase3.md](phase3.md)) from the same AIR packs. Nothing is written in the code for std's allocators and containers, `zv.Pool`, `zv.Slots` and `zv.Linear`: the types and the calls say it. A project type with its own invalidation rule adds one manifest line, checked at comptime:
+
+```zig
+pub const ownership = .{ .remove = .invalidates };   // pointers handed out by get() are stale after remove()
+comptime { zv.requireOwnership(@This()); }
+```
+
+1. Export the whole project, generics instantiated the way the assurance manifests witness them, with a zig-zv compiler: `ZVC_DEEP=1 tools/zvc_export.sh own/ src/root.zig --only wire --only 'socket.tcp.Socket(target.wire.ipv4, 4)' ...` (zmoltcp's `own/export.sh` is a complete example, including the pins).
+2. Check the pack in with `own/PINS`, as for `verify`.
+3. Add the gate:
+
+```zig
+_ = zirakzigil.addOwnershipGate(b, .{
+    .packs = &.{"own/project.zvp"},
+    .pins = "own/PINS",
+    .src = "src",
+    .max_unproven = 0,   // a function outside what the checker models fails the build until it is looked at
+    .max_trusted = 0,    // `.trusted` entries of the ownership manifest are exempt and counted
+});
+```
+
+`zig build own` fails on a finding (printed with `file:line:col`, the path taken and notes at the related places), on more unproven or trusted functions than allowed, and on a pinned source that changed since the export. A second gate with `.step = "own-seeded"`, `.expect = "..."` and `.files` pins the verdicts on mistakes seeded in the shape of the project's own API. Every run ends with what it assumed and did not check (calls into code with no model, linear values handed on). Stock Zig runs the gate; only exporting needs the patched compiler.
+
 ## Borrowed slots: `zv.Slots`
 
 `zv.Pool` owns comptime-capacity storage and panics on a stale handle, which is right when a stale handle is a bug in the application. A *library* socket has the other contract: the caller hands it a slice of slots (`queries: []QuerySlot`), the capacity is a runtime value, and a stale handle is a normal outcome (the user cancelled, or read the result twice) that must come back as an error. `zv.Slots(T, Brand)` is that building block; `Pool` is unchanged.
