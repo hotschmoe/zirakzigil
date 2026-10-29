@@ -74,10 +74,11 @@ pub fn isToolchain(zcu: *Zcu, func_index: InternPool.Index) bool {
 }
 
 /// Builds the view of `air`. Everything is allocated from `arena`.
-pub fn view(arena: Allocator, zcu: *Zcu, func_index: InternPool.Index, air: *const Air) Error!Function {
+pub fn view(arena: Allocator, pt: Zcu.PerThread, func_index: InternPool.Index, air: *const Air) Error!Function {
+    const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
     const func = zcu.funcInfo(func_index);
-    var c: Ctx = .{ .arena = arena, .zcu = zcu, .air = air };
+    var c: Ctx = .{ .arena = arena, .pt = pt, .zcu = zcu, .air = air };
     c.file = try c.fileId(zcu.navFileScopeIndex(func.owner_nav));
     c.base_line = zcu.navSrcLine(func.owner_nav);
 
@@ -87,7 +88,7 @@ pub fn view(arena: Allocator, zcu: *Zcu, func_index: InternPool.Index, air: *con
         const i = @intFromEnum(index);
         if (air.instructions.items(.tag)[i] != .arg) break;
         const arg = air.instructions.items(.data)[i].arg;
-        try params.append(arena, .{ .ty = try c.typeId(arg.ty), .zir_index = arg.zir_param_index });
+        try params.append(arena, .{ .ty = try c.typeId(arg.ty.toType()), .zir_index = arg.zir_param_index });
     }
 
     const ret = try c.typeId(.fromInterned(ip.funcTypeReturnType(func.ty)));
@@ -109,6 +110,7 @@ pub fn view(arena: Allocator, zcu: *Zcu, func_index: InternPool.Index, air: *con
 
 const Ctx = struct {
     arena: Allocator,
+    pt: Zcu.PerThread,
     zcu: *Zcu,
     air: *const Air,
     /// Declaration line (zero-based) of the function whose body is being walked.
@@ -127,7 +129,7 @@ const Ctx = struct {
         if (!gop.found_existing) {
             gop.value_ptr.* = @intCast(c.types.items.len);
             try c.types.append(c.arena, .{
-                .name = try std.fmt.allocPrint(c.arena, "{f}", .{ty.fmt(c.zcu)}),
+                .name = try std.fmt.allocPrint(c.arena, "{f}", .{ty.fmt(c.pt)}),
                 .kind = @tagName(ty.zigTypeTag(c.zcu)),
             });
         }
@@ -154,7 +156,7 @@ const Ctx = struct {
         const ty: Type = .fromInterned(c.zcu.intern_pool.typeOf(interned));
         return .{ .constant = .{
             .ty = try c.typeId(ty),
-            .val = try std.fmt.allocPrint(c.arena, "{f}", .{Value.fromInterned(interned).fmtValue(c.zcu)}),
+            .val = try std.fmt.allocPrint(c.arena, "{f}", .{Value.fromInterned(interned).fmtValue(c.pt)}),
         } };
     }
 
@@ -229,7 +231,7 @@ const Ctx = struct {
                 }
             },
             .aggregate_init => {
-                const len: usize = @intCast(data.ty_pl.ty.arrayLen(zcu));
+                const len: usize = @intCast(data.ty_pl.ty.toType().arrayLen(zcu));
                 try a.ops(@ptrCast(air.extra.items[data.ty_pl.payload..][0..len]));
             },
             .br, .switch_dispatch => {
@@ -286,7 +288,7 @@ const Ctx = struct {
                 try a.int("col", c.loc.?.col);
             },
             .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => {
-                const name: Air.NullTerminatedString = @enumFromInt(@intCast(data.pl_op.payload));
+                const name: Air.NullTerminatedString = @enumFromInt(data.pl_op.payload);
                 try a.str("name", name.toSlice(air.*));
             },
             .atomic_store_unordered, .atomic_store_monotonic, .atomic_store_release, .atomic_store_seq_cst => {

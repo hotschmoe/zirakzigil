@@ -45,7 +45,7 @@ pub fn exportFunc(pt: Zcu.PerThread, func_index: InternPool.Index, air: *const A
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const function = try adapter.view(arena, zcu, func_index, air);
+    const function = try adapter.view(arena, pt, func_index, air);
     var aw: std.Io.Writer.Allocating = .init(arena);
     writeFunction(&aw.writer, function) catch return error.OutOfMemory;
 
