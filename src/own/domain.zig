@@ -243,11 +243,15 @@ pub const Val = struct {
     room: ?u64 = null,
     /// A number, a bool or an enum known to be this constant (an enum by the hash of its name).
     con: ?u64 = null,
+    /// Without `con`: it is one of these two (a join of two constants). Only a test of whether an end can happen reads it.
+    pair: ?[2]u64 = null,
     /// A scalar read from this place, or a bool that tests one (`probe`): good only while `ep` is the epoch of the run (no
     /// memory was written since), or `fixed_epoch` (a field of a parameter passed by value).
     at: ?PlaceId = null,
     probe: ?Probe = null,
     imp: ?*const Implied = null,
+    /// A pointer whose pointee type is not the one of the place it was made from: what it writes is not read as a constant.
+    cast: bool = false,
     ep: u32 = 0,
 
     pub const none: Val = .{};
@@ -255,11 +259,28 @@ pub const Val = struct {
     /// What of a scalar is still true once it is written to memory: its constant, and which field of a parameter it is.
     pub fn scalarKept(v: Val) Val {
         const fixed = v.at != null and v.ep == fixed_epoch;
-        return .{ .con = v.con, .at = if (fixed) v.at else null, .ep = if (fixed) fixed_epoch else 0 };
+        return .{ .con = v.con, .pair = v.pair, .at = if (fixed) v.at else null, .ep = if (fixed) fixed_epoch else 0 };
     }
 
     pub fn isEmpty(v: Val) bool {
         return v.toks.isEmpty() and v.ids.isEmpty() and v.obj.isEmpty() and v.place == null and v.src == null and v.parts == null;
+    }
+
+    /// The two constants a join of scalars can be, when it is exactly two.
+    fn joinPair(a: Val, b: Val) ?[2]u64 {
+        if (a.con != null and b.con != null and a.con != b.con) return .{ @min(a.con.?, b.con.?), @max(a.con.?, b.con.?) };
+        if (a.pair) |p| {
+            if (b.pair) |q| return if (std.meta.eql(p, q)) p else null;
+            if (b.con) |c| return if (c == p[0] or c == p[1]) p else null;
+        }
+        if (b.pair) |q| if (a.con) |c| return if (c == q[0] or c == q[1]) q else null;
+        return null;
+    }
+
+    /// Nothing is known of the scalar any more.
+    pub fn forgetCon(v: *Val) void {
+        v.con = null;
+        v.pair = null;
     }
 
     pub fn join(a: Val, arena: Allocator, b: Val) Allocator.Error!Val {
@@ -277,9 +298,11 @@ pub const Val = struct {
             .maybe = a.maybe or b.maybe or (!a.ids.isEmpty() and !b.ids.isEmpty() and !a.ids.eql(b.ids)),
             .room = if (a.room != null and a.room == b.room) a.room else null,
             .con = if (a.con != null and a.con == b.con) a.con else null,
+            .pair = joinPair(a, b),
             .at = if (a.at != null and a.at == b.at and a.ep == b.ep) a.at else null,
             .probe = if (a.probe != null and b.probe != null and a.ep == b.ep and std.meta.eql(a.probe.?, b.probe.?)) a.probe else null,
             .imp = if (a.imp == b.imp) a.imp else null,
+            .cast = a.cast or b.cast,
             .ep = a.ep,
         };
         if (a.parts) |pa| if (b.parts) |pb| if (pa.len == pb.len) {
@@ -300,7 +323,7 @@ pub const Val = struct {
     }
 
     pub fn eql(a: Val, b: Val) bool {
-        if (!a.toks.eql(b.toks) or !a.ids.eql(b.ids) or !a.obj.eql(b.obj) or !a.moved.eql(b.moved) or a.place != b.place or a.src != b.src or a.from != b.from or a.alt != b.alt or a.maybe != b.maybe or a.room != b.room or a.off != b.off or a.many != b.many or a.con != b.con) return false;
+        if (!a.toks.eql(b.toks) or !a.ids.eql(b.ids) or !a.obj.eql(b.obj) or !a.moved.eql(b.moved) or a.place != b.place or a.src != b.src or a.from != b.from or a.alt != b.alt or a.maybe != b.maybe or a.room != b.room or a.off != b.off or a.many != b.many or a.con != b.con or !std.meta.eql(a.pair, b.pair)) return false;
         if (a.parts) |pa| {
             const pb = b.parts orelse return false;
             if (pa.len != pb.len) return false;
