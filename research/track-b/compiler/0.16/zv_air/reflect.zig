@@ -93,6 +93,10 @@ const Ctx = struct {
         try s.beginObject();
         try s.objectField("ty");
         try c.typ(s, ty);
+        if (ty.toIntern() == .type_type) {
+            try s.objectField("as_type");
+            try c.typ(s, .fromInterned(index));
+        }
         try field(s, "val", try std.fmt.allocPrint(c.arena, "{f}", .{Value.fromInterned(index).fmtValue(c.pt)}));
         switch (ip.indexToKey(index)) {
             .func => {

@@ -10,20 +10,28 @@ const Air = @import("../Air.zig");
 const InternPool = @import("../InternPool.zig");
 const Zcu = @import("../Zcu.zig");
 const adapter = @import("adapter.zig");
+const reflect = @import("reflect.zig");
+const Compilation = @import("../Compilation.zig");
 
 const log = std.log.scoped(.zv_air);
 
 pub const schema_version = 1;
 
 pub const Options = struct {
-    /// Directory receiving one file per function instance; null disables the export.
+    /// Directory receiving one schema v1 file per function instance; null disables it.
     out_dir: ?[]const u8 = null,
+    /// Directory for the raw reflection dump (reflect.zig); null disables it.
+    raw_dir: ?[]const u8 = null,
+    /// Directory for the text of the compiler's own AIR printer; null disables it.
+    text_dir: ?[]const u8 = null,
     include_std: bool = false,
 
-    /// ZV_AIR_OUT and ZV_AIR_STD let the export reach compiler runs spawned by `zig build`.
+    /// ZV_AIR_OUT, ZV_AIR_RAW, ZV_AIR_TEXT and ZV_AIR_STD let the export reach compiler runs spawned by `zig build`.
     pub fn fromEnviron(environ_map: anytype) Options {
         return .{
             .out_dir = environ_map.get("ZV_AIR_OUT"),
+            .raw_dir = environ_map.get("ZV_AIR_RAW"),
+            .text_dir = environ_map.get("ZV_AIR_TEXT"),
             .include_std = environ_map.get("ZV_AIR_STD") != null,
         };
     }
@@ -31,6 +39,8 @@ pub const Options = struct {
     /// Anything that changes the export must change the cache key, or a cache hit would skip it.
     pub fn hash(options: Options, hasher: anytype) void {
         hasher.addOptionalBytes(options.out_dir);
+        hasher.addOptionalBytes(options.raw_dir);
+        hasher.addOptionalBytes(options.text_dir);
         hasher.add(options.include_std);
     }
 };
@@ -38,35 +48,51 @@ pub const Options = struct {
 pub fn exportFunc(pt: Zcu.PerThread, func_index: InternPool.Index, air: *const Air) Allocator.Error!void {
     const zcu = pt.zcu;
     const comp = zcu.comp;
-    const out_dir = comp.zv_air_options.out_dir orelse return;
-    if (!comp.zv_air_options.include_std and adapter.isToolchain(zcu, func_index)) return;
+    const options = comp.zv_air_options;
+    if (options.out_dir == null and options.raw_dir == null and options.text_dir == null) return;
+    if (!options.include_std and adapter.isToolchain(zcu, func_index)) return;
 
     var arena_state: std.heap.ArenaAllocator = .init(comp.gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-
-    const function = try adapter.view(arena, zcu, func_index, air);
     var aw: std.Io.Writer.Allocating = .init(arena);
-    writeFunction(&aw.writer, function) catch return error.OutOfMemory;
 
-    const name = try fileName(arena, function.fqn, aw.written());
+    if (options.out_dir) |dir| {
+        const function = try adapter.view(arena, zcu, func_index, air);
+        writeFunction(&aw.writer, function) catch return error.OutOfMemory;
+        try emit(comp, arena, dir, function.fqn, "json", aw.written());
+    }
+    if (options.raw_dir) |dir| {
+        aw.clearRetainingCapacity();
+        reflect.writeFunction(arena, &aw.writer, zcu, func_index, air, builtin.zig_version_string) catch return error.OutOfMemory;
+        try emit(comp, arena, dir, zcu.intern_pool.getNav(zcu.funcInfo(func_index).owner_nav).fqn.toSlice(&zcu.intern_pool), "json", aw.written());
+    }
+    if (options.text_dir) |dir| {
+        aw.clearRetainingCapacity();
+        air.write(&aw.writer, zcu, null) catch return error.OutOfMemory;
+        try emit(comp, arena, dir, zcu.intern_pool.getNav(zcu.funcInfo(func_index).owner_nav).fqn.toSlice(&zcu.intern_pool), "txt", aw.written());
+    }
+}
+
+fn emit(comp: *Compilation, arena: Allocator, out_dir: []const u8, fqn: []const u8, ext: []const u8, content: []const u8) Allocator.Error!void {
+    const name = try fileName(arena, fqn, ext, content);
     const io = comp.io;
     const dir = std.Io.Dir.cwd();
     dir.createDirPath(io, out_dir) catch |err| return log.err("{s}: {t}", .{ out_dir, err });
     const sub_path = try std.fs.path.join(arena, &.{ out_dir, name });
-    dir.writeFile(io, .{ .sub_path = sub_path, .data = aw.written() }) catch |err|
+    dir.writeFile(io, .{ .sub_path = sub_path, .data = content }) catch |err|
         log.err("{s}: {t}", .{ sub_path, err });
 }
 
 /// The name embeds a hash of the content, so generic instances that share a
 /// name stay apart and re-exports of identical content overwrite each other.
-fn fileName(arena: Allocator, fqn: []const u8, content: []const u8) Allocator.Error![]const u8 {
+fn fileName(arena: Allocator, fqn: []const u8, ext: []const u8, content: []const u8) Allocator.Error![]const u8 {
     const stem = try arena.dupe(u8, fqn[0..@min(fqn.len, 80)]);
     for (stem) |*byte| switch (byte.*) {
         'a'...'z', 'A'...'Z', '0'...'9', '_', '.', '-' => {},
         else => byte.* = '_',
     };
-    return std.fmt.allocPrint(arena, "{s}.{x:0>16}.json", .{ stem, std.hash.Wyhash.hash(0, content) });
+    return std.fmt.allocPrint(arena, "{s}.{x:0>16}.{s}", .{ stem, std.hash.Wyhash.hash(0, content), ext });
 }
 
 pub fn writeFunction(w: *std.Io.Writer, f: adapter.Function) std.Io.Writer.Error!void {

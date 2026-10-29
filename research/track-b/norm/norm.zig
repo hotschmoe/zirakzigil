@@ -14,6 +14,8 @@ const Rule = struct {
     attrs: []const AttrRule = &.{},
     bodies: []const BodyRule = &.{},
     special: enum { none, dbg_stmt, inline_block, switch_br } = .none,
+    /// Raw fields that are known and deliberately unused; --strict rejects any other unconsumed field.
+    ignore: []const []const u8 = &.{},
 };
 
 const AttrRule = struct {
@@ -31,6 +33,8 @@ const BodyRule = struct {
 };
 
 const Rules = struct {
+    /// Where an `arg` instruction keeps its type (0.16 stores a Ref to a type constant).
+    param_ty_path: []const u8 = "data.ty",
     unsupported: []const []const u8,
     rules: []const Rule,
 };
@@ -98,6 +102,7 @@ fn str(v: Json) Error![]const u8 {
 const Ctx = struct {
     arena: Allocator,
     rules: *const Lookup,
+    strict: bool = false,
     types: std.ArrayList(struct { name: []const u8, kind: []const u8 }) = .empty,
     type_ids: std.AutoHashMapUnmanaged(i64, u32) = .empty,
     files: std.ArrayList(struct { module: []const u8, path: []const u8 }) = .empty,
@@ -152,6 +157,7 @@ const Ctx = struct {
             return .{ .id = id, .tag = tag, .supported = false };
         }
         const rule = try c.rules.find(j, tag);
+        if (c.strict) try strictCheck(rule.*, j, tag);
         var ops: std.ArrayList(Operand) = .empty;
         var attrs: std.ArrayList(AttrOut) = .empty;
         var bodies: std.ArrayList(Body) = .empty;
@@ -192,6 +198,37 @@ const Ctx = struct {
             .loc = if (rule.special == .dbg_stmt) c.loc else loc,
             .bodies = bodies.items,
         };
+    }
+
+    fn accounted(rule: Rule, full: []const u8) bool {
+        for (rule.ignore) |p| if (covers(p, full)) return true;
+        for (rule.ops) |p| if (covers(p, full)) return true;
+        for (rule.attrs) |a| if (covers(a.path, full)) return true;
+        for (rule.bodies) |b| if (covers(b.path, full)) return true;
+        return false;
+    }
+
+    fn covers(path: []const u8, full: []const u8) bool {
+        if (path.len == 0) return false;
+        if (std.mem.eql(u8, path, full)) return true;
+        if (std.mem.startsWith(u8, full, path) and full[path.len] == '.') return true;
+        return std.mem.startsWith(u8, path, full) and path[full.len] == '.';
+    }
+
+    fn strictCheck(rule: Rule, j: Json, tag: []const u8) Error!void {
+        if (rule.special == .dbg_stmt) return;
+        inline for (.{ "data", "payload.value" }) |prefix| {
+            if (get(j, prefix)) |obj| if (obj == .object) {
+                var it = obj.object.iterator();
+                while (it.next()) |kv| {
+                    var buf: [128]u8 = undefined;
+                    const full = std.fmt.bufPrint(&buf, prefix ++ ".{s}", .{kv.key_ptr.*}) catch return error.BadRaw;
+                    if (!accounted(rule, full) and !(rule.special == .switch_br and std.mem.startsWith(u8, full, "payload.value."))) {
+                        return fail("{s}: raw field {s} is not covered by rule {s}", .{ tag, full, rule.key });
+                    }
+                }
+            };
+        }
     }
 
     fn label(b: BodyRule, tag: []const u8) []const u8 {
@@ -355,20 +392,20 @@ fn writeInst(s: *Stringify, inst: Inst) Stringify.Error!void {
     try s.endObject();
 }
 
-fn convert(arena: Allocator, lookup: *const Lookup, raw: Json, w: *std.Io.Writer) !struct { fqn: []const u8 } {
-    var c: Ctx = .{ .arena = arena, .rules = lookup };
+fn convert(arena: Allocator, lookup: *const Lookup, strict: bool, raw: Json, w: *std.Io.Writer) !struct { fqn: []const u8 } {
+    var c: Ctx = .{ .arena = arena, .rules = lookup, .strict = strict };
     const f = try need(raw, "fn");
     const fqn = try str(try need(f, "fqn"));
     c.file = try c.fileId(try str(try need(f, "module")), try str(try need(f, "path")));
     c.base_line = try int(try need(f, "line0"));
 
-    const main = (try need(raw, "main")).array.items;
+    const top = (try need(raw, "main")).array.items;
     const Param = struct { ty: u32, zir_index: i64 };
     var params: std.ArrayList(Param) = .empty;
-    for (main) |inst| {
+    for (top) |inst| {
         if (!std.mem.eql(u8, try str(try need(inst, "tag")), "arg")) break;
         const d = try need(inst, "data");
-        try params.append(arena, .{ .ty = try c.typeId(try need(d, "ty")), .zir_index = try int(try need(d, "zir_param_index")) });
+        try params.append(arena, .{ .ty = try c.typeId(try need(inst, lookup.rules.param_ty_path)), .zir_index = try int(try need(d, "zir_param_index")) });
     }
     const ret = try c.typeId(try need(raw, "ret"));
     const insts = try c.body(try need(raw, "main"));
@@ -397,8 +434,9 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 4) {
-        std.debug.print("usage: norm RULES.zon RAW_DIR OUT_DIR\n", .{});
+    const strict = args.len == 5 and std.mem.eql(u8, args[4], "--strict");
+    if (args.len != 4 and !strict) {
+        std.debug.print("usage: norm RULES.zon RAW_DIR OUT_DIR [--strict]\n", .{});
         std.process.exit(2);
     }
     const cwd = std.Io.Dir.cwd();
@@ -406,14 +444,15 @@ pub fn main(init: std.process.Init) !void {
     var rule_arena: std.heap.ArenaAllocator = .init(gpa);
     defer rule_arena.deinit();
     const source = try cwd.readFileAllocOptions(io, args[1], rule_arena.allocator(), .limited(1 << 20), .of(u8), 0);
-    var diag: std.zon.parse.Diagnostics = .{};
+    var diag: std.zon.parse.Diagnostics = undefined;
     const rules = std.zon.parse.fromSlice(Rules, .{
         .gpa = gpa,
         .arena = rule_arena.allocator(),
         .source = source,
         .diagnostics = &diag,
     }) catch |err| {
-        std.debug.print("{s}: {t}\n{f}\n", .{ args[1], err, diag });
+        diag.log(args[1]);
+        std.debug.print("{t}\n", .{err});
         std.process.exit(1);
     };
     const lookup = try Lookup.init(rule_arena.allocator(), rules);
@@ -436,7 +475,7 @@ pub fn main(init: std.process.Init) !void {
         const bytes = try in_dir.readFileAlloc(io, entry.name, arena, .limited(1 << 30));
         const raw = try std.json.parseFromSliceLeaky(Json, arena, bytes, .{});
         var aw: std.Io.Writer.Allocating = .init(arena);
-        const result = convert(arena, &lookup, raw, &aw.writer) catch |err| {
+        const result = convert(arena, &lookup, strict, raw, &aw.writer) catch |err| {
             std.debug.print("{s}: {t}\n", .{ entry.name, err });
             failed += 1;
             continue;
