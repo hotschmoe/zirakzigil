@@ -19,6 +19,8 @@ const Rule = struct {
     anchor: Anchor,
     position: enum { before, after },
     insert: []const u8,
+    /// A function whose other call sites are reported as warnings; `verify` fails on them.
+    watch: []const u8 = "",
 };
 
 const Anchor = union(enum) {
@@ -161,7 +163,7 @@ const Run = struct {
 
     /// A hooked call that is also made elsewhere in the file may be a path the hook does not cover.
     fn warnSiblings(run: *Run, rule: Rule, source: []const u8, hit: Hit) !void {
-        const callee = switch (rule.anchor) {
+        const callee = if (rule.watch.len != 0) rule.watch else switch (rule.anchor) {
             .fn_stmt => |a| switch (a.stmt) {
                 .calls => |name| name,
                 else => return,

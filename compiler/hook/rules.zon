@@ -5,12 +5,13 @@
         .anchor = .{ .text = "var air = try pt.analyzeFuncBodyInner(func_index, reason);" },
         .position = .after,
         .insert = "try @import(\"../zv_air/export.zig\").exportFunc(pt, func_index, &air);",
+        .watch = "analyzeFuncBodyInner",
     },
     .{
         .name = "cache-key",
         .file = "src/Compilation.zig",
-        .anchor = .{ .text = "man.hash.add(zcu.error_limit);" },
-        .position = .after,
-        .insert = "@import(\"zv_air/export.zig\").hashEnv(comp.environ_map, &man.hash);",
+        .anchor = .{ .fn_stmt = .{ .fn_name = "addNonIncrementalStuffToCacheManifest", .stmt = .first } },
+        .position = .before,
+        .insert = "@import(\"zv_air/export.zig\").hashCache(comp, &man.hash);",
     },
 } }
