@@ -133,6 +133,8 @@ pub const len_step: u32 = std.math.maxInt(u32) - 2;
 pub const Places = struct {
     recs: std.ArrayList(Rec) = .empty,
     map: std.AutoHashMapUnmanaged(Rec, PlaceId) = .empty,
+    /// Places that have a child at a constant index.
+    indexed: std.AutoHashMapUnmanaged(PlaceId, void) = .empty,
 
     pub const Rec = struct { kind: RootKind, n: u32, parent: PlaceId, step: u32 };
 
@@ -142,6 +144,7 @@ pub const Places = struct {
 
     pub fn child(p: *Places, arena: Allocator, parent: PlaceId, step: u32) Allocator.Error!PlaceId {
         const r = p.recs.items[parent];
+        if (step >= index_step and step < len_step) try p.indexed.put(arena, parent, {});
         return p.intern(arena, .{ .kind = r.kind, .n = r.n, .parent = parent, .step = step });
     }
 

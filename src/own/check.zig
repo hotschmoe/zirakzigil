@@ -908,7 +908,7 @@ pub const Run = struct {
     }
 
     /// Below the pointee of a pointer parameter: the memory is the caller's.
-    fn pointerRooted(r: *Run, pl: PlaceId) bool {
+    pub fn pointerRooted(r: *Run, pl: PlaceId) bool {
         const n = r.paramOf(pl) orelse return false;
         return r.ty.isPointer(r.pack.t.params[r.func.params.off + n].ty);
     }
@@ -1196,7 +1196,7 @@ pub const Run = struct {
     pub fn readLeaf(r: *Run, st: *State, pl: PlaceId, ty: schema.TypeId, lazy: bool) Allocator.Error!Val {
         var out = try r.readPlace(st, pl, ty, lazy);
         const rec = r.places.rec(pl);
-        if (rec.parent == dom.no_place or rec.step < dom.index_step or rec.step >= dom.len_step) return out;
+        if (rec.parent == dom.no_place or rec.step < dom.index_step or rec.step >= dom.len_step or !r.places.indexed.contains(rec.parent)) return out;
         if (rec.step == dom.elem_step) {
             for (st.mem.keys(), st.mem.values()) |key, v| {
                 const k = r.places.rec(key);
@@ -1339,7 +1339,7 @@ pub const Run = struct {
         // Elements and lengths may be the same memory as other places: no constant is followed there.
         if (r.indexed(pl)) stored.con = null;
         st.forget(&r.places, pl);
-        try st.touched.put(r.arena, pl, {});
+        if (r.pointerRooted(pl)) try st.touched.put(r.arena, pl, {});
         if (r.paramOf(pl) != null) for (val.ids.ids) |id| if (r.identRec(id).kind == .heap) try r.holder_of.put(r.arena, id, pl);
         const gop = try st.mem.getOrPut(r.arena, pl);
         // A place that was never written holds something unknown: a weak write does not make it a constant.

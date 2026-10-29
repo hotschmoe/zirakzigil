@@ -241,7 +241,7 @@ fn forgetScalars(r: *Run, st: *State, args: []const Val, tys: []const schema.Typ
         if (!r.ty.isPointer(t)) continue;
         const pl = a.place orelse continue;
         st.forget(&r.places, pl);
-        try st.touched.put(r.arena, pl, {});
+        if (r.pointerRooted(pl)) try st.touched.put(r.arena, pl, {});
         for (st.mem.keys(), st.mem.values()) |key, *v| if (r.places.contains(pl, key)) {
             v.con = null;
         };
