@@ -71,8 +71,17 @@ pub fn governed(comptime witness: type) Governed {
 
 pub const Governed = struct { witness: type };
 
+/// One classified function: its qualified name (`wire.tcp.Repr.parse`, spelled
+/// as `@typeName` of its container) and the level the manifest claims for it.
+pub const Claim = struct {
+    name: []const u8,
+    level: Level,
+};
+
 pub const Audit = struct {
     counts: Counts = .{},
+    /// Every classified function reached by the walk, in declaration order.
+    claims: []const Claim = &.{},
     /// Empty when the module satisfies the manifest rules; otherwise the
     /// first violation, phrased as the compile error `requireAssurance` raises.
     problem: []const u8 = "",
@@ -101,12 +110,13 @@ pub fn audit(comptime M: type, comptime floor: Level) Audit {
                 "Add `pub const assurance = .{ .some_fn = .tested };` listing every pub fn, then " ++
                 "`comptime { zv.requireAssurance(@This(), .tested); }`" };
         const w = walk(M, M.assurance, floor, &.{});
-        break :blk .{ .counts = w.counts, .problem = w.problem };
+        break :blk .{ .counts = w.counts, .claims = w.claims, .problem = w.problem };
     };
 }
 
 const Walk = struct {
     counts: Counts = .{},
+    claims: []const Claim = &.{},
     problem: []const u8 = "",
     /// Types already visited, so aliases and cycles are counted once.
     seen: []const type = &.{},
@@ -190,6 +200,7 @@ fn walk(comptime T: type, comptime manifest: anytype, comptime floor: Level, com
                     switch (level) {
                         inline else => |l| @field(w.counts, @tagName(l)) += 1,
                     }
+                    w.claims = w.claims ++ [_]Claim{.{ .name = where ++ "." ++ name, .level = level }};
                 },
                 .governed => {
                     if (!makes_type)
@@ -251,6 +262,7 @@ fn walk(comptime T: type, comptime manifest: anytype, comptime floor: Level, com
 fn merge(comptime parent: Walk, comptime child: Walk) Walk {
     return .{
         .counts = parent.counts.add(child.counts),
+        .claims = parent.claims ++ child.claims,
         .problem = child.problem,
         .seen = child.seen,
     };

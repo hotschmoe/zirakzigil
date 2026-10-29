@@ -334,6 +334,9 @@ pub const Bytes = laws.Bytes;
 /// Host-side assurance table for `zig build assurance` (see `report.zig`).
 pub const report = @import("report.zig");
 
+/// Function-level execution evidence, planted by the build (see `cover.zig`).
+pub const cover = @import("cover.zig");
+
 test {
     _ = manifest;
     _ = laws;

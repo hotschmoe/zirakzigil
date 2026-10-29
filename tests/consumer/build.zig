@@ -32,7 +32,13 @@ pub fn build(b: *std.Build) void {
             .{ .name = "consumer", .module = lib },
         },
     }) });
-    b.step("assurance", "Print the per-module assurance table").dependOn(&b.addRunArtifact(report).step);
+    // The Phase 0 gate: every classified function must be executed by a law or scenario.
+    _ = zirakzigil.addAssuranceGate(b, .{
+        .report = report,
+        .src = b.path("src"),
+        .lib_name = "consumer",
+        .laws = &.{ "seq.zig", "laws.zig" },
+    });
 
     // One line for every optimize mode, ghost on and off, plus freestanding checks.
     _ = zirakzigil.addTestMatrix(b, .{
