@@ -43,12 +43,12 @@ jobs:
         id: oracle
         run: |
           set -o pipefail
-          tools/check_corpus.sh compiler/.work/zig-air/zig-out/bin/zig-zv-air 2>&1 | tee -a canary.log
+          sh tools/check_corpus.sh compiler/.work/zig-air/zig-out/bin/zig-zv-air 2>&1 | tee -a canary.log
       - name: Cache scenarios
         id: cache
         run: |
           set -o pipefail
-          tools/check_cache.sh compiler/.work/zig-air/zig-out/bin/zig-zv-air 2>&1 | tee -a canary.log
+          sh tools/check_cache.sh compiler/.work/zig-air/zig-out/bin/zig-zv-air 2>&1 | tee -a canary.log
       - name: Open an issue on failure
         if: failure()
         env:
