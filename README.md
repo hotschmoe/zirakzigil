@@ -130,11 +130,11 @@ The prototype was first built on Zig 0.16.0. Porting it to 0.17 took four mechan
 
 ### What `zvc` understands today
 
-Integers of any width, bool, slices and arrays of integers, optionals, structs by value, locals in memory cells, `if`, `while` and `for` (loops are cut at `zv.invariant`), arithmetic, bit and shift operations, casts, and the safety checks Zig inserts (overflow, bounds, division, unwrap, `unreachable`, `@panic`). Anything else is reported **UNPROVEN** with its position and the reason, never silently accepted. Termination is not checked yet and calls are not yet modular. Details in [`docs/phase2.md`](docs/phase2.md).
+Integers of any width, bool, slices and arrays of integers, optionals, structs by value, locals in memory cells, `if`, `while` and `for` (loops are cut at `zv.invariant`), arithmetic, bit and shift operations, casts, and the safety checks Zig inserts (overflow, bounds, division, unwrap, `unreachable`, `@panic`). Anything else is reported **UNPROVEN** with its position and the reason, never silently accepted. Calls between `.verified` functions go through their contracts; loops can state a measure with `zv.decreases` and ghost `zv.Int` and `zv.Seq` write specifications that cannot wrap. Details in [`docs/phase2.md`](docs/phase2.md).
 
 ## Limits, honestly
 
-- `zvc` proves partial correctness over a fragment of AIR: calls between functions, termination, ghost integers and sequences, and pointers other than to locals are not covered yet, and a counterexample that passes through a loop cut by its invariant may not be a real execution.
+- `zvc` covers a fragment of AIR: pointers other than to locals, floats, enums, unions and recursion are reported UNPROVEN. A loop with no `zv.decreases` is proved only for partial correctness (`--total` refuses it), and a counterexample that passes through a loop cut by its invariant may not be a real execution.
 - Ownership is enforced only at runtime. The static checker `zv-own` is designed but not built.
 - The `Linear` ledger is a fixed 16K-slot global with no thread safety. It is fine for tests, not for production.
 

@@ -36,6 +36,14 @@ pub const Field = struct { index: u32, value: Value };
 pub const Obj = struct {
     base: ?[]const u8,
     fields: []const Field,
+    /// The struct type, when known: it names the fields.
+    ty: schema.TypeId = .none,
+};
+
+/// Finds the declared name of field `index` of a struct type, from wherever the source is.
+pub const FieldNames = struct {
+    context: *anyopaque,
+    lookup: *const fn (context: *anyopaque, type_name: []const u8, index: u32) ?[]const u8,
 };
 
 pub const Opt = struct { has: Term, payload: Value };
@@ -55,6 +63,9 @@ pub const Value = union(enum) {
 };
 
 pub const IntInfo = struct { bits: u16, signed: bool };
+
+/// A field of a symbolic struct that was created because something read it.
+pub const Lazy = struct { base: []const u8, index: u32, value: Value };
 
 pub const error_bits = 16;
 
@@ -76,11 +87,20 @@ pub const Ctx = struct {
     pack: *const schema.Pack,
     arena: Allocator,
     inputs: std.ArrayList(Input) = .empty,
+    lazy: std.ArrayList(Lazy) = .empty,
     reason: []const u8 = "",
+    /// Prefixed to the name of every input variable, so functions sharing a pool never share a variable.
+    prefix: []const u8 = "",
+    field_names: ?FieldNames = null,
 
     pub fn unsupported(c: *Ctx, comptime fmt: []const u8, args: anytype) error{Unsupported} {
         c.reason = std.fmt.allocPrint(c.arena, fmt, args) catch "out of memory";
         return error.Unsupported;
+    }
+
+    pub fn named(c: *Ctx, name: []const u8, sort: Sort) Allocator.Error!Term {
+        if (c.prefix.len == 0) return c.pool.variable(name, sort);
+        return c.pool.variable(try std.fmt.allocPrint(c.arena, "{s}{s}", .{ c.prefix, name }), sort);
     }
 
     pub fn typeRec(c: *const Ctx, id: schema.TypeId) schema.TypeRec {
@@ -116,47 +136,57 @@ pub const Ctx = struct {
 
     /// An unconstrained value of type `id`. `record` adds the scalars to the counterexample inputs.
     pub fn symbolic(c: *Ctx, name: []const u8, id: schema.TypeId, record: bool) Error!Value {
+        return c.symbolicShown(name, name, id, record);
+    }
+
+    fn addInput(c: *Ctx, input: Input) Allocator.Error!void {
+        for (c.inputs.items) |x| if (std.mem.eql(u8, x.name, input.name)) return;
+        try c.inputs.append(c.arena, input);
+    }
+
+    /// `name` names the variables; `shown` is what a counterexample calls them.
+    fn symbolicShown(c: *Ctx, name: []const u8, shown: []const u8, id: schema.TypeId, record: bool) Error!Value {
         const t = c.typeRec(id);
         switch (t.kind) {
             .bool => {
-                const v = try c.pool.variable(name, .bool);
-                if (record) try c.inputs.append(c.arena, .{ .name = name, .kind = .{ .bool = v } });
+                const v = try c.named(name, .bool);
+                if (record) try c.addInput(.{ .name = shown, .kind = .{ .bool = v } });
                 return .{ .scalar = v };
             },
             .int => {
                 const info = c.intInfo(id) orelse return c.unsupported("integer type {s}", .{c.typeName(id)});
-                const v = try c.pool.variable(name, .{ .bv = info.bits });
-                if (record) try c.inputs.append(c.arena, .{ .name = name, .kind = .{ .int = .{ .term = v, .signed = info.signed } } });
+                const v = try c.named(name, .{ .bv = info.bits });
+                if (record) try c.addInput(.{ .name = shown, .kind = .{ .int = .{ .term = v, .signed = info.signed } } });
                 return .{ .scalar = v };
             },
             .pointer => {
                 if (t.flags.size != .slice) return c.unsupported("pointer type {s}", .{c.typeName(id)});
                 const elem = c.intInfo(t.child) orelse return c.unsupported("slice of {s}", .{c.typeName(t.child)});
-                const len = try c.pool.variable(try std.fmt.allocPrint(c.arena, "{s}.len", .{name}), .{ .bv = 64 });
-                const mem = try c.pool.variable(try std.fmt.allocPrint(c.arena, "{s}.mem", .{name}), .{ .array = .{ .idx = 64, .elem = elem.bits } });
-                if (record) try c.inputs.append(c.arena, .{ .name = name, .kind = .{ .slice = .{ .len = len, .mem = mem, .signed = elem.signed, .bits = elem.bits } } });
+                const len = try c.named(try std.fmt.allocPrint(c.arena, "{s}.len", .{name}), .{ .bv = 64 });
+                const mem = try c.named(try std.fmt.allocPrint(c.arena, "{s}.mem", .{name}), .{ .array = .{ .idx = 64, .elem = elem.bits } });
+                if (record) try c.addInput(.{ .name = shown, .kind = .{ .slice = .{ .len = len, .mem = mem, .signed = elem.signed, .bits = elem.bits } } });
                 return .{ .slice = .{ .mem = mem, .off = try c.pool.bv(64, 0), .len = len } };
             },
             .array => {
                 const elem = c.intInfo(t.child) orelse return c.unsupported("array of {s}", .{c.typeName(t.child)});
-                const mem = try c.pool.variable(try std.fmt.allocPrint(c.arena, "{s}.mem", .{name}), .{ .array = .{ .idx = 64, .elem = elem.bits } });
-                if (record) try c.inputs.append(c.arena, .{ .name = name, .kind = .{ .array = .{ .mem = mem, .len = t.len, .signed = elem.signed } } });
+                const mem = try c.named(try std.fmt.allocPrint(c.arena, "{s}.mem", .{name}), .{ .array = .{ .idx = 64, .elem = elem.bits } });
+                if (record) try c.addInput(.{ .name = shown, .kind = .{ .array = .{ .mem = mem, .len = t.len, .signed = elem.signed } } });
                 return .{ .array = .{ .mem = mem, .len = t.len } };
             },
             .optional => {
-                const has = try c.pool.variable(try std.fmt.allocPrint(c.arena, "{s}.has", .{name}), .bool);
-                if (record) try c.inputs.append(c.arena, .{ .name = try std.fmt.allocPrint(c.arena, "{s}.has", .{name}), .kind = .{ .bool = has } });
-                const payload = try c.symbolic(try std.fmt.allocPrint(c.arena, "{s}.val", .{name}), t.child, record);
+                const has = try c.named(try std.fmt.allocPrint(c.arena, "{s}.has", .{name}), .bool);
+                if (record) try c.addInput(.{ .name = try std.fmt.allocPrint(c.arena, "{s}.has", .{shown}), .kind = .{ .bool = has } });
+                const payload = try c.symbolicShown(try std.fmt.allocPrint(c.arena, "{s}.val", .{name}), try std.fmt.allocPrint(c.arena, "{s}.val", .{shown}), t.child, record);
                 return .{ .opt = try c.create(Opt, .{ .has = has, .payload = payload }) };
             },
             .error_union => {
-                const is_err = try c.pool.variable(try std.fmt.allocPrint(c.arena, "{s}.is_err", .{name}), .bool);
-                if (record) try c.inputs.append(c.arena, .{ .name = try std.fmt.allocPrint(c.arena, "{s}.is_err", .{name}), .kind = .{ .bool = is_err } });
-                const err = try c.pool.variable(try std.fmt.allocPrint(c.arena, "{s}.err", .{name}), .{ .bv = error_bits });
-                const payload: Value = if (c.typeRec(t.child).kind == .void) .none else try c.symbolic(try std.fmt.allocPrint(c.arena, "{s}.val", .{name}), t.child, record);
+                const is_err = try c.named(try std.fmt.allocPrint(c.arena, "{s}.is_err", .{name}), .bool);
+                if (record) try c.addInput(.{ .name = try std.fmt.allocPrint(c.arena, "{s}.is_err", .{shown}), .kind = .{ .bool = is_err } });
+                const err = try c.named(try std.fmt.allocPrint(c.arena, "{s}.err", .{name}), .{ .bv = error_bits });
+                const payload: Value = if (c.typeRec(t.child).kind == .void) .none else try c.symbolicShown(try std.fmt.allocPrint(c.arena, "{s}.val", .{name}), try std.fmt.allocPrint(c.arena, "{s}.val", .{shown}), t.child, record);
                 return .{ .eu = try c.create(Eu, .{ .is_err = is_err, .err = err, .payload = payload }) };
             },
-            .@"struct" => return .{ .obj = try c.create(Obj, .{ .base = name, .fields = &.{} }) },
+            .@"struct" => return .{ .obj = try c.create(Obj, .{ .base = name, .fields = &.{}, .ty = id }) },
             .void => return .none,
             else => return c.unsupported("type {s} ({t})", .{ c.typeName(id), t.kind }),
         }
@@ -194,7 +224,25 @@ pub const Ctx = struct {
         const base = o.base orelse return c.unsupported("field {d} of an aggregate that never set it", .{index});
         const ty = like orelse return c.unsupported("field {d} read without a type", .{index});
         const name = try std.fmt.allocPrint(c.arena, "{s}.{d}", .{ base, index });
-        return c.symbolic(name, ty, o.base != null and std.mem.indexOfScalar(u8, base, '!') == null);
+        const shown = try c.shownName(o, base, index);
+        const made = try c.symbolicShown(name, shown, ty, std.mem.indexOfScalar(u8, base, '!') == null);
+        try c.lazy.append(c.arena, .{ .base = base, .index = index, .value = made });
+        return made;
+    }
+
+    fn shownName(c: *Ctx, o: *const Obj, base: []const u8, index: u32) Allocator.Error![]const u8 {
+        if (c.field_names) |h| if (o.ty != .none) if (h.lookup(h.context, c.typeName(o.ty), index)) |field_name|
+            return std.fmt.allocPrint(c.arena, "{s}.{s}", .{ base, field_name });
+        return std.fmt.allocPrint(c.arena, "{s}.{d}", .{ base, index });
+    }
+
+    /// Field `index` of `o`; one that nothing set is a symbolic value of the shape of `like`.
+    pub fn fieldShaped(c: *Ctx, o: *const Obj, index: u32, like: Value) Error!Value {
+        for (o.fields) |f| if (f.index == index) return f.value;
+        const base = o.base orelse return c.unsupported("field {d} of an aggregate that never set it", .{index});
+        const made = try c.havocNamed(try std.fmt.allocPrint(c.arena, "{s}.{d}", .{ base, index }), like);
+        try c.lazy.append(c.arena, .{ .base = base, .index = index, .value = made });
+        return made;
     }
 
     pub fn withField(c: *Ctx, o: *const Obj, index: u32, v: Value) Allocator.Error!Value {
@@ -214,7 +262,7 @@ pub const Ctx = struct {
             n += 1;
         }
         if (!placed) fields[n] = .{ .index = index, .value = v };
-        return .{ .obj = try c.create(Obj, .{ .base = o.base, .fields = fields }) };
+        return .{ .obj = try c.create(Obj, .{ .base = o.base, .fields = fields, .ty = o.ty }) };
     }
 
     fn find(_: *Ctx, o: *const Obj, index: u32) ?usize {
@@ -264,7 +312,7 @@ pub const Ctx = struct {
                     const yv = try c.fieldLike(y, i, x);
                     try fields.append(c.arena, .{ .index = i, .value = try c.merge(cond, xv, yv) });
                 }
-                return .{ .obj = try c.create(Obj, .{ .base = x.base, .fields = fields.items }) };
+                return .{ .obj = try c.create(Obj, .{ .base = x.base, .fields = fields.items, .ty = x.ty }) };
             },
             .opt => |x| return .{ .opt = try c.create(Opt, .{
                 .has = try p.ite(cond, x.has, b.opt.has),
@@ -289,13 +337,13 @@ pub const Ctx = struct {
     }
 
     /// Like `havoc`, but the variables are the named ones, so repeated reads agree.
-    fn havocNamed(c: *Ctx, name: []const u8, like: Value) Error!Value {
+    pub fn havocNamed(c: *Ctx, name: []const u8, like: Value) Error!Value {
         const p = c.pool;
         switch (like) {
             .none => return .none,
-            .scalar => |t| return .{ .scalar = try p.variable(name, p.sortOf(t)) },
+            .scalar => |t| return .{ .scalar = try c.named(name, p.sortOf(t)) },
             .opt => |o| return .{ .opt = try c.create(Opt, .{
-                .has = try p.variable(try std.fmt.allocPrint(c.arena, "{s}.has", .{name}), .bool),
+                .has = try c.named(try std.fmt.allocPrint(c.arena, "{s}.has", .{name}), .bool),
                 .payload = try c.havocNamed(try std.fmt.allocPrint(c.arena, "{s}.val", .{name}), o.payload),
             }) },
             .obj => return .{ .obj = try c.create(Obj, .{ .base = name, .fields = &.{} }) },

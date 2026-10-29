@@ -8,12 +8,14 @@ const assert = std.debug.assert;
 
 pub const Term = enum(u32) { _ };
 
+/// Width of the ghost integer `zv.Int`: the largest literal and the width every ghost value has.
+pub const ghost_bits = 256;
+
 pub const Sort = union(enum) {
     bool,
     bv: u16,
-    int,
     array: struct { idx: u16, elem: u16 },
-    /// A sequence of unbounded integers (ghost).
+    /// A sequence of ghost integers, which are `ghost_bits` wide.
     seq,
 
     pub fn eql(a: Sort, b: Sort) bool {
@@ -53,16 +55,6 @@ pub const Op = enum {
     concat,
     select,
     store,
-    iadd,
-    isub,
-    imul,
-    idiv,
-    imod,
-    ineg,
-    ilt,
-    ile,
-    bv2nat,
-    int2bv,
     seq_empty,
     seq_unit,
     seq_concat,
@@ -86,8 +78,7 @@ pub const App = struct {
 
 pub const Node = union(enum) {
     bool_lit: bool,
-    bv_lit: struct { bits: u16, value: u128 },
-    int_lit: i128,
+    bv_lit: struct { bits: u16, value: u256 },
     variable: struct { name: u32, sort: Sort },
     app: App,
 };
@@ -103,14 +94,14 @@ const NodeContext = struct {
     }
 };
 
-pub fn mask(bits: u16) u128 {
-    return if (bits >= 128) std.math.maxInt(u128) else (@as(u128, 1) << @intCast(bits)) - 1;
+pub fn mask(bits: u16) u256 {
+    return if (bits >= 128) std.math.maxInt(u256) else (@as(u256, 1) << @intCast(bits)) - 1;
 }
 
-pub fn signed(bits: u16, value: u128) i128 {
+pub fn signed(bits: u16, value: u256) i256 {
     if (bits >= 128) return @bitCast(value);
     const shift: u7 = @intCast(128 - bits);
-    return @as(i128, @bitCast(value << shift)) >> shift;
+    return @as(i256, @bitCast(value << shift)) >> shift;
 }
 
 pub const Pool = struct {
@@ -151,7 +142,6 @@ pub const Pool = struct {
         return switch (p.node(t)) {
             .bool_lit => .bool,
             .bv_lit => |l| .{ .bv = l.bits },
-            .int_lit => .int,
             .variable => |v| v.sort,
             .app => |a| a.sort,
         };
@@ -180,16 +170,12 @@ pub const Pool = struct {
         return p.intern(.{ .bool_lit = b });
     }
 
-    pub fn bv(p: *Pool, bits: u16, value: u128) Allocator.Error!Term {
+    pub fn bv(p: *Pool, bits: u16, value: u256) Allocator.Error!Term {
         return p.intern(.{ .bv_lit = .{ .bits = bits, .value = value & mask(bits) } });
     }
 
-    pub fn bvSigned(p: *Pool, bits: u16, value: i128) Allocator.Error!Term {
+    pub fn bvSigned(p: *Pool, bits: u16, value: i256) Allocator.Error!Term {
         return p.bv(bits, @bitCast(value));
-    }
-
-    pub fn int(p: *Pool, value: i128) Allocator.Error!Term {
-        return p.intern(.{ .int_lit = value });
     }
 
     pub fn variable(p: *Pool, var_name: []const u8, sort: Sort) Allocator.Error!Term {
@@ -224,16 +210,9 @@ pub const Pool = struct {
         };
     }
 
-    pub fn bvValue(p: *const Pool, t: Term) ?u128 {
+    pub fn bvValue(p: *const Pool, t: Term) ?u256 {
         return switch (p.node(t)) {
             .bv_lit => |l| l.value,
-            else => null,
-        };
-    }
-
-    pub fn intValue(p: *const Pool, t: Term) ?i128 {
-        return switch (p.node(t)) {
-            .int_lit => |v| v,
             else => null,
         };
     }
@@ -324,7 +303,6 @@ pub const Pool = struct {
         switch (p.node(a)) {
             .bool_lit => |x| return if (x) b else p.not(b),
             .bv_lit => |x| if (p.node(b) == .bv_lit) return p.boolean(x.value == p.node(b).bv_lit.value),
-            .int_lit => |x| if (p.node(b) == .int_lit) return p.boolean(x == p.node(b).int_lit),
             else => {},
         }
         if (p.node(b) == .bool_lit) return p.eq(b, a);
@@ -376,7 +354,7 @@ pub const Pool = struct {
         return p.app2(op, .{ .bv = bits }, a, b);
     }
 
-    fn foldBin(op: Op, bits: u16, x: u128, y: u128) ?u128 {
+    fn foldBin(op: Op, bits: u16, x: u256, y: u256) ?u256 {
         const m = mask(bits);
         return switch (op) {
             .add => (x +% y) & m,
@@ -388,13 +366,13 @@ pub const Pool = struct {
                 const sx = signed(bits, x);
                 const sy = signed(bits, y);
                 if (sy == 0 or sy == -1) break :blk null;
-                break :blk @as(u128, @bitCast(@divTrunc(sx, sy))) & m;
+                break :blk @as(u256, @bitCast(@divTrunc(sx, sy))) & m;
             },
             .srem => blk: {
                 const sx = signed(bits, x);
                 const sy = signed(bits, y);
                 if (sy == 0 or sy == -1) break :blk null;
-                break :blk @as(u128, @bitCast(@rem(sx, sy))) & m;
+                break :blk @as(u256, @bitCast(@rem(sx, sy))) & m;
             },
             .band => x & y,
             .bor => x | y,
@@ -404,7 +382,7 @@ pub const Pool = struct {
             .ashr => blk: {
                 const sx = signed(bits, x);
                 const sh: u7 = if (y >= bits) @intCast(@min(bits - 1, 127)) else @intCast(y);
-                break :blk @as(u128, @bitCast(sx >> sh)) & m;
+                break :blk @as(u256, @bitCast(sx >> sh)) & m;
             },
             else => null,
         };
@@ -442,7 +420,7 @@ pub const Pool = struct {
         const bits = p.bitsOf(a);
         if (to == bits) return a;
         assert(to > bits);
-        if (p.bvValue(a)) |x| return p.bv(to, x);
+        if (to <= 256) if (p.bvValue(a)) |x| return p.bv(to, x);
         return p.app1(.zext, .{ .bv = to }, a, to - bits, 0);
     }
 
@@ -450,7 +428,7 @@ pub const Pool = struct {
         const bits = p.bitsOf(a);
         if (to == bits) return a;
         assert(to > bits);
-        if (p.bvValue(a)) |x| return p.bvSigned(to, signed(bits, x));
+        if (to <= 256) if (p.bvValue(a)) |x| return p.bvSigned(to, signed(bits, x));
         return p.app1(.sext, .{ .bv = to }, a, to - bits, 0);
     }
 
@@ -486,40 +464,31 @@ pub const Pool = struct {
         return p.app3(.store, p.sortOf(arr), arr, idx, v);
     }
 
-    // Unbounded integers (ghost).
-
-    pub fn ibin(p: *Pool, op: Op, a: Term, b: Term) Allocator.Error!Term {
-        if (p.intValue(a)) |x| if (p.intValue(b)) |y| switch (op) {
-            .iadd => return p.int(x + y),
-            .isub => return p.int(x - y),
-            .imul => return p.int(x * y),
-            .idiv => if (y != 0) return p.int(@divFloor(x, y)),
-            .imod => if (y != 0) return p.int(@mod(x, y)),
-            .ilt => return p.boolean(x < y),
-            .ile => return p.boolean(x <= y),
-            else => unreachable,
+    /// The application `a` with other operands, through the constructors, so it folds again.
+    pub fn rebuild(p: *Pool, a: App, args: []const Term) Allocator.Error!Term {
+        return switch (a.op) {
+            .not => p.not(args[0]),
+            .@"and" => p.@"and"(args[0], args[1]),
+            .@"or" => p.@"or"(args[0], args[1]),
+            .ite => p.ite(args[0], args[1], args[2]),
+            .eq => p.eq(args[0], args[1]),
+            .add, .sub, .mul, .udiv, .urem, .sdiv, .srem, .smod, .band, .bor, .bxor, .shl, .lshr, .ashr => p.bin(a.op, args[0], args[1]),
+            .neg => p.neg(args[0]),
+            .bnot => p.bnot(args[0]),
+            .ult, .ule, .slt, .sle => p.cmp(a.op, args[0], args[1]),
+            .zext => p.zext(args[0], p.bitsOf(args[0]) + a.p),
+            .sext => p.sext(args[0], p.bitsOf(args[0]) + a.p),
+            .extract => p.extract(args[0], a.p, a.q),
+            .concat => p.concat(args[0], args[1]),
+            .select => p.select(args[0], args[1]),
+            .store => p.store(args[0], args[1], args[2]),
+            .seq_empty => p.seqEmpty(),
+            .seq_unit => p.seqUnit(args[0]),
+            .seq_concat => p.seqConcat(args[0], args[1]),
+            .seq_len => p.seqLen(args[0]),
+            .seq_at => p.seqAt(args[0], args[1]),
+            .seq_extract => p.seqExtract(args[0], args[1], args[2]),
         };
-        const sort: Sort = switch (op) {
-            .ilt, .ile => .bool,
-            else => .int,
-        };
-        return p.app2(op, sort, a, b);
-    }
-
-    pub fn ineg(p: *Pool, a: Term) Allocator.Error!Term {
-        if (p.intValue(a)) |x| return p.int(-x);
-        return p.app1(.ineg, .int, a, 0, 0);
-    }
-
-    pub fn bv2nat(p: *Pool, a: Term, is_signed: bool) Allocator.Error!Term {
-        const bits = p.bitsOf(a);
-        if (p.bvValue(a)) |x| return p.int(if (is_signed) signed(bits, x) else @intCast(x));
-        return p.app1(.bv2nat, .int, a, @intFromBool(is_signed), 0);
-    }
-
-    pub fn int2bv(p: *Pool, a: Term, bits: u16) Allocator.Error!Term {
-        if (p.intValue(a)) |x| return p.bvSigned(bits, x);
-        return p.app1(.int2bv, .{ .bv = bits }, a, bits, 0);
     }
 
     // Sequences (ghost), of unbounded integers.
@@ -539,18 +508,61 @@ pub const Pool = struct {
     }
 
     pub fn seqLen(p: *Pool, a: Term) Allocator.Error!Term {
-        if (p.isOp(a, .seq_empty) != null) return p.int(0);
-        if (p.isOp(a, .seq_unit) != null) return p.int(1);
-        return p.app1(.seq_len, .int, a, 0, 0);
+        if (p.isOp(a, .seq_empty) != null) return p.bv(ghost_bits, 0);
+        if (p.isOp(a, .seq_unit) != null) return p.bv(ghost_bits, 1);
+        return p.app1(.seq_len, .{ .bv = ghost_bits }, a, 0, 0);
     }
 
     pub fn seqAt(p: *Pool, a: Term, i: Term) Allocator.Error!Term {
-        if (p.isOp(a, .seq_unit)) |u| if (p.intValue(i) == 0) return u.args[0];
-        return p.app2(.seq_at, .int, a, i);
+        if (p.isOp(a, .seq_unit)) |u| if (p.bvValue(i) == 0) return u.args[0];
+        return p.app2(.seq_at, .{ .bv = ghost_bits }, a, i);
     }
 
     /// `a[off .. off + len]`.
     pub fn seqExtract(p: *Pool, a: Term, off: Term, len: Term) Allocator.Error!Term {
         return p.app3(.seq_extract, .seq, a, off, len);
+    }
+};
+
+/// How a callee's terms read at a call site: parameters become arguments, internal fresh variables become
+/// fresh variables of the call, and reads of a callee slice become reads of the caller's slice at its offset.
+pub const Subst = struct {
+    pool: *Pool,
+    /// For the maps; a call's substitution is dropped with the arena of the run.
+    alloc: Allocator,
+    map: std.AutoHashMapUnmanaged(Term, Term) = .empty,
+    arrays: std.AutoHashMapUnmanaged(Term, ArrayBinding) = .empty,
+    memo: std.AutoHashMapUnmanaged(Term, Term) = .empty,
+    /// Give the callee's internal variables (named with `!`) fresh names, one per call.
+    rename_fresh: bool = true,
+
+    pub const ArrayBinding = struct { mem: Term, off: Term };
+
+    pub const Error = Allocator.Error || error{UnboundArray};
+
+    pub fn apply(s: *Subst, t: Term) Error!Term {
+        const pool = s.pool;
+        if (s.map.get(t)) |m| return m;
+        if (s.memo.get(t)) |m| return m;
+        const out: Term = switch (pool.node(t)) {
+            .bool_lit, .bv_lit => t,
+            .variable => |v| blk: {
+                const name = pool.name(v.name);
+                if (s.arrays.contains(t)) return error.UnboundArray;
+                if (!s.rename_fresh or std.mem.indexOfScalar(u8, name, '!') == null) break :blk t;
+                break :blk try pool.fresh(name[0..std.mem.indexOfScalar(u8, name, '!').?], v.sort);
+            },
+            .app => |a| blk: {
+                if (a.op == .select) if (s.arrays.get(a.args[0])) |b| {
+                    const idx = try s.apply(a.args[1]);
+                    break :blk try pool.select(b.mem, try pool.bin(.add, b.off, idx));
+                };
+                var args: [3]Term = undefined;
+                for (a.operands(), 0..) |arg, i| args[i] = try s.apply(arg);
+                break :blk try pool.rebuild(a, args[0..a.len]);
+            },
+        };
+        try s.memo.put(s.alloc, t, out);
+        return out;
     }
 };

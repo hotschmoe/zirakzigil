@@ -29,9 +29,13 @@ pub const Kind = enum {
     shift,
     panic,
     unreachable_code,
+    precondition,
     postcondition,
     invariant_entry,
     invariant_step,
+    termination,
+    /// The specification itself is ill-defined: it does not count as the function doing something first.
+    ghost,
     other,
 };
 
@@ -68,13 +72,44 @@ const State = struct {
 
 const Incoming = struct { state: State, value: Value };
 
+/// An `ensures` call: what it promised and the value it returns.
+pub const Site = struct { ok: Term, value: Value };
+
+const Return = struct { state: State, value: Value, site: ?Site };
+
 const BlockCtx = struct { incoming: std.ArrayList(Incoming) = .empty };
 
+/// What the head of a loop body states: invariants (a condition) and decreasing measures (a term).
+const Collected = struct { id: u32, kind: enum { invariant, decreases }, term: Term, ghost: bool = false };
+
 const LoopCtx = struct {
-    invariants: []const Collected,
+    head: []const Collected,
 };
 
-const Collected = struct { id: u32, ok: Term };
+/// What a caller may use of a function: its precondition on the parameters, and a postcondition on the
+/// parameters and the result placeholder, each in terms of this function's own variables.
+pub const Summary = struct {
+    name: []const u8,
+    params: []const Value,
+    lazy: []const value.Lazy,
+    pre: Term,
+    post: Term,
+    result: Value,
+};
+
+/// How a run finds the summary of a function it calls.
+pub const Hooks = struct {
+    context: *anyopaque,
+    summaryFn: *const fn (context: *anyopaque, caller: *Vc, name: []const u8) Error!*const Summary,
+};
+
+pub const Options = struct {
+    param_names: []const []const u8 = &.{},
+    /// Prefixed to the variables of the parameters: functions share one pool and must not share a variable.
+    prefix: []const u8 = "",
+    hooks: ?Hooks = null,
+    field_names: ?value.FieldNames = null,
+};
 
 const Stop = error{StopPure};
 
@@ -95,14 +130,24 @@ pub const Vc = struct {
     cell_signed: std.ArrayList(bool) = .empty,
     blocks: std.AutoHashMapUnmanaged(u32, *BlockCtx) = .empty,
     loops: std.AutoHashMapUnmanaged(u32, *LoopCtx) = .empty,
-    head_invariants: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    head_ids: std.AutoHashMapUnmanaged(u32, void) = .empty,
     obligations: std.ArrayList(Obligation) = .empty,
-    returns: std.ArrayList(Incoming) = .empty,
+    returns: std.ArrayList(Return) = .empty,
+    sites: std.AutoHashMapUnmanaged(u32, Site) = .empty,
+    param_values: std.ArrayList(Value) = .empty,
+    pre: Term,
+    hooks: ?Hooks,
+    inline_names: std.ArrayList([]const u8) = .empty,
+    /// Loops that state no measure, so nothing shows that they stop.
+    unbounded_loops: std.ArrayList(schema.LocId) = .empty,
     unsupported: ?Unsupported = null,
     loc: schema.LocId = .none,
 
     pure: bool = false,
     pure_seen: bool = false,
+    /// How many contracts the head being collected has: the collection stops after the last one.
+    pure_target: usize = 0,
+    pure_base: usize = 0,
     collected: std.ArrayList(Collected) = .empty,
     obligations_seen: bool = false,
 
@@ -110,18 +155,20 @@ pub const Vc = struct {
         return v.ctx.arena;
     }
 
-    pub fn init(gpa: Allocator, arena_alloc: Allocator, pool: *Pool, pack: *const schema.Pack, func: schema.Func, param_names: []const []const u8) Allocator.Error!Vc {
+    pub fn init(gpa: Allocator, arena_alloc: Allocator, pool: *Pool, pack: *const schema.Pack, func: schema.Func, options: Options) Allocator.Error!Vc {
         var max_id: u32 = 0;
         scanMax(pack, pack.instsOf(func.insts), &max_id);
         const by_id = try arena_alloc.alloc(?*const Inst, max_id + 1);
         @memset(by_id, null);
         var v: Vc = .{
             .gpa = gpa,
-            .ctx = .{ .pool = pool, .pack = pack, .arena = arena_alloc },
+            .ctx = .{ .pool = pool, .pack = pack, .arena = arena_alloc, .prefix = options.prefix, .field_names = options.field_names },
             .pool = pool,
             .pack = pack,
             .func = func,
-            .param_names = param_names,
+            .param_names = options.param_names,
+            .pre = try pool.tru(),
+            .hooks = options.hooks,
             .by_id = by_id,
             .values = try arena_alloc.alloc(Value, max_id + 1),
         };
@@ -177,8 +224,10 @@ pub const Vc = struct {
         for (v.pack.instsOf(v.func.insts)) |*inst| {
             if (inst.tag != .arg) break;
             const index = v.attrInt(inst, .index) orelse return v.ctx.unsupported("argument without an index", .{});
-            const name = if (index < v.param_names.len) v.param_names[index] else try std.fmt.allocPrint(v.arena(), "arg{d}", .{index});
+            const given = if (index < v.param_names.len) v.param_names[index] else "_";
+            const name = if (std.mem.eql(u8, given, "_")) try std.fmt.allocPrint(v.arena(), "arg{d}", .{index}) else given;
             const val = try v.ctx.symbolic(name, params[index].ty, true);
+            try v.param_values.append(v.arena(), val);
             v.values[inst.id] = val;
             st.pc = try pool.@"and"(st.pc, try v.boundsOf(val, params[index].ty));
         }
@@ -269,12 +318,21 @@ pub const Vc = struct {
                 const payload = try v.ctx.symbolic("null.payload", t.child, false);
                 return .{ .opt = try v.ctx.create(value.Opt, .{ .has = try pool.fls(), .payload = payload }) };
             },
-            .@"error" => {
-                return .{ .scalar = try pool.bv(value.error_bits, errorCode(v.pack.str(@fromBackingInt(@intCast(c.a))))) };
+            .@"error" => return v.errorValue(c.ty, v.pack.str(@fromBackingInt(@intCast(c.a)))),
+            .text => {
+                const text = v.pack.str(@fromBackingInt(@intCast(c.a)));
+                if (std.mem.startsWith(u8, text, "error.")) return v.errorValue(c.ty, text["error.".len..]);
+                return v.ctx.unsupported("constant {s}", .{text});
             },
-            .text => return v.ctx.unsupported("constant {s}", .{v.pack.str(@fromBackingInt(@intCast(c.a)))}),
             else => return v.ctx.unsupported("constant of kind {t}", .{c.kind}),
         }
+    }
+
+    /// An error constant: a bare code, or, where the type is an error union, the union holding it.
+    fn errorValue(v: *Vc, ty: schema.TypeId, name: []const u8) Error!Value {
+        const code = try v.pool.bv(value.error_bits, errorCode(name));
+        if (ty == .none or v.ctx.typeRec(ty).kind != .error_union) return .{ .scalar = code };
+        return .{ .eu = try v.ctx.create(value.Eu, .{ .is_err = try v.pool.tru(), .err = code, .payload = .none }) };
     }
 
     fn errorCode(name: []const u8) u16 {
@@ -353,7 +411,7 @@ pub const Vc = struct {
             .locals = locals.items,
             .approx = st.cut,
         });
-        v.obligations_seen = true;
+        if (kind != .ghost) v.obligations_seen = true;
         st.pc = try v.pool.@"and"(st.pc, goal);
     }
 
@@ -379,7 +437,10 @@ pub const Vc = struct {
         if (inst.loc != .none) v.loc = inst.loc;
         if (v.pure and v.pure_seen) switch (inst.tag) {
             .dbg_stmt, .dbg_empty_stmt, .save_err_return_trace_index => return,
-            .dbg_inline_block => if (contractOf(v.attrStr(inst, .callee) orelse "") != .invariant) return error.StopPure,
+            .dbg_inline_block => switch (contractOf(v.attrStr(inst, .callee) orelse "") orelse return error.StopPure) {
+                .invariant, .decreases => {},
+                else => return error.StopPure,
+            },
             else => return error.StopPure,
         };
         if (inst.ty == .none) return v.ctx.unsupported("instruction {t} is not decoded in the pack", .{inst.tag});
@@ -476,6 +537,13 @@ pub const Vc = struct {
                 const a = try v.arg(inst, 0);
                 if (a != .array) return v.ctx.unsupported("element of {t}", .{std.meta.activeTag(a)});
                 v.setScalar(inst, try pool.select(a.array.mem, try v.scalarArg(inst, 1)));
+            },
+            .ptr_add, .ptr_sub => {
+                const p = try v.arg(inst, 0);
+                if (p != .elem_ptr) return v.ctx.unsupported("pointer arithmetic on {t}", .{std.meta.activeTag(p)});
+                const n = try v.scalarArg(inst, 1);
+                const off = try pool.bin(if (inst.tag == .ptr_add) .add else .sub, p.elem_ptr.off, n);
+                v.setResult(inst, .{ .elem_ptr = .{ .mem = p.elem_ptr.mem, .off = off } });
             },
             .ptr_elem_val, .ptr_elem_ptr => {
                 const p = try v.arg(inst, 0);
@@ -581,7 +649,7 @@ pub const Vc = struct {
                 if (t.kind != .@"struct") return v.ctx.unsupported("aggregate of kind {t}", .{t.kind});
                 const fields = try v.arena().alloc(value.Field, v.ops(inst).len);
                 for (fields, v.ops(inst), 0..) |*f, o, i| f.* = .{ .index = @intCast(i), .value = try v.operand(o) };
-                v.setResult(inst, .{ .obj = try v.ctx.create(value.Obj, .{ .base = null, .fields = fields }) });
+                v.setResult(inst, .{ .obj = try v.ctx.create(value.Obj, .{ .base = null, .fields = fields, .ty = inst.ty }) });
             },
 
             .block => try v.block(inst, st, v.pack.bodiesOf(inst.*)[0]),
@@ -598,9 +666,21 @@ pub const Vc = struct {
             .repeat => try v.repeat(inst, st),
             .ret, .ret_safe => {
                 const val = try v.arg(inst, 0);
-                try v.returns.append(v.arena(), .{ .state = try st.clone(v.arena()), .value = val });
+                const site = v.siteOf(v.ops(inst)[0], val);
+                try v.returns.append(v.arena(), .{ .state = try st.clone(v.arena()), .value = val, .site = site });
                 try v.kill(st);
             },
+            .@"try", .try_cold => {
+                const o = try v.arg(inst, 0);
+                if (o != .eu) return v.ctx.unsupported("try of {t}", .{std.meta.activeTag(o)});
+                var failed = try st.clone(v.arena());
+                failed.pc = try pool.@"and"(st.pc, o.eu.is_err);
+                try v.exec(v.pack.instsOf(v.pack.bodiesOf(inst.*)[0].insts), &failed);
+                if (v.alive(&failed)) return v.ctx.unsupported("the error path of try falls through", .{});
+                st.pc = try pool.@"and"(st.pc, try pool.not(o.eu.is_err));
+                v.setResult(inst, o.eu.payload);
+            },
+            .switch_br => try v.switchBr(inst, st),
             .unreach => {
                 try v.oblige(st, inst, .unreachable_code, "unreachable code is reachable", .{}, try pool.fls());
                 try v.kill(st);
@@ -612,6 +692,37 @@ pub const Vc = struct {
             .call, .call_always_tail, .call_never_tail, .call_never_inline => try v.call(inst, st),
             else => return v.ctx.unsupported("instruction {t}", .{inst.tag}),
         }
+    }
+
+    /// The `ensures` that produced a returned value, possibly wrapped into an optional or error union.
+    fn siteOf(v: *Vc, o: schema.Operand, val: Value) ?Site {
+        if (o.kind != .inst) return null;
+        if (v.sites.get(o.value)) |s| return s;
+        const i = v.by_id[o.value] orelse return null;
+        switch (i.tag) {
+            .wrap_errunion_payload, .wrap_optional => {
+                const inner = v.ops(i)[0];
+                if (inner.kind == .inst) if (v.sites.get(inner.value)) |s| return .{ .ok = s.ok, .value = val };
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn isConstant(v: *const Vc, val: Value) bool {
+        return switch (val) {
+            .none => true,
+            .scalar => |t| switch (v.pool.node(t)) {
+                .bool_lit, .bv_lit => true,
+                else => false,
+            },
+            .opt => |o| v.isConstant(.{ .scalar = o.has }) and v.isConstant(o.payload),
+            .eu => |e| v.isConstant(.{ .scalar = e.is_err }) and v.isConstant(.{ .scalar = e.err }) and v.isConstant(e.payload),
+            .obj => |o| o.base == null and for (o.fields) |f| {
+                if (!v.isConstant(f.value)) break false;
+            } else true,
+            else => false,
+        };
     }
 
     fn append(arena_alloc: Allocator, path: []const value.Step, s: value.Step) Allocator.Error![]const value.Step {
@@ -798,12 +909,16 @@ pub const Vc = struct {
         const a = try v.scalarArg(inst, 0);
         const src = v.ctx.intInfo(v.operandType(o)) orelse return v.ctx.unsupported("cast from a non-integer", .{});
         const dst = try v.intTypeOf(inst.ty);
-        const wide = @max(src.bits, dst.bits) + 1;
-        const x = if (src.signed) try pool.sext(a, wide) else try pool.zext(a, wide);
-        const lo: i128 = if (dst.signed) -(@as(i128, 1) << @intCast(dst.bits - 1)) else 0;
-        const hi: i128 = if (dst.signed) (@as(i128, 1) << @intCast(dst.bits - 1)) - 1 else @intCast(term.mask(dst.bits));
-        const fits = try pool.@"and"(try pool.cmp(.sle, try pool.bvSigned(wide, lo), x), try pool.cmp(.sle, x, try pool.bvSigned(wide, hi)));
-        try v.oblige(st, inst, .cast, "value does not fit in {s}", .{v.ctx.typeName(inst.ty)}, fits);
+        const lossless = (dst.bits > src.bits and (dst.signed or !src.signed)) or (dst.bits == src.bits and dst.signed == src.signed);
+        if (!lossless) {
+            const wide = @max(src.bits, dst.bits) + 1;
+            if (wide > 128) return v.ctx.unsupported("a narrowing cast between types this wide", .{});
+            const x = if (src.signed) try pool.sext(a, wide) else try pool.zext(a, wide);
+            const lo: i128 = if (dst.signed) -(@as(i128, 1) << @intCast(dst.bits - 1)) else 0;
+            const hi: i128 = if (dst.signed) (@as(i128, 1) << @intCast(dst.bits - 1)) - 1 else @intCast(term.mask(dst.bits));
+            const fits = try pool.@"and"(try pool.cmp(.sle, try pool.bvSigned(wide, lo), x), try pool.cmp(.sle, x, try pool.bvSigned(wide, hi)));
+            try v.oblige(st, inst, .cast, "value does not fit in {s}", .{v.ctx.typeName(inst.ty)}, fits);
+        }
         const out = if (dst.bits > src.bits) x_ext: {
             break :x_ext if (src.signed) try pool.sext(a, dst.bits) else try pool.zext(a, dst.bits);
         } else try pool.extract(a, dst.bits - 1, 0);
@@ -830,8 +945,8 @@ pub const Vc = struct {
         const c = try v.scalarArg(inst, 0);
         const bodies = v.pack.bodiesOf(inst.*);
         const not_c = try pool.not(c);
-        if (v.pure and (v.containsInvariant(bodies[0]) or v.containsInvariant(bodies[1]))) {
-            const pick = if (v.containsInvariant(bodies[0])) bodies[0] else bodies[1];
+        if (v.pure and (v.containsHead(bodies[0]) or v.containsHead(bodies[1]))) {
+            const pick = if (v.containsHead(bodies[0])) bodies[0] else bodies[1];
             return v.exec(v.pack.instsOf(pick.insts), st);
         }
         var then_state = try st.clone(v.arena());
@@ -843,6 +958,36 @@ pub const Vc = struct {
         try v.kill(st);
     }
 
+    fn switchBr(v: *Vc, inst: *const Inst, st: *State) StepError!void {
+        const pool = v.pool;
+        const selector = try v.scalarArg(inst, 0);
+        const info = v.ctx.intInfo(v.operandType(v.ops(inst)[0])) orelse return v.ctx.unsupported("switch on a non-integer", .{});
+        const le: term.Op = if (info.signed) .sle else .ule;
+        const bodies = v.pack.bodiesOf(inst.*);
+        var covered = try pool.fls();
+        for (bodies) |b| {
+            var matches = try pool.fls();
+            if (b.label == .case) {
+                for (v.pack.t.operands[b.items.off..][0..b.items.len]) |item| {
+                    const iv = try v.operand(item);
+                    if (iv != .scalar) return v.ctx.unsupported("a switch prong that is not an integer", .{});
+                    matches = try pool.@"or"(matches, try pool.eq(selector, iv.scalar));
+                }
+                for (0..b.ranges.len) |k| {
+                    const lo = try v.operand(v.pack.t.operands[b.ranges.off + 2 * k]);
+                    const hi = try v.operand(v.pack.t.operands[b.ranges.off + 2 * k + 1]);
+                    if (lo != .scalar or hi != .scalar) return v.ctx.unsupported("a switch range that is not an integer", .{});
+                    matches = try pool.@"or"(matches, try pool.@"and"(try pool.cmp(le, lo.scalar, selector), try pool.cmp(le, selector, hi.scalar)));
+                }
+                covered = try pool.@"or"(covered, matches);
+            } else matches = try pool.not(covered);
+            var arm = try st.clone(v.arena());
+            arm.pc = try pool.@"and"(st.pc, matches);
+            try v.exec(v.pack.instsOf(b.insts), &arm);
+        }
+        try v.kill(st);
+    }
+
     fn call(v: *Vc, inst: *const Inst, st: *State) StepError!void {
         const pool = v.pool;
         const callee = v.attrStr(inst, .callee) orelse return v.ctx.unsupported("call through a function pointer", .{});
@@ -851,7 +996,61 @@ pub const Vc = struct {
             try v.oblige(st, inst, kind, "{s}", .{try v.panicText(inst, callee)}, try pool.fls());
             return v.kill(st);
         }
-        return v.ctx.unsupported("call to {s}", .{callee});
+        if (std.mem.eql(u8, callee, "lang.returnError")) return;
+        const hooks = v.hooks orelse return v.ctx.unsupported("call to {s}", .{callee});
+        const summary = try hooks.summaryFn(hooks.context, v, callee);
+        const operands = v.ops(inst)[1..];
+        if (operands.len != summary.params.len) return v.ctx.unsupported("call to {s} with {d} arguments, expected {d}", .{ callee, operands.len, summary.params.len });
+        var sub: term.Subst = .{ .pool = pool, .alloc = v.arena() };
+        for (summary.params, operands) |param, o| try v.bind(&sub, param, try v.operand(o), summary.lazy);
+        const result = try v.ctx.havoc("$ret", summary.result);
+        try v.bind(&sub, summary.result, result, summary.lazy);
+        const pre = sub.apply(summary.pre) catch |err| return v.substFailed(err, callee);
+        const post = sub.apply(summary.post) catch |err| return v.substFailed(err, callee);
+        try v.oblige(st, inst, .precondition, "precondition of {s} may not hold", .{callee}, pre);
+        st.pc = try pool.@"and"(st.pc, post);
+        v.setResult(inst, result);
+    }
+
+    fn substFailed(v: *Vc, err: term.Subst.Error, callee: []const u8) StepError {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.UnboundArray => v.ctx.unsupported("the contract of {s} uses a slice in a way a call cannot carry over", .{callee}),
+        };
+    }
+
+    /// Maps the variables of a callee's value onto the caller's value of the same shape.
+    fn bind(v: *Vc, sub: *term.Subst, callee: Value, caller: Value, lazy: []const value.Lazy) Error!void {
+        const gpa = v.arena();
+        if (std.meta.activeTag(callee) != std.meta.activeTag(caller)) {
+            return v.ctx.unsupported("an argument ({t}) whose shape differs from the parameter ({t})", .{ std.meta.activeTag(caller), std.meta.activeTag(callee) });
+        }
+        switch (callee) {
+            .none => {},
+            .scalar => |t| try sub.map.put(gpa, t, caller.scalar),
+            .slice => |s| {
+                try sub.map.put(gpa, s.len, caller.slice.len);
+                try sub.arrays.put(gpa, s.mem, .{ .mem = caller.slice.mem, .off = caller.slice.off });
+            },
+            .array => |a| try sub.arrays.put(gpa, a.mem, .{ .mem = caller.array.mem, .off = try v.pool.bv(64, 0) }),
+            .opt => |o| {
+                try sub.map.put(gpa, o.has, caller.opt.has);
+                try v.bind(sub, o.payload, caller.opt.payload, lazy);
+            },
+            .eu => |e| {
+                try sub.map.put(gpa, e.is_err, caller.eu.is_err);
+                try sub.map.put(gpa, e.err, caller.eu.err);
+                try v.bind(sub, e.payload, caller.eu.payload, lazy);
+            },
+            .obj => |o| {
+                const base = o.base orelse return;
+                for (lazy) |l| {
+                    if (!std.mem.eql(u8, l.base, base)) continue;
+                    try v.bind(sub, l.value, try v.ctx.fieldShaped(caller.obj, l.index, l.value), lazy);
+                }
+            },
+            .elem_ptr, .place => return v.ctx.unsupported("a pointer argument", .{}),
+        }
     }
 
     fn panicText(v: *Vc, inst: *const Inst, callee: []const u8) Error![]const u8 {
@@ -881,10 +1080,14 @@ pub const Vc = struct {
 
     // Contracts.
 
-    const Contract = enum { requires, ensures, invariant, assume };
+    const Contract = enum { requires, ensures, invariant, decreases, assume };
+
+    fn stripInstance(callee: []const u8) []const u8 {
+        return if (std.mem.endsWith(u8, callee, "__func")) callee[0 .. callee.len - "__func".len] else callee;
+    }
 
     fn contractOf(callee: []const u8) ?Contract {
-        const trimmed = if (std.mem.endsWith(u8, callee, "__func")) callee[0 .. callee.len - "__func".len] else callee;
+        const trimmed = stripInstance(callee);
         if (!std.mem.startsWith(u8, trimmed, "zv.")) return null;
         return std.meta.stringToEnum(Contract, trimmed["zv.".len..]);
     }
@@ -904,16 +1107,27 @@ pub const Vc = struct {
         const pool = v.pool;
         const body = v.pack.bodiesOf(inst.*)[0];
         const callee = v.attrStr(inst, .callee) orelse return v.block(inst, st, body);
-        const contract = contractOf(callee) orelse return v.block(inst, st, body);
         var args: [4]schema.Operand = undefined;
         const n = v.inlineArgs(body, &args);
-        if (v.pure and contract != .invariant) return;
+        const contract = contractOf(callee) orelse {
+            if (try v.ghostCall(inst, st, callee, args[0..n])) return;
+            try v.inline_names.append(v.arena(), callee);
+            defer _ = v.inline_names.pop();
+            return v.block(inst, st, body);
+        };
+        if (v.pure and contract != .invariant and contract != .decreases) return;
+        const nested = v.inline_names.items.len != 0;
         switch (contract) {
             .requires => {
                 if (n != 1) return v.ctx.unsupported("zv.requires with {d} arguments", .{n});
-                if (v.obligations_seen or v.blocks.count() != 0) return v.ctx.unsupported("zv.requires must open the function body", .{});
                 const ok = (try v.operand(args[0])).scalar;
-                st.pc = try pool.@"and"(st.pc, ok);
+                if (nested) {
+                    try v.oblige(st, inst, .precondition, "precondition of {s} may not hold", .{v.inline_names.getLast()}, ok);
+                } else {
+                    if (v.obligations_seen or v.blocks.count() != 0) return v.ctx.unsupported("zv.requires must open the function body", .{});
+                    st.pc = try pool.@"and"(st.pc, ok);
+                    v.pre = try pool.@"and"(v.pre, ok);
+                }
             },
             .assume => {
                 if (n != 1) return v.ctx.unsupported("zv.assume with {d} arguments", .{n});
@@ -922,33 +1136,184 @@ pub const Vc = struct {
             .ensures => {
                 if (n != 2) return v.ctx.unsupported("zv.ensures with {d} arguments", .{n});
                 const ok = (try v.operand(args[1])).scalar;
-                try v.oblige(st, inst, .postcondition, "postcondition (zv.ensures) may not hold", .{}, ok);
-                v.setResult(inst, try v.operand(args[0]));
+                const val = try v.operand(args[0]);
+                if (nested) {
+                    try v.oblige(st, inst, .postcondition, "postcondition of {s} may not hold", .{v.inline_names.getLast()}, ok);
+                } else {
+                    try v.oblige(st, inst, .postcondition, "postcondition (zv.ensures) may not hold", .{}, ok);
+                    try v.sites.put(v.arena(), inst.id, .{ .ok = ok, .value = val });
+                }
+                v.setResult(inst, val);
             },
-            .invariant => {
-                if (n != 1) return v.ctx.unsupported("zv.invariant with {d} arguments", .{n});
-                const ok = (try v.operand(args[0])).scalar;
+            .invariant, .decreases => {
+                if (n != 1) return v.ctx.unsupported("zv.{t} with {d} arguments", .{ contract, n });
+                const ghost = contract == .decreases and v.isGhostInt(v.operandType(args[0]));
+                const t = if (ghost) try v.asInt(args[0]) else switch (try v.operand(args[0])) {
+                    .scalar => |t| t,
+                    else => return v.ctx.unsupported("zv.{t} of something that is not a number or a condition", .{contract}),
+                };
+                if (contract == .decreases) if (v.ctx.intInfo(v.operandType(args[0]))) |info| if (info.signed)
+                    return v.ctx.unsupported("zv.decreases of a signed integer: use an unsigned one or a zv.Int", .{});
                 if (v.pure) {
-                    try v.collected.append(v.arena(), .{ .id = inst.id, .ok = ok });
-                    v.pure_seen = true;
+                    try v.collected.append(v.arena(), .{ .id = inst.id, .kind = if (contract == .invariant) .invariant else .decreases, .term = t, .ghost = ghost });
+                    v.pure_seen = v.collected.items.len - v.pure_base >= v.pure_target;
                     return;
                 }
-                if (!v.head_invariants.contains(inst.id)) return v.ctx.unsupported("zv.invariant must open a loop body", .{});
+                if (!v.head_ids.contains(inst.id)) return v.ctx.unsupported("zv.{t} must open a loop body", .{contract});
             },
         }
     }
 
+    // Ghost integers and sequences (zv.Int, zv.Seq): their operations are read as mathematics. A ghost
+    // integer is a signed bit-vector of `term.ghost_bits`; an operation that would leave that range is an
+    // obligation, so no specification silently wraps. Bit-vectors keep the queries in one theory.
+
+    const Ghost = enum {
+        @"Int.of",
+        @"Int.add",
+        @"Int.sub",
+        @"Int.mul",
+        @"Int.neg",
+        @"Int.divFloor",
+        @"Int.mod",
+        @"Int.lt",
+        @"Int.le",
+        @"Int.gt",
+        @"Int.ge",
+        @"Int.eq",
+        @"Int.ne",
+        @"Seq.empty",
+        @"Seq.push",
+        @"Seq.len",
+        @"Seq.at",
+        @"Seq.concat",
+        @"Seq.sub",
+    };
+
+    const ghost_info: value.IntInfo = .{ .bits = term.ghost_bits, .signed = true };
+
+    fn isGhostInt(v: *const Vc, ty: schema.TypeId) bool {
+        return ty != .none and std.mem.startsWith(u8, v.ctx.typeName(ty), "zv.Int");
+    }
+
+    fn asInt(v: *Vc, o: schema.Operand) Error!Term {
+        const pool = v.pool;
+        const val = try v.operand(o);
+        switch (val) {
+            .scalar => |t| switch (pool.sortOf(t)) {
+                .bv => |bits| {
+                    if (bits == term.ghost_bits) return t;
+                    const signed = if (v.ctx.intInfo(v.operandType(o))) |i| i.signed else false;
+                    return if (signed) pool.sext(t, term.ghost_bits) else pool.zext(t, term.ghost_bits);
+                },
+                else => {},
+            },
+            .obj => |ob| if (ob.fields.len == 1 and ob.fields[0].value == .scalar and pool.sortOf(ob.fields[0].value.scalar) == .bv)
+                return pool.sext(ob.fields[0].value.scalar, term.ghost_bits),
+            else => {},
+        }
+        return v.ctx.unsupported("a ghost integer that is not one", .{});
+    }
+
+    fn asSeq(v: *Vc, o: schema.Operand) Error!Term {
+        const val = try v.operand(o);
+        if (val == .scalar and v.pool.sortOf(val.scalar) == .seq) return val.scalar;
+        return v.ctx.unsupported("a ghost sequence that is not one", .{});
+    }
+
+    fn ghostArith(v: *Vc, inst: *const Inst, st: *State, op: term.Op, a: Term, b: Term) StepError!Term {
+        const ok = try v.noOverflow(op, a, b, ghost_info);
+        try v.oblige(st, inst, .ghost, "a specification outgrows {d}-bit ghost integers", .{term.ghost_bits}, ok);
+        return v.pool.bin(op, a, b);
+    }
+
+    /// Handles a call of a ghost operation; false when `callee` is not one.
+    fn ghostCall(v: *Vc, inst: *const Inst, st: *State, callee: []const u8, args: []const schema.Operand) StepError!bool {
+        if (!std.mem.startsWith(u8, callee, "zv.") or std.mem.indexOf(u8, callee, "__struct.") == null) return false;
+        const name = try std.mem.replaceOwned(u8, v.arena(), callee["zv.".len..], "__struct", "");
+        const op = std.meta.stringToEnum(Ghost, name) orelse return false;
+        if (op == .@"Int.of" and (args.len != 1 or v.ctx.intInfo(v.operandType(args[0])) == null)) return false;
+        const pool = v.pool;
+        const zero = try pool.bv(term.ghost_bits, 0);
+        switch (op) {
+            .@"Int.of" => v.setScalar(inst, try v.asInt(args[0])),
+            .@"Int.add" => v.setScalar(inst, try v.ghostArith(inst, st, .add, try v.asInt(args[0]), try v.asInt(args[1]))),
+            .@"Int.sub" => v.setScalar(inst, try v.ghostArith(inst, st, .sub, try v.asInt(args[0]), try v.asInt(args[1]))),
+            .@"Int.mul" => v.setScalar(inst, try v.ghostArith(inst, st, .mul, try v.asInt(args[0]), try v.asInt(args[1]))),
+            .@"Int.neg" => v.setScalar(inst, try v.ghostArith(inst, st, .sub, zero, try v.asInt(args[0]))),
+            .@"Int.divFloor", .@"Int.mod" => {
+                const a = try v.asInt(args[0]);
+                const b = try v.asInt(args[1]);
+                try v.oblige(st, inst, .ghost, "division by zero in a specification", .{}, try pool.ne(b, zero));
+                if (op == .@"Int.mod") return v.finishGhost(inst, try pool.bin(.smod, a, b));
+                const q = try pool.bin(.sdiv, a, b);
+                const r = try pool.bin(.srem, a, b);
+                const adjust = try pool.@"and"(try pool.ne(r, zero), try pool.ne(try pool.cmp(.slt, r, zero), try pool.cmp(.slt, b, zero)));
+                v.setScalar(inst, try pool.ite(adjust, try pool.bin(.sub, q, try pool.bv(term.ghost_bits, 1)), q));
+            },
+            .@"Int.lt", .@"Int.le", .@"Int.gt", .@"Int.ge", .@"Int.eq", .@"Int.ne" => {
+                const a = try v.asInt(args[0]);
+                const b = try v.asInt(args[1]);
+                v.setScalar(inst, switch (op) {
+                    .@"Int.lt" => try pool.cmp(.slt, a, b),
+                    .@"Int.le" => try pool.cmp(.sle, a, b),
+                    .@"Int.gt" => try pool.cmp(.slt, b, a),
+                    .@"Int.ge" => try pool.cmp(.sle, b, a),
+                    .@"Int.eq" => try pool.eq(a, b),
+                    else => try pool.ne(a, b),
+                });
+            },
+            .@"Seq.empty" => v.setScalar(inst, try pool.seqEmpty()),
+            .@"Seq.push" => v.setScalar(inst, try pool.seqConcat(try v.asSeq(args[0]), try pool.seqUnit(try v.asInt(args[1])))),
+            .@"Seq.len" => v.setScalar(inst, try pool.seqLen(try v.asSeq(args[0]))),
+            .@"Seq.at" => {
+                const s = try v.asSeq(args[0]);
+                const i = try v.asInt(args[1]);
+                const in_range = try pool.@"and"(try pool.cmp(.sle, zero, i), try pool.cmp(.slt, i, try pool.seqLen(s)));
+                try v.oblige(st, inst, .ghost, "sequence index out of range in a specification", .{}, in_range);
+                v.setScalar(inst, try pool.seqAt(s, i));
+            },
+            .@"Seq.concat" => v.setScalar(inst, try pool.seqConcat(try v.asSeq(args[0]), try v.asSeq(args[1]))),
+            .@"Seq.sub" => {
+                const s = try v.asSeq(args[0]);
+                const lo = try v.asInt(args[1]);
+                const n = try v.asInt(args[2]);
+                const end = try pool.bin(.add, lo, n);
+                const in_range = try pool.@"and"(
+                    try pool.cmp(.sle, zero, lo),
+                    try pool.@"and"(try pool.cmp(.sle, zero, n), try pool.cmp(.sle, end, try pool.seqLen(s))),
+                );
+                try v.oblige(st, inst, .ghost, "subsequence out of range in a specification", .{}, in_range);
+                v.setScalar(inst, try pool.seqExtract(s, lo, n));
+            },
+        }
+        return true;
+    }
+
+    fn finishGhost(v: *Vc, inst: *const Inst, t: Term) bool {
+        v.setScalar(inst, t);
+        return true;
+    }
+
     // Loops.
 
-    fn containsInvariant(v: *Vc, body: schema.Body) bool {
+    fn containsHead(v: *Vc, body: schema.Body) bool {
+        return v.headCount(body) != 0;
+    }
+
+    /// The `zv.invariant` and `zv.decreases` calls in a loop body that are not in a loop of their own.
+    fn headCount(v: *Vc, body: schema.Body) usize {
+        var n: usize = 0;
         for (v.pack.instsOf(body.insts)) |*i| {
             if (i.tag == .loop) continue;
             if (i.tag == .dbg_inline_block) {
-                if (v.attrStr(i, .callee)) |c| if (contractOf(c) == .invariant) return true;
+                if (v.attrStr(i, .callee)) |c| if (contractOf(c)) |k| if (k == .invariant or k == .decreases) {
+                    n += 1;
+                };
             }
-            for (v.pack.bodiesOf(i.*)) |b| if (v.containsInvariant(b)) return true;
+            for (v.pack.bodiesOf(i.*)) |b| n += v.headCount(b);
         }
-        return false;
+        return n;
     }
 
     /// Cells written by a store inside `body`, loops included.
@@ -979,17 +1344,23 @@ pub const Vc = struct {
         return null;
     }
 
-    /// The invariants at the head of a loop body, evaluated in `st`.
-    fn invariantsAt(v: *Vc, body: schema.Body, st: *const State) StepError![]const Collected {
+    /// The invariants and measures at the head of a loop body, evaluated in `st`.
+    fn headAt(v: *Vc, body: schema.Body, st: *const State) StepError![]const Collected {
         var probe = try st.clone(v.arena());
         const saved_pure = v.pure;
         const saved_seen = v.pure_seen;
         const saved_len = v.collected.items.len;
+        const saved_target = v.pure_target;
+        const saved_base = v.pure_base;
         v.pure = true;
         v.pure_seen = false;
+        v.pure_target = v.headCount(body);
+        v.pure_base = saved_len;
         defer {
             v.pure = saved_pure;
             v.pure_seen = saved_seen;
+            v.pure_target = saved_target;
+            v.pure_base = saved_base;
             v.collected.shrinkRetainingCapacity(saved_len);
         }
         v.exec(v.pack.instsOf(body.insts), &probe) catch |err| switch (err) {
@@ -1001,19 +1372,19 @@ pub const Vc = struct {
 
     fn loop(v: *Vc, inst: *const Inst, st: *State) StepError!void {
         const pool = v.pool;
-        if (v.pure) return v.ctx.unsupported("a loop before the invariant of the enclosing loop", .{});
+        if (v.pure) return v.ctx.unsupported("a loop before the head of the enclosing loop", .{});
         const body = v.pack.bodiesOf(inst.*)[0];
         var modified: std.AutoArrayHashMapUnmanaged(u32, void) = .empty;
         try v.modifiedCells(body, &modified);
 
-        const has_invariants = v.containsInvariant(body);
-        var entry: []const Collected = &.{};
-        if (has_invariants) {
-            entry = try v.invariantsAt(body, st);
-            for (entry) |c| {
-                const at = v.by_id[c.id];
-                try v.oblige(st, at, .invariant_entry, "loop invariant may not hold on entry", .{}, c.ok);
-            }
+        const has_head = v.containsHead(body);
+        if (has_head) {
+            for (try v.headAt(body, st)) |c| switch (c.kind) {
+                .invariant => try v.oblige(st, v.by_id[c.id], .invariant_entry, "loop invariant may not hold on entry", .{}, c.term),
+                .decreases => {
+                    if (c.ghost) try v.oblige(st, v.by_id[c.id], .termination, "loop measure may be negative on entry", .{}, try pool.cmp(.sle, try pool.bv(term.ghost_bits, 0), c.term));
+                },
+            };
         }
 
         var head = try st.clone(v.arena());
@@ -1022,14 +1393,19 @@ pub const Vc = struct {
             const name = v.cell_names.items[cell] orelse try std.fmt.allocPrint(v.arena(), "cell{d}", .{cell});
             head.cells[cell] = try v.ctx.havoc(name, head.cells[cell]);
         }
-        var ctx: LoopCtx = .{ .invariants = &.{} };
-        if (has_invariants) {
-            ctx.invariants = try v.invariantsAt(body, &head);
-            for (ctx.invariants) |c| {
-                head.pc = try pool.@"and"(head.pc, c.ok);
-                try v.head_invariants.put(v.arena(), c.id, {});
+        var ctx: LoopCtx = .{ .head = &.{} };
+        if (has_head) {
+            ctx.head = try v.headAt(body, &head);
+            var measures: usize = 0;
+            for (ctx.head) |c| {
+                try v.head_ids.put(v.arena(), c.id, {});
+                switch (c.kind) {
+                    .invariant => head.pc = try pool.@"and"(head.pc, c.term),
+                    .decreases => measures += 1,
+                }
             }
-        }
+            if (measures == 0) try v.unbounded_loops.append(v.arena(), inst.loc);
+        } else try v.unbounded_loops.append(v.arena(), inst.loc);
         try v.loops.put(v.arena(), inst.id, &ctx);
         defer _ = v.loops.remove(inst.id);
         try v.exec(v.pack.instsOf(body.insts), &head);
@@ -1037,13 +1413,87 @@ pub const Vc = struct {
     }
 
     fn repeat(v: *Vc, inst: *const Inst, st: *State) StepError!void {
+        const pool = v.pool;
         const target = v.attrInt(inst, .target) orelse return v.ctx.unsupported("repeat without a target", .{});
         const ctx = v.loops.get(target) orelse return v.ctx.unsupported("repeat outside its loop", .{});
         const loop_inst = v.by_id[target].?;
-        if (ctx.invariants.len != 0) {
-            const now = try v.invariantsAt(v.pack.bodiesOf(loop_inst.*)[0], st);
-            for (now) |c| try v.oblige(st, v.by_id[c.id], .invariant_step, "loop invariant may not be preserved by an iteration", .{}, c.ok);
+        if (ctx.head.len != 0) {
+            const now = try v.headAt(v.pack.bodiesOf(loop_inst.*)[0], st);
+            // Lexicographic decrease: `smaller` accumulates "some earlier measure is equal" prefixes.
+            var smaller = try pool.fls();
+            var equal_so_far = try pool.tru();
+            var at: ?*const Inst = null;
+            for (now, ctx.head) |n, h| {
+                switch (n.kind) {
+                    .invariant => try v.oblige(st, v.by_id[n.id], .invariant_step, "loop invariant may not be preserved by an iteration", .{}, n.term),
+                    .decreases => {
+                        at = v.by_id[n.id];
+                        if (n.ghost) try v.oblige(st, at, .termination, "loop measure may become negative", .{}, try pool.cmp(.sle, try pool.bv(term.ghost_bits, 0), n.term));
+                        const less = try pool.cmp(if (n.ghost) .slt else .ult, n.term, h.term);
+                        smaller = try pool.@"or"(smaller, try pool.@"and"(equal_so_far, less));
+                        equal_so_far = try pool.@"and"(equal_so_far, try pool.eq(n.term, h.term));
+                    },
+                }
+            }
+            if (at != null) try v.oblige(st, at, .termination, "loop measure may not decrease in an iteration", .{}, smaller);
         }
         try v.kill(st);
+    }
+
+    // Summary.
+
+    /// What callers may know of this function, after `run`: its preconditions and, over its ensures sites, the
+    /// disjunction of what each one promises: the returned value is what the path computed, and the promise
+    /// holds. A return that no `ensures` covers promises nothing. Loops contribute only through their invariants.
+    pub fn summarize(v: *Vc, name: []const u8) Error!Summary {
+        const pool = v.pool;
+        const result = try v.ctx.symbolic("$ret", v.func.ret, false);
+        var post = try pool.fls();
+        var covered = v.returns.items.len != 0;
+        for (v.returns.items) |r| {
+            const site = r.site orelse {
+                if (!v.isConstant(r.value)) {
+                    covered = false;
+                    break;
+                }
+                post = try pool.@"or"(post, try v.agrees(result, r.value));
+                continue;
+            };
+            const matches = try v.agrees(result, site.value);
+            post = try pool.@"or"(post, try pool.@"and"(matches, site.ok));
+        }
+        return .{
+            .name = name,
+            .params = v.param_values.items,
+            .lazy = v.ctx.lazy.items,
+            .pre = v.pre,
+            .post = if (covered) post else try pool.tru(),
+            .result = result,
+        };
+    }
+
+    /// The condition that `result` is `val`, part by part.
+    fn agrees(v: *Vc, result: Value, val: Value) Error!Term {
+        const pool = v.pool;
+        if (val == .none) return pool.tru();
+        if (std.meta.activeTag(val) != std.meta.activeTag(result)) return v.ctx.unsupported("a returned {t} where the declared result is {t}", .{ std.meta.activeTag(val), std.meta.activeTag(result) });
+        switch (val) {
+            .none => return pool.tru(),
+            .scalar => |t| return pool.eq(result.scalar, t),
+            .opt => |o| return pool.@"and"(
+                try pool.eq(result.opt.has, o.has),
+                try v.agrees(result.opt.payload, o.payload),
+            ),
+            .eu => |e| return pool.@"and"(
+                try pool.eq(result.eu.is_err, e.is_err),
+                try pool.@"and"(try pool.eq(result.eu.err, e.err), try v.agrees(result.eu.payload, e.payload)),
+            ),
+            .obj => |o| {
+                var acc = try pool.tru();
+                for (o.fields) |f| acc = try pool.@"and"(acc, try v.agrees(try v.ctx.fieldShaped(result.obj, f.index, f.value), f.value));
+                return acc;
+            },
+            .slice, .array, .elem_ptr, .place => return v.ctx.unsupported("a returned slice, array or pointer", .{}),
+        }
     }
 };

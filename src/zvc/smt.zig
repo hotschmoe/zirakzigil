@@ -12,9 +12,8 @@ pub fn writeSort(w: *Io.Writer, s: Sort) Io.Writer.Error!void {
     switch (s) {
         .bool => try w.writeAll("Bool"),
         .bv => |n| try w.print("(_ BitVec {d})", .{n}),
-        .int => try w.writeAll("Int"),
         .array => |a| try w.print("(Array (_ BitVec {d}) (_ BitVec {d}))", .{ a.idx, a.elem }),
-        .seq => try w.writeAll("(Seq Int)"),
+        .seq => try w.print("(Seq (_ BitVec {d}))", .{term.ghost_bits}),
     }
 }
 
@@ -55,7 +54,7 @@ pub const Script = struct {
             const i = @backingInt(item.t);
             if (s.emitted.isSet(i)) continue;
             switch (pool.node(item.t)) {
-                .bool_lit, .bv_lit, .int_lit => continue,
+                .bool_lit, .bv_lit => continue,
                 .variable => |v| {
                     try s.mark(gpa, i);
                     try w.print("(declare-const |{s}| ", .{pool.name(v.name)});
@@ -84,7 +83,6 @@ pub fn writeRef(w: *Io.Writer, pool: *const Pool, t: Term) Io.Writer.Error!void 
     switch (pool.node(t)) {
         .bool_lit => |b| try w.writeAll(if (b) "true" else "false"),
         .bv_lit => |l| try w.print("(_ bv{d} {d})", .{ l.value, l.bits }),
-        .int_lit => |v| if (v < 0) try w.print("(- {d})", .{-v}) else try w.print("{d}", .{v}),
         .variable => |v| try w.print("|{s}|", .{pool.name(v.name)}),
         .app => try w.print("t{d}", .{@backingInt(t)}),
     }
@@ -96,18 +94,28 @@ fn writeApp(w: *Io.Writer, pool: *const Pool, a: term.App) Io.Writer.Error!void 
         .zext => try w.print("((_ zero_extend {d}) ", .{a.p}),
         .sext => try w.print("((_ sign_extend {d}) ", .{a.p}),
         .extract => try w.print("((_ extract {d} {d}) ", .{ a.p, a.q }),
-        .int2bv => try w.print("((_ int2bv {d}) ", .{a.p}),
-        .seq_empty => return w.writeAll("(as seq.empty (Seq Int))"),
-        .bv2nat => if (a.p == 1) {
-            const bits = pool.bitsOf(args[0]);
-            try w.writeAll("(ite (bvslt ");
-            try writeRef(w, pool, args[0]);
-            try w.print(" (_ bv0 {d})) (- (bv2nat ", .{bits});
-            try writeRef(w, pool, args[0]);
-            try w.print(") {d}) (bv2nat ", .{@as(u256, 1) << @intCast(bits)});
+        .seq_empty => return w.print("(as seq.empty (Seq (_ BitVec {d})))", .{term.ghost_bits}),
+        .seq_len => {
+            try w.print("((_ int2bv {d}) (seq.len ", .{term.ghost_bits});
             try writeRef(w, pool, args[0]);
             return w.writeAll("))");
-        } else try w.writeAll("(bv2nat "),
+        },
+        .seq_at => {
+            try w.writeAll("(seq.nth ");
+            try writeRef(w, pool, args[0]);
+            try w.writeAll(" (bv2nat ");
+            try writeRef(w, pool, args[1]);
+            return w.writeAll("))");
+        },
+        .seq_extract => {
+            try w.writeAll("(seq.extract ");
+            try writeRef(w, pool, args[0]);
+            try w.writeAll(" (bv2nat ");
+            try writeRef(w, pool, args[1]);
+            try w.writeAll(") (bv2nat ");
+            try writeRef(w, pool, args[2]);
+            return w.writeAll("))");
+        },
         else => {
             try w.writeByte('(');
             try w.writeAll(switch (a.op) {
@@ -139,20 +147,9 @@ fn writeApp(w: *Io.Writer, pool: *const Pool, a: term.App) Io.Writer.Error!void 
                 .concat => "concat",
                 .select => "select",
                 .store => "store",
-                .iadd => "+",
-                .isub => "-",
-                .imul => "*",
-                .idiv => "div",
-                .imod => "mod",
-                .ineg => "-",
-                .ilt => "<",
-                .ile => "<=",
                 .seq_unit => "seq.unit",
                 .seq_concat => "seq.++",
-                .seq_len => "seq.len",
-                .seq_at => "seq.nth",
-                .seq_extract => "seq.extract",
-                .zext, .sext, .extract, .int2bv, .seq_empty, .bv2nat => unreachable,
+                .zext, .sext, .extract, .seq_empty, .seq_len, .seq_at, .seq_extract => unreachable,
             });
             for (args) |arg| {
                 try w.writeByte(' ');
@@ -207,7 +204,7 @@ pub const SExpr = union(enum) {
 
 pub const Const = union(enum) {
     bool: bool,
-    bv: struct { bits: u16, value: u128 },
+    bv: struct { bits: u16, value: u256 },
     int: i128,
     other,
 
@@ -217,11 +214,11 @@ pub const Const = union(enum) {
                 if (std.mem.eql(u8, a, "true")) return .{ .bool = true };
                 if (std.mem.eql(u8, a, "false")) return .{ .bool = false };
                 if (std.mem.startsWith(u8, a, "#x")) {
-                    const v = std.fmt.parseInt(u128, a[2..], 16) catch return .other;
+                    const v = std.fmt.parseInt(u256, a[2..], 16) catch return .other;
                     return .{ .bv = .{ .bits = @intCast(4 * (a.len - 2)), .value = v } };
                 }
                 if (std.mem.startsWith(u8, a, "#b")) {
-                    const v = std.fmt.parseInt(u128, a[2..], 2) catch return .other;
+                    const v = std.fmt.parseInt(u256, a[2..], 2) catch return .other;
                     return .{ .bv = .{ .bits = @intCast(a.len - 2), .value = v } };
                 }
                 if (std.fmt.parseInt(i128, a, 10)) |v| return .{ .int = v } else |_| return .other;
@@ -232,7 +229,7 @@ pub const Const = union(enum) {
                     return .{ .int = -v };
                 }
                 if (l.len == 3 and l[0] == .atom and std.mem.eql(u8, l[0].atom, "_") and l[1] == .atom and std.mem.startsWith(u8, l[1].atom, "bv")) {
-                    const v = std.fmt.parseInt(u128, l[1].atom[2..], 10) catch return .other;
+                    const v = std.fmt.parseInt(u256, l[1].atom[2..], 10) catch return .other;
                     const bits = std.fmt.parseInt(u16, l[2].atom, 10) catch return .other;
                     return .{ .bv = .{ .bits = bits, .value = v } };
                 }

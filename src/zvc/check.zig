@@ -161,7 +161,7 @@ fn shrink(arena: Allocator, session: *smt.Session, v: *vc.Vc) Error!void {
             else => continue,
         };
         const bits = pool.bitsOf(t);
-        const candidates = [_]u128{ 0, 1, 2, 3, term.mask(bits), if (signed) (@as(u128, 1) << @intCast(bits - 1)) - 1 else 0, if (signed) @as(u128, 1) << @intCast(bits - 1) else 0 };
+        const candidates = [_]u256{ 0, 1, 2, 3, term.mask(bits), if (signed) (@as(u256, 1) << @intCast(bits - 1)) - 1 else 0, if (signed) @as(u256, 1) << @intCast(bits - 1) else 0 };
         for (candidates, 0..) |c, k| {
             if (k > 3 and in.kind == .slice) break;
             if (k > 4 and c == 0) continue;
