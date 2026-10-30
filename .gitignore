@@ -5,4 +5,5 @@ __pycache__/
 *.pyc
 .venv/
 *.zvp
-tests/consumer/own/SOURCES
+dist/
+zig-pkg/

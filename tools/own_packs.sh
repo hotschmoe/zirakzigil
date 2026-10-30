@@ -1,6 +1,6 @@
 #!/bin/sh
-# Exports the AIR packs of the zv-own suite and of tests/consumer from the sources in the tree (needs zig-zv, see
-# tools/zvc_export.sh). The packs are build products and not committed: tools/run_own.sh and the consumer read what this writes.
+# Exports the AIR packs of the zv-own suite from the sources in the tree (needs zig-zv, see
+# tools/zvc_export.sh). The packs are build products and not committed: tools/run_own.sh reads what this writes.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -29,5 +29,3 @@ for out in tests/own tests/own/std; do
     sh tools/zvc_export.sh $out tests/should_panic/double_consume.zig --dep ledger=examples/ledger.zig
 done
 unset ZV_AIR_STD
-sh tools/zvc_export.sh tests/consumer/own tests/consumer/own/handoff.zig
-(cd tests/consumer && sha256sum own/handoff.zig >own/SOURCES)

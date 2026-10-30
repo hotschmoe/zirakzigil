@@ -63,7 +63,7 @@ index=$work/$stem
 mkdir -p "$index"
 # shellcheck disable=SC2086
 ZV_AIR_OUT=$index "$zv" test -fno-emit-bin -target "$target" -mcpu baseline $lib \
-    --dep target --dep selection -Mroot="$root/tools/$air_root.zig" \
+    --dep target --dep selection -Mroot="$root/src/verify/$air_root.zig" \
     --dep zv$deps -Mtarget="$file"$dep_modules \
     --dep target -Mselection="$work/selection.zig" \
     --dep zv_options -Mzv="$root/src/zv.zig" \
