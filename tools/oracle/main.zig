@@ -98,6 +98,7 @@ pub fn main(init: std.process.Init) !void {
         } else fatal("unknown flag {s}", .{flag});
     }
     const own = cfg.own orelse try std.fmt.allocPrint(arena, "{s}/zig-out/bin/zv-own{s}", .{ cfg.repo, builtin.target.exeFileExt() });
+    cfg.own = own;
     var ctx: Ctx = .{ .gpa = init.gpa, .arena = arena, .io = init.io, .env = init.environ_map, .cfg = cfg, .own = own };
     try Io.Dir.cwd().createDirPath(ctx.io, cfg.out);
 
@@ -120,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn reportConfig(cfg: Config) report.Config {
-    return .{ .seed = cfg.seed, .count = cfg.count, .modes = cfg.modes };
+    return .{ .seed = cfg.seed, .count = cfg.count, .modes = cfg.modes, .own = cfg.own.? };
 }
 
 fn writeFile(ctx: *Ctx, dir: Io.Dir, name: []const u8, data: anytype, comptime write: anytype) !void {

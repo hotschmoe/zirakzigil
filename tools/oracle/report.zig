@@ -77,6 +77,7 @@ pub const Config = struct {
     seed: u64,
     count: u32,
     modes: [2]bool,
+    own: []const u8,
 };
 
 pub const Minimized = struct {
@@ -215,7 +216,7 @@ pub fn writeMarkdown(w: *Io.Writer, data: ReportData) !void {
         if (std.mem.eql(u8, r.detail, "does not compile")) compile_bad += 1;
     }
     const overall = rowOf(results, all, {});
-    try w.print("# zv-own differential oracle\n\nseed {d}, {d} programs generated; {d} dropped as invalid ({d} did not compile, {d} panicked for a reason that is not a memory error); {d} used.\n\n", .{ cfg.seed, cfg.count, invalid, compile_bad, invalid - compile_bad, overall.programs });
+    try w.print("# zv-own differential oracle\n\nzv-own binary: `{s}`\n\nseed {d}, {d} programs generated; {d} dropped as invalid ({d} did not compile, {d} panicked for a reason that is not a memory error); {d} used.\n\n", .{ cfg.own, cfg.seed, cfg.count, invalid, compile_bad, invalid - compile_bad, overall.programs });
     try w.print("Ground truth: {d} programs fault, {d} do not.\n\n", .{ overall.modes[0].faulting(), overall.modes[0].quiet() });
     try w.writeAll("A silent miss is a program that faults in Debug while zv-own says `clean` and the function's footer counts nothing it did not decide. A counted miss is the same with something undecided (the COUNTED verdict, or for an older zv-own a footer count); an assumed-only miss is `clean` with only an assumption in the footer (a call through a function pointer or to code outside the packs, a linear value handed to memory it does not follow). Silent rate = silent / faulting; false-positive rate = false positives / non-faulting. `plain` is the pack of the project alone (std's containers from the table in src/own/spec.zig); `std` is the pack with the std bodies (ZV_AIR_STD=1).\n\n");
     try w.writeAll("## Overall\n\n| mode | faulting | true finding | silent miss | counted miss (COUNTED verdict or undecided) | assumed only (clean, but a call or a value it does not follow) | unproven (faulting) | non-faulting | false positive | true clean | unproven (clean) |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");

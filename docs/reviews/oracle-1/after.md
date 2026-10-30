@@ -1,5 +1,7 @@
 # zv-own differential oracle
 
+zv-own binary: `C:/Users/hotschmoe/zr/own-work/oracle/rs/bin/zv-own.exe`
+
 seed 1, 6000 programs generated; 0 dropped as invalid (0 did not compile, 0 panicked for a reason that is not a memory error); 6000 used.
 
 Ground truth: 3275 programs fault, 2725 do not.

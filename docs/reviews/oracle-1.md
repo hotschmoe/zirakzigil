@@ -59,7 +59,7 @@ The minimizer removes units (statements) and motifs while the program still comp
 3. A subslice freed instead of the block (`m_buf`, 14+4+2 programs): `const w = v[1..]; a.free(w)` is an invalid free (Debug: the allocator is given a pointer that is not the start of an allocation). The checker does not model a free of a non-allocation. This is outside what `docs/phase3.md` claims, but it is a crash and it is silent: 10 of 39 `bug_invalid_free` programs.
 
 
-### Checked standalone
+### Checked standalone (and which zv-own)
 
 Each reproducer was exported alone (the prelude plus that one function, with and without `ZV_AIR_STD`) and inside its batch of 200 functions, and run through the zv-own of master's `src/own`: the verdict is `clean` with nothing counted in every case, the batch verdict equals the standalone one, and the function-name mapping and the mode of the report were checked against it. The node walk stays `clean` with `val: u32`, with a `*const Node` or `*Node` parameter, with the `rdn` check removed from `nextOf`, with `!void` instead of `anyerror!void`, and without the `selv` parameter. A pack of the coordinator's own file (`own-work/m7/node/out2/node2.zvp`) gives `FINDINGS node2.badDestroyInline` and `clean node2.badDestroyWalk`, `badDestroyWalkChecked`: the finding in that file is the inline `a.destroy(n1); doNotOptimizeAway(n1.v)`, not the walk. The same holds for the global (`stash(v); a.free(v); rd(g_slice)`), the subslice free and the other two node reproducers (`a.destroy(n1); rdn(n2.next.?)`, and the walk followed by `a.destroy(n1)`). So these are context-free misses of the checker, not artefacts of the batch or of the oracle's parsing.
 Before 0.17.22 the reproducers of the same run were more varied; each of these was silent and is `COUNTED` now (from [before](oracle-1/before.md)):
@@ -103,3 +103,7 @@ zig build oracle -Doracle-seed=1 -Doracle-count=300      # the CI-sized default,
 ```
 
 Time on the machine of this run: 6000 programs, both modes, 25 minutes; each minimization 20 to 30 seconds.
+
+## Which zv-own, and a disagreement settled
+
+The report header now prints the zv-own binary it used. "Before" used a build of e7f91a1; "after" used `zig build zv-own -Doptimize=ReleaseSafe` of the merged tree (src/own identical to master's), with the same numbers as the first "after" run from an earlier build of #28. `zig build -Doptimize=ReleaseSafe` alone does not install zv-own (only the `zv-own` step does), so a `zig-out/bin/zv-own.exe` older than the last source change is easy to get; a build of the tree under test (as `zig build oracle` does) is what the numbers are about. A zv-own that finds the node walk in `node2.zvp` is a different build from the one of this tree: this tree, built in Debug and in ReleaseSafe, says `clean` for `badDestroyWalk` on the same pack.
