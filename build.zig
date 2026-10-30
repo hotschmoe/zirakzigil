@@ -68,104 +68,207 @@ pub fn addAssuranceGate(b: *std.Build, options: AssuranceGateOptions) *std.Build
     return gate(b, options, dep.module("zv"), dep.path("src/gate/instrument.zig"));
 }
 
-pub const VerifyGateOptions = struct {
-    /// Checked-in AIR packs (`tools/zvc_export.sh`), relative to the project root.
-    packs: []const []const u8,
-    /// The sources the packs were exported from, one `SHA256  PATH` line each, relative to the project root.
-    pins: []const u8,
-    /// Where the packs' module-relative source paths resolve, relative to the project root.
-    src: []const u8 = "src",
-    /// Pinned verdicts, one `NAME proved|refuted|unproven` per line. Without it every function must be proved.
-    expect: ?[]const u8 = null,
-    /// Refuse a loop that states no `zv.decreases`.
-    total: bool = false,
-    /// Fail when the proofs take more than this many distinct `.trusted` functions on faith. The count is listed in
-    /// every run; setting this ratchets it.
-    max_trusted: ?u32 = null,
-    /// Fail when the proofs rest on more than this many distinct `zv.assume` calls. Listed in every run.
-    max_assume: ?u32 = null,
+const zon = @import("build.zig.zon");
+
+pub const Export = struct {
+    /// The source file whose public functions are exported (and their callees), relative to the project root. Its
+    /// name without extension names the pack, so two exports need two names.
+    file: []const u8,
+    /// Dotted paths of the containers to export, as the file sees them (`wire.tcp.SeqNumber`). Empty: the file.
+    only: []const []const u8 = &.{},
+    /// `NAME=FILE.zig`: another module of the project that the file imports by NAME. Every module sees `zv`.
+    deps: []const []const u8 = &.{},
+    /// Only the first level of the selection, not the containers and files below it.
+    shallow: bool = false,
+    /// Also export the std functions the project reaches, which the ownership checker reads instead of a table.
+    std: bool = false,
 };
 
-/// Adds the `verify` step: `zvc` proves every function the sources' assurance manifests mark `.verified`
-/// from the checked-in AIR packs, and fails when one is refuted, unproven, missing from the packs, relies on a
-/// `.verified` callee that is not proved, or when a pinned source changed since the packs were exported.
-/// Z3 is found through `-Dz3=PATH`, `ZV_Z3` or `PATH`.
-pub fn addVerifyGate(b: *std.Build, options: VerifyGateOptions) *std.Build.Step {
-    const dep = b.dependencyFromBuildZig(@This(), .{ .ghost = false });
-    const zvc = b.addExecutable(.{ .name = "zvc", .root_module = b.createModule(.{
-        .root_source_file = dep.path("src/zvc/main.zig"),
-        .target = b.graph.host,
-        .optimize = .ReleaseSafe,
-        .imports = &.{.{ .name = "zv_air", .module = dep.module("zv_air") }},
-    }) });
-    const run = b.addRunArtifact(zvc);
-    run.setCwd(b.path("."));
-    run.has_side_effects = true;
-    run.addArgs(&.{ "--pins", options.pins, "--src", options.src });
-    if (options.expect) |path| run.addArgs(&.{ "--expect", path });
-    if (options.total) run.addArg("--total");
-    if (options.max_trusted) |limit| run.addArgs(&.{ "--max-trusted", b.fmt("{d}", .{limit}) });
-    if (options.max_assume) |limit| run.addArgs(&.{ "--max-assume", b.fmt("{d}", .{limit}) });
-    if (b.option([]const u8, "z3", "Path of the Z3 executable for `zig build verify`")) |path| run.addArgs(&.{ "--z3", path });
-    run.addArgs(options.packs);
-    const step = b.step("verify", "Prove every .verified function from the checked-in AIR packs");
-    step.dependOn(&run.step);
-    return step;
-}
-
-pub const OwnershipGateOptions = struct {
-    /// Checked-in AIR packs (`tools/zvc_export.sh`), relative to the project root.
-    packs: []const []const u8,
-    /// The sources the packs were exported from, one `SHA256  PATH` line each, relative to the project root.
-    pins: []const u8,
-    /// Where the packs' module-relative source paths resolve, relative to the project root.
-    src: []const u8 = "src",
+pub const OwnOptions = struct {
     /// Check only functions declared in files whose module-relative path starts with one of these. Empty: every
     /// function the packs hold except `zv` itself.
     files: []const []const u8 = &.{},
     /// Pinned verdicts, one `NAME clean|error|unproven` per line. Without it every checked function must be clean.
     expect: ?[]const u8 = null,
-    /// Fail when more than this many functions are unproven (outside the checker's supported fragment). The count
-    /// is listed in every run; setting it ratchets it.
+    /// Fail when more than this many functions are unproven (outside the checker's supported fragment).
     max_unproven: ?u32 = null,
     /// Fail when the functions leave more than this many ends and uses undecided (counted, not reported): `clean` is
     /// relative to what the checker validated, and this is how much it did not decide. See `docs/phase3.md`.
     max_undecided: ?u32 = null,
-    /// Pinned undecided counts, one `NAME N` per line (`zv-own --write-baseline` writes it): a function that leaves more
-    /// than its line says, or than 0 when it has none, fails the build. Counts may only go down.
+    /// Pinned undecided counts, one `NAME N` per line (`zv-own --write-baseline` writes it). Counts may only go down.
     baseline: ?[]const u8 = null,
-    /// The step's name, for a project with several gates (the checked library, and seeded mistakes with pinned verdicts).
-    step: []const u8 = "own",
     /// Fail when more than this many functions are declared `.trusted` in an `ownership` manifest.
     max_trusted: ?u32 = null,
     /// Where a module other than `src` (a dependency, `zv`) keeps its sources: `NAME=DIR` relative to the project root.
     modules: []const []const u8 = &.{},
 };
 
-/// Adds the `own` step: `zv-own` checks the functions of the checked-in AIR packs for ownership mistakes
-/// (linear values consumed twice or not at all, memory used after it was freed or invalidated, pointers that
-/// outlive what they point into) and fails when one has a finding, when `max_unproven` is exceeded, or when a
-/// pinned source changed since the packs were exported. See `docs/phase3.md`.
-pub fn addOwnershipGate(b: *std.Build, options: OwnershipGateOptions) *std.Build.Step {
+pub const VerifyOptions = struct {
+    exports: []const Export,
+    /// Where the packs' module-relative source paths resolve, relative to the project root.
+    src: []const u8 = "src",
+    /// Refuse a loop that states no `zv.decreases`.
+    total: bool = false,
+    /// Fail when the proofs take more than this many distinct `.trusted` functions on faith. Listed in every run.
+    max_trusted: ?u32 = null,
+    /// Fail when the proofs rest on more than this many distinct `zv.assume` calls. Listed in every run.
+    max_assume: ?u32 = null,
+    /// Solver time per obligation.
+    timeout_ms: u32 = 10_000,
+    /// The ownership checker; null skips it.
+    own: ?OwnOptions = .{},
+};
+
+/// Adds `zig build verify`, with `prove` (the `.verified` functions) and `own` (ownership) as its parts.
+///
+/// Everything needed is fetched or built for you, once: the zig-zv compiler for the pinned Zig tag (a prebuilt asset of
+/// this package's release, checksummed in its build.zig.zon, else built from source with a message), and the pinned Z3
+/// release. The sources are exported to AIR packs on every run, `zvc` proves every function the assurance manifests
+/// mark `.verified`, and `zv-own` checks ownership. A verdict is cached per function, keyed by its AIR and its
+/// callees', so an edit re-proves only what it can change.
+///
+/// Overrides: `-Dzig-zv=PATH`, `-Dzv-from-source`, `-Dz3=PATH` or `ZV_Z3`.
+pub fn addVerify(b: *std.Build, options: VerifyOptions) *std.Build.Step {
     const dep = b.dependencyFromBuildZig(@This(), .{ .ghost = false });
-    const own = b.addExecutable(.{ .name = "zv-own", .root_module = ownModule(b, dep.path("src"), dep.module("zv_air"), b.graph.host, .ReleaseSafe) });
-    const run = b.addRunArtifact(own);
-    run.setCwd(b.path("."));
-    run.has_side_effects = true;
-    run.addArgs(&.{ "--pins", options.pins, "--src", options.src });
-    for (options.files) |prefix| run.addArgs(&.{ "--files", prefix });
-    if (options.expect) |path| run.addArgs(&.{ "--expect", path });
-    if (options.max_unproven) |limit| run.addArgs(&.{ "--max-unproven", b.fmt("{d}", .{limit}) });
-    if (options.max_trusted) |limit| run.addArgs(&.{ "--max-trusted", b.fmt("{d}", .{limit}) });
-    if (options.max_undecided) |limit| run.addArgs(&.{ "--max-undecided", b.fmt("{d}", .{limit}) });
-    if (options.baseline) |path| run.addArgs(&.{ "--baseline", path });
-    for (options.modules) |m| run.addArgs(&.{ "--module", m });
-    run.addArg("--module");
-    run.addPrefixedDirectoryArg("zv=", dep.path("src"));
-    run.addArgs(options.packs);
-    const step = b.step(options.step, "Check the ownership of the functions in the checked-in AIR packs");
-    step.dependOn(&run.step);
-    return step;
+    const zig_zv_path = b.option([]const u8, "zig-zv", "Use this zig-zv executable instead of the pinned release");
+    const from_source = b.option(bool, "zv-from-source", "Build zig-zv from source instead of fetching the prebuilt release") orelse false;
+    const z3_path = b.option([]const u8, "z3", "Use this Z3 executable instead of the pinned release");
+    b.graph.poisonCache();
+    const z3_env = b.graph.environ_map.get("ZV_Z3");
+    const windows = b.graph.host.result.os.tag == .windows;
+
+    const sources = b.createModule(.{
+        .root_source_file = dep.path("src/zvc/sources.zig"),
+        .imports = &.{.{ .name = "zv_air", .module = dep.module("zv_air") }},
+    });
+    const tool = b.addExecutable(.{ .name = "zv-verify", .root_module = b.createModule(.{
+        .root_source_file = dep.path("src/verify/main.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .imports = &.{
+            .{ .name = "zv_air", .module = dep.module("zv_air") },
+            .{ .name = "zv_sources", .module = sources },
+        },
+    }) });
+    const zvc = b.addExecutable(.{ .name = "zvc", .root_module = b.createModule(.{
+        .root_source_file = dep.path("src/zvc/main.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .imports = &.{.{ .name = "zv_air", .module = dep.module("zv_air") }},
+    }) });
+
+    const cache: std.Build.LazyPath = .cache_root;
+    const packs = cache.path(b, "zv/packs");
+
+    const exporter = b.addRunArtifact(tool);
+    exporter.setCwd(b.path("."));
+    exporter.has_side_effects = true;
+    exporter.addArg("export");
+    const prebuilt: Pin = if (zig_zv_path != null or from_source) .absent else pin(dep, "zig_zv");
+    if (zig_zv_path) |path| {
+        exporter.addArgs(&.{ "--zig-zv", path });
+    } else switch (prebuilt) {
+        .available => |asset| {
+            exporter.addArg("--zig-zv");
+            exporter.addFileArg(asset.path(if (windows) "zig-zv.exe" else "zig-zv"));
+        },
+        .fetching => {},
+        .absent => {
+            exporter.addArg("--ensure");
+            exporter.addFileArg(dep.path("tools/ensure_zig_zv.sh"));
+            exporter.addArg("--work");
+            exporter.addFileArg(b.graph.path(.global_cache, "zv"));
+        },
+    }
+    exporter.addArg("--zig");
+    exporter.addFileArg(.zig_exe);
+    exporter.addArg("--lib");
+    exporter.addFileArg(.zig_lib);
+    exporter.addArg("--zv-src");
+    exporter.addFileArg(dep.path("src/zv.zig"));
+    exporter.addArg("--roots");
+    exporter.addFileArg(dep.path("src/verify"));
+    exporter.addArg("--out");
+    exporter.addFileArg(packs);
+    for (options.exports) |e| {
+        exporter.addArgs(&.{ "--file", e.file });
+        for (e.only) |path| exporter.addArgs(&.{ "--only", path });
+        for (e.deps) |d| exporter.addArgs(&.{ "--dep", d });
+        if (e.shallow) exporter.addArg("--shallow");
+        if (e.std) exporter.addArg("--std");
+    }
+
+    const z3: ?std.Build.LazyPath = if (z3_path) |path| b.graph.cwdRelativePath(path) else if (z3_env != null) null else switch (pin(dep, "z3")) {
+        .available => |asset| asset.path(if (windows) "bin/z3.exe" else "bin/z3"),
+        .fetching, .absent => null,
+    };
+
+    const prove = b.addRunArtifact(tool);
+    prove.setCwd(b.path("."));
+    prove.has_side_effects = true;
+    prove.addArg("check");
+    prove.addArg("--zvc");
+    prove.addArtifactArg(zvc);
+    prove.addArg("--cache");
+    prove.addFileArg(cache.path(b, "zv/verdicts"));
+    if (z3) |path| {
+        prove.addArg("--z3");
+        prove.addFileArg(path);
+    }
+    prove.addArgs(&.{ "--src", options.src, "--timeout", b.fmt("{d}", .{options.timeout_ms}) });
+    if (options.total) prove.addArg("--total");
+    if (options.max_trusted) |limit| prove.addArgs(&.{ "--max-trusted", b.fmt("{d}", .{limit}) });
+    if (options.max_assume) |limit| prove.addArgs(&.{ "--max-assume", b.fmt("{d}", .{limit}) });
+    for (options.exports) |e| prove.addFileArg(packs.path(b, b.fmt("{s}.zvp", .{std.fs.path.stem(e.file)})));
+    prove.step.dependOn(&exporter.step);
+    const prove_step = b.step("prove", "Prove every .verified function from freshly exported AIR (verdicts are cached per function)");
+    prove_step.dependOn(&prove.step);
+
+    const verify = b.step("verify", "Export AIR, prove the .verified functions, check ownership");
+    verify.dependOn(prove_step);
+
+    if (options.own) |own_options| {
+        const own = b.addExecutable(.{ .name = "zv-own", .root_module = ownModule(b, dep.path("src"), dep.module("zv_air"), b.graph.host, .ReleaseSafe) });
+        const run = b.addRunArtifact(own);
+        run.setCwd(b.path("."));
+        run.has_side_effects = true;
+        run.addArgs(&.{ "--src", options.src });
+        for (own_options.files) |prefix| run.addArgs(&.{ "--files", prefix });
+        if (own_options.expect) |path| run.addArgs(&.{ "--expect", path });
+        if (own_options.max_unproven) |limit| run.addArgs(&.{ "--max-unproven", b.fmt("{d}", .{limit}) });
+        if (own_options.max_trusted) |limit| run.addArgs(&.{ "--max-trusted", b.fmt("{d}", .{limit}) });
+        if (own_options.max_undecided) |limit| run.addArgs(&.{ "--max-undecided", b.fmt("{d}", .{limit}) });
+        if (own_options.baseline) |path| run.addArgs(&.{ "--baseline", path });
+        for (own_options.modules) |m| run.addArgs(&.{ "--module", m });
+        run.addArg("--module");
+        run.addPrefixedDirectoryArg("zv=", dep.path("src"));
+        for (options.exports) |e| run.addFileArg(packs.path(b, b.fmt("{s}.zvp", .{std.fs.path.stem(e.file)})));
+        run.step.dependOn(&exporter.step);
+        const own_step = b.step("own", "Check the ownership of the functions in freshly exported AIR");
+        own_step.dependOn(&run.step);
+        verify.dependOn(own_step);
+    }
+    return verify;
+}
+
+const Pin = union(enum) {
+    /// Nothing is pinned for this host.
+    absent,
+    /// Pinned and being fetched: the configure phase is rerun once it is there.
+    fetching,
+    available: *std.Build.Dependency,
+};
+
+/// The lazy dependency of this package's build.zig.zon named `PREFIX_ARCH_OS` for the host.
+fn pin(dep: *std.Build.Dependency, comptime prefix: []const u8) Pin {
+    const host = dep.builder.graph.host.result;
+    const want = dep.builder.fmt("{s}_{t}_{t}", .{ prefix, host.cpu.arch, host.os.tag });
+    inline for (@typeInfo(@TypeOf(zon.dependencies)).@"struct".field_names) |name| {
+        if (std.mem.eql(u8, name, want)) {
+            return if (dep.builder.lazyDependency(name, .{})) |asset| .{ .available = asset } else .fetching;
+        }
+    }
+    return .absent;
 }
 
 fn gate(b: *std.Build, options: AssuranceGateOptions, zv: *std.Build.Module, instrument_source: std.Build.LazyPath) *std.Build.Step {
@@ -382,7 +485,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&gate_fail.step);
 
     // Downstream-consumer check: a separate project that depends on this one by path.
-    const consumer = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test", "assurance", "own", b.fmt("-Dghost={}", .{ghost}), b.fmt("-Doptimize={t}", .{optimize}) });
+    const consumer = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test", "assurance", b.fmt("-Dghost={}", .{ghost}), b.fmt("-Doptimize={t}", .{optimize}) });
     consumer.setCwd(b.path("tests/consumer"));
     consumer.has_side_effects = true;
     const consumer_step = b.step("consumer", "Build and test tests/consumer against this package");
@@ -428,7 +531,7 @@ pub fn build(b: *std.Build) void {
     b.step("zv-own", "Install the ownership checker").dependOn(&b.addInstallArtifact(own, .{}).step);
 }
 
-/// The module `zv-own` is built from; consumers build it from this package's sources with `addOwnershipGate`.
+/// The module `zv-own` is built from; consumers build it from this package's sources with `addVerify`.
 fn ownModule(b: *std.Build, src: std.Build.LazyPath, air: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const sources = b.createModule(.{
         .root_source_file = src.path(b, "zvc/sources.zig"),

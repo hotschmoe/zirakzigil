@@ -4,6 +4,7 @@ const zv = @import("zv");
 
 pub const ring_buffer = @import("ring_buffer.zig");
 pub const seq = @import("seq.zig");
+pub const bounds = @import("bounds.zig");
 
 /// Namespaces nest, like `zmoltcp.wire.tcp`.
 pub const storage = struct {
@@ -19,4 +20,5 @@ comptime {
 test {
     _ = ring_buffer;
     _ = seq;
+    _ = bounds;
 }

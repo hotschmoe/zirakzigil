@@ -29,7 +29,7 @@ Contract counts agree wherever zvc parses the function. Differences:
 - AIR covers `scale`, which zvc rejects as outside its subset; types and generics are already resolved (`zv.mul` shows up as its own instance).
 - zvc sees source constructs; AIR shows what the compiler made of them: safety checks as `*_safe` instructions, bounds checks as `cond_br` into `debug.defaultPanic`, and each contract as a call whose body is the panic branch. These are exactly the obligations zvc derives by hand.
 - Parameter names are not in the export (AIR has only ZIR parameter indexes). Phase 2 can recover them from `dbg_arg_inline` in the inline bodies or by adding names from ZIR to the adapter.
-- Functions only appear if the compiler analyzes them. `withdrawNaive` is called by no test, so it needs `tools/air_all.zig` as the root.
+- Functions only appear if the compiler analyzes them. `withdrawNaive` is called by no test, so it needs `src/verify/air_all.zig` as the root.
 
 ## M3: zmoltcp (37.5k lines)
 

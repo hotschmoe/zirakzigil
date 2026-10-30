@@ -78,7 +78,7 @@ A refuted obligation prints the function, the position the AIR carries mapped to
 
 ## A real kernel (M3): zmoltcp 0.5.2
 
-Seven functions of zmoltcp are `.verified` and proved by `zig build verify` (`zirakzigil.addVerifyGate`, [adoption.md](adoption.md)) from the checked-in export of its real `src/root.zig` (Z3 4.16.0, Windows and Linux, 1.0 s):
+Seven functions of zmoltcp are `.verified` and proved by `zig build verify` (`zirakzigil.addVerify`, [adoption.md](adoption.md)) from the export of its real `src/root.zig` (Z3 4.16.0, Windows and Linux, 1.0 s):
 
 | function | what is proved | time |
 | --- | --- | --- |

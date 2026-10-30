@@ -132,49 +132,47 @@ pub fn main(init: std.process.Init) !void {
 
 The step is `zig build assurance`, and it is attached to the default step, so a plain `zig build` reports the gate and fails on a gap. Claims that come from other packages (a dependency's `Slots` handle reached through your re-export, for example) are listed as foreign: their own package gates them. `tests/gate_fail/` is the negative test: a claim no law runs must fail the build and be named.
 
-## Proving `.verified` functions
+## Verifying: `zig build verify`
 
-`.verified` means `zvc` proves the function's contracts and the absence of every safety panic ([phase2.md](phase2.md)). Write the contracts with `zv.requires`, `zv.ensures`, `zv.invariant` and `zv.decreases` (specifications that must not wrap use `zv.Int` behind `zv.ghost`), set the function to `.verified` in the manifest, and:
-
-1. Export its AIR with a zig-zv compiler, in Debug and with ghost code on: `tools/zvc_export.sh verify/ src/root.zig --only wire.checksum --only wire.tcp.SeqNumber`. Each `--only` names a container, as the root sees it, whose pub functions are exported.
-2. Check the pack in with the sources it came from: `verify/PINS` has one `SHA256  PATH` line per source file.
-3. Add the gate to `build.zig` and run it:
+`.verified` means `zvc` proves the function's contracts and the absence of every safety panic ([phase2.md](phase2.md)); `zv-own` checks ownership mistakes (a `zv.Linear` consumed twice, memory used after `free`, a pointer left stale by `append`, a pointer to a local that outlives it; [phase3.md](phase3.md)). Write the contracts with `zv.requires`, `zv.ensures`, `zv.invariant` and `zv.decreases` (specifications that must not wrap use `zv.Int` behind `zv.ghost`), set the function to `.verified` in the manifest, and add one call to `build.zig`:
 
 ```zig
-_ = zirakzigil.addVerifyGate(b, .{
-    .packs = &.{"verify/zmoltcp.zvp"},
-    .pins = "verify/PINS",
+_ = zirakzigil.addVerify(b, .{
+    .exports = &.{
+        .{ .file = "src/root.zig", .only = &.{ "wire.checksum", "wire.tcp.SeqNumber" } },
+    },
     .src = "src",
+    .max_trusted = 0, // optional ratchets: fail when the proofs take more than N `.trusted` functions on faith
 });
 ```
 
-`zig build verify` builds `zvc` from this package, finds Z3 (`-Dz3=PATH`, `ZV_Z3` or `PATH`; `tools/install_z3.sh DEST` installs the pinned release) and fails when a `.verified` function is refuted, unproven, or missing from the pack, or when a pinned source changed since the export: a claim cannot outlive the code it was proved of, and a pack is cheap to regenerate but never trusted stale. A proof that uses another function's contract is only as good as that function: a `.verified` callee that fails fails the caller, and a `.trusted` one is listed in the run as an assumption (`max_trusted` in the gate options fails the run when there are more than N). Stock Zig runs the gate; only exporting needs the patched compiler.
+`zig build verify` is everything, and `zig build prove` and `zig build own` are its two halves. There is nothing to install and nothing to export by hand:
 
-## Checking ownership: `zig build own`
+1. **zig-zv** (the patched compiler that exports AIR) is fetched as a prebuilt, checksummed asset of the zirakzigil release (`zig-zv-<zig tag>-<patch queue hash>-<arch>-<os>.tar.gz`, a lazy dependency of this package's `build.zig.zon`, so the Zig package manager verifies its content hash). Prebuilt: x86_64 Windows and x86_64 Linux (glibc 2.39 or newer). On any other host, or with `-Dzv-from-source`, `zig build` says so and builds zig-zv from source once (about 8 minutes and 9 GB of memory, needs `git` and `sh`) into the global Zig cache. `-Dzig-zv=PATH` uses a compiler you built.
+2. **Z3** is the pinned upstream release (4.16.0, a lazy dependency checked by content hash; Windows and Linux x86_64). `ZV_Z3` or `-Dz3=PATH` use your own.
+3. The sources named in `.exports` are **exported on every run** (Debug, ghost code on, a fixed target, never linked: it takes a second or two), so a pack is never stale and nothing is checked in. `.only` names containers, as the file sees them, whose pub functions are exported; without it the file's whole tree is. `.deps = &.{"name=file.zig"}` adds a module the file imports by name, `.std = true` also exports the std functions the project reaches (the ownership checker then reads what `append`, `put` or `getOrPut` do instead of relying on its table), and `.shallow = true` exports only the first level of the selection.
+4. **Verdicts are cached per function** in `.zig-cache/zv/verdicts`, keyed by the AIR of the function and of everything it calls, their manifest levels, the timeout and the versions of `zvc` and Z3. After an edit only the functions it can change are proved again; a refuted or unproven function is never cached. A proof that uses another function's contract is only as good as that function: a `.verified` callee that fails fails the caller, and a `.trusted` one is listed in the run as an assumption.
 
-`zv-own` checks a project's code for ownership mistakes (a `zv.Linear` consumed twice, memory used after `free`, a pointer left stale by `append`, a pointer to a local that outlives it; [phase3.md](phase3.md)) from the same AIR packs. Nothing is written in the code for std's allocators and containers, `zv.Pool`, `zv.Slots` and `zv.Linear`: the types and the calls say it. A project type with its own invalidation rule adds one manifest line, checked at comptime:
+`zig build verify` fails when a `.verified` function is refuted, unproven or missing from the packs. The ownership half takes `.own = .{ ... }` (`null` skips it):
+
+```zig
+.own = .{
+    .max_unproven = 0,   // a function outside what the checker models fails the build until it is looked at
+    .max_trusted = 0,    // `.trusted` entries of the ownership manifest are exempt and counted
+    .max_undecided = 0,  // or `.baseline = "own/undecided.baseline"`: what the run leaves open may not grow
+},
+```
+
+A project type with its own invalidation rule adds one manifest line, checked at comptime:
 
 ```zig
 pub const ownership = .{ .remove = .invalidates };   // pointers handed out by get() are stale after remove()
 comptime { zv.requireOwnership(@This()); }
 ```
 
-1. Export the whole project, generics instantiated the way the assurance manifests witness them, with a zig-zv compiler: `ZVC_DEEP=1 tools/zvc_export.sh own/ src/root.zig --only wire --only 'socket.tcp.Socket(target.wire.ipv4, 4)' ...` (zmoltcp's `own/export.sh` is a complete example, including the pins). A project that uses std's containers or allocators should export with `ZV_AIR_STD=1` as well: the pack then holds the bodies of the std functions it reaches (the script cuts it with `zv-air slice`; about four times the size of the project alone), and the checker reads what `append`, `put` or `getOrPut` do instead of relying on its table of them. Without it the table is used, and a container method that is not in it is counted in the footer.
-2. Check the pack in with `own/PINS`, as for `verify`.
-3. Add the gate:
+It fails on a finding (printed with `file:line:col`, the path taken and notes at the related places), on more unproven or trusted functions than allowed, and on more undecided ends and uses than `max_undecided` (or than a function's line in the `baseline` file, which `zv-own --write-baseline` writes and which may only go down). A function with something undecided is `COUNTED`, not `clean`: read `clean` as "nothing left open, relative to the constructs the checker validated" (phase3.md lists the counted classes and the known silent ones). Every run ends with what it assumed and did not check. `tests/consumer/` is a working miniature: `bounds.zig` has three `.verified` functions and `handoff.zig` is checked for ownership, and `tools/consumer_flow.sh` runs the whole flow in a fresh project (CI does, on Windows and Linux).
 
-```zig
-_ = zirakzigil.addOwnershipGate(b, .{
-    .packs = &.{"own/project.zvp"},
-    .pins = "own/PINS",
-    .src = "src",
-    .max_unproven = 0,   // a function outside what the checker models fails the build until it is looked at
-    .max_trusted = 0,    // `.trusted` entries of the ownership manifest are exempt and counted
-    .max_undecided = 0,  // or `.baseline = "own/undecided.baseline"`: what the run leaves open may not grow
-});
-```
-
-`zig build own` fails on a finding (printed with `file:line:col`, the path taken and notes at the related places), on more unproven or trusted functions than allowed, on more undecided ends and uses than `max_undecided` (or than a function's line in the `baseline` file, which `zv-own --write-baseline` writes and which may only go down), and on a pinned source that changed since the export. A function with something undecided is `COUNTED`, not `clean`: read `clean` as "nothing left open, relative to the constructs the checker validated" (phase3.md lists the counted classes and the known silent ones). A second gate with `.step = "own-seeded"`, `.expect = "..."` and `.files` pins the verdicts on mistakes seeded in the shape of the project's own API. Every run ends with what it assumed and did not check (calls into code with no model, linear values handed on, container methods with no model, operations on memory it cannot name, resizes by a length it cannot show to be non-zero). Stock Zig runs the gate; only exporting needs the patched compiler.
+The checks stock Zig runs are the checkers (`zvc`, `zv-own`, built from this package's sources); only the export needs the patched compiler, and `zig-zv` never links an executable here (see [phase1.md](phase1.md)).
 
 ## Borrowed slots: `zv.Slots`
 

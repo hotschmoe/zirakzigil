@@ -12,7 +12,7 @@ ZVC_DEEP=1 tools/zvc_export.sh OUT_DIR FILE.zig [--only PATH]...   a whole proje
 ZV_AIR_STD=1 tools/zvc_export.sh OUT_DIR FILE.zig                  also the std functions the project reaches (the effects of std's containers are then read from their bodies)
 zv-air slice PACK OUT.zvp                                         what `ZV_AIR_STD` does to a pack, on any pack: the project and what it reaches in std
 tools/run_own.sh                                                 the suite: packs from tools/own_packs.sh against pinned verdicts (CI)
-zirakzigil.addOwnershipGate(b, .{ .packs = ..., .pins = ... })   `zig build own` in a consumer project
+zirakzigil.addVerify(b, .{ .exports = ..., .own = .{} })               `zig build verify` and `zig build own` in a consumer project
 ```
 
 A function gets one of four verdicts: `clean` (no finding, and every end and every use the run met was decided: nothing is left open), `COUNTED` (no finding, but at least one end or use is counted as undecided, with the reason printed under the function), `FINDINGS` (at least one mistake, each with `file:line:col`, the source line, notes that point at the related places and the branches taken to get there) or `UNPROVEN` (the function uses a construct outside the supported fragment, with the position and reason; it is neither accepted nor refuted). Exit status is 0 when no function has a finding and none is unproven, or, with `--expect`, when every verdict equals the pinned one (a pinned `counted` also accepts `clean`: a pack with std's bodies may decide what the model leaves open; a pinned `clean` accepts nothing else). `--max-undecided N` and `--baseline FILE` fail the run when it leaves more undecided than allowed, in all and per function (below).

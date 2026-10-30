@@ -1,8 +1,19 @@
 .{
     .name = .zirakzigil,
-    .version = "0.17.26",
+    .version = "0.17.28",
     .fingerprint = 0x1b490422d9c422ea,
     .minimum_zig_version = "0.17.0",
-    .dependencies = .{},
-    .paths = .{ "build.zig", "build.zig.zon", "src", "examples", "tests", "LICENSE", "README.md" },
+    .dependencies = .{
+        .z3_x86_64_windows = .{
+            .url = "https://github.com/Z3Prover/z3/releases/download/z3-4.16.0/z3-4.16.0-x64-win.zip",
+            .hash = "N-V-__8AAGk9zQpo_mXxQT_LDqYvr9RL-3U0rM1VplNmyrJG",
+            .lazy = true,
+        },
+        .z3_x86_64_linux = .{
+            .url = "https://github.com/Z3Prover/z3/releases/download/z3-4.16.0/z3-4.16.0-x64-glibc-2.39.zip",
+            .hash = "N-V-__8AAOFqawnUwRTmFTGvbVWfHnkM210U7NpSWbywUh1P",
+            .lazy = true,
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "examples", "tests", "compiler", "tools", "LICENSE", "README.md" },
 }
