@@ -15,6 +15,8 @@ python=python3
 python3 -c "" >/dev/null 2>&1 || python=python
 
 work=${1:-$(mktemp -d)}
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
 rm -rf "$work"
 mkdir -p "$work/assets" "$work/zirakzigil" "$work/proj"
 server=
@@ -32,6 +34,8 @@ server=$!
 sleep 2
 (cd "$work/zirakzigil" && ZV_PIN_TARGETS=$target sh tools/pin_assets.sh flow "http://127.0.0.1:$port" >/dev/null)
 
+# A clean slate: Z3 must come from its pinned release, and the caches must be empty.
+unset ZV_Z3 ZIG_LIB ZIG_LOCAL_CACHE_DIR
 export ZIG_GLOBAL_CACHE_DIR=$work/global-cache
 cd "$work/proj"
 now() { date +%s; }
