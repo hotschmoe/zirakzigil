@@ -7,10 +7,13 @@
 //!     --files PREFIX             only functions declared in files whose module-relative path starts with PREFIX (repeatable)
 //!     --project NAME             a module whose functions are the project's (repeatable; default `target` and `root`): the
 //!                                others are dependencies, which are checked and printed but counted apart
-//!     --expect FILE              lines `NAME clean|error|unproven`; exit 0 iff every verdict equals the pinned one
+//!     --expect FILE              lines `NAME clean|counted|error|unproven`; exit 0 iff every verdict equals the pinned one
 //!     --pins FILE                lines `SHA256 PATH`: the sources the packs were exported from; any difference is an error
 //!     --max-unproven N           fail when more than N functions are unproven
 //!     --max-trusted N            fail when more than N functions are declared `.trusted` in an `ownership` manifest
+//!     --max-undecided N          fail when the project's functions leave more than N ends and uses undecided (counted, not reported)
+//!     --baseline FILE            lines `NAME N`: a function that leaves more than N undecided (none when it is not listed) fails
+//!     --write-baseline FILE      write the baseline of this run: every project function that leaves something undecided
 //!     --summary                  one line per function, clean ones too
 //!     --effects                  as --summary, and what each function was found to do (kills, frees, returns, stores) and assumed
 //!     --dump                     the AIR of the selected functions as text, and stop
@@ -29,7 +32,8 @@ const diag = @import("diag.zig");
 const dump = @import("dump.zig");
 const spec = @import("spec.zig");
 
-const Verdict = enum { clean, @"error", unproven, trusted };
+/// `counted`: no finding, but something the run met is left open (see `Stats.undecided`); `clean` means nothing is.
+const Verdict = enum { clean, counted, @"error", unproven, trusted };
 
 const Options = struct {
     paths: []const []const u8 = &.{},
@@ -41,6 +45,9 @@ const Options = struct {
     pins: ?[]const u8 = null,
     max_unproven: ?usize = null,
     max_trusted: ?usize = null,
+    max_undecided: ?usize = null,
+    baseline: ?[]const u8 = null,
+    write_baseline: ?[]const u8 = null,
     summary: bool = false,
     effects: bool = false,
     dump: bool = false,
@@ -109,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         const result = try prog.analyze(.{ .pack = pack, .func = f });
-        const verdict: Verdict = if (trusted.contains(name)) .trusted else if (result.errors() != 0) .@"error" else if (result.unsupported()) .unproven else .clean;
+        const verdict: Verdict = if (trusted.contains(name)) .trusted else if (result.errors() != 0) .@"error" else if (result.unsupported()) .unproven else if (result.stats.undecided() != 0) .counted else .clean;
         const module = pack.str(file.module);
         var project = false;
         for (opts.project) |m| project = project or std.mem.eql(u8, m, module);
@@ -117,56 +124,126 @@ pub fn main(init: std.process.Init) !void {
     };
     if (opts.dump) return out.flush();
 
-    var counts: [4]usize = @splat(0);
-    var dep_counts: [4]usize = @splat(0);
+    var counts: [5]usize = @splat(0);
+    var dep_counts: [5]usize = @splat(0);
     for (rows.items) |row| {
         (if (row.project) &counts else &dep_counts)[@backingInt(row.verdict)] += 1;
         try printRow(out, &srcs, row, opts.summary or opts.effects);
         if (opts.effects) try printEffects(out, row);
         try out.flush();
     }
-    try out.print("\nzv-own: {d} clean, {d} with findings, {d} unproven, {d} trusted\n", .{ counts[0], counts[1], counts[2], counts[3] });
-    const dep_total = dep_counts[0] + dep_counts[1] + dep_counts[2] + dep_counts[3];
-    if (dep_total != 0) try out.print("zv-own: and in dependencies, which the line above does not count: {d} clean, {d} with findings, {d} unproven, {d} trusted\n", .{ dep_counts[0], dep_counts[1], dep_counts[2], dep_counts[3] });
-    var ok = counts[1] + dep_counts[1] == 0 and counts[2] + dep_counts[2] == 0;
+    try out.print("\nzv-own: {d} clean, {d} counted, {d} with findings, {d} unproven, {d} trusted\n", .{ counts[0], counts[1], counts[2], counts[3], counts[4] });
+    var dep_total: usize = 0;
+    for (dep_counts) |n| dep_total += n;
+    if (dep_total != 0) try out.print("zv-own: and in dependencies, which the line above does not count: {d} clean, {d} counted, {d} with findings, {d} unproven, {d} trusted\n", .{ dep_counts[0], dep_counts[1], dep_counts[2], dep_counts[3], dep_counts[4] });
+    var ok = counts[2] + dep_counts[2] == 0 and counts[3] + dep_counts[3] == 0;
     if (opts.expect) |path| ok = try compareExpected(io, arena, out, path, rows.items);
-    if (opts.max_unproven) |limit| if (counts[2] > limit) {
+    if (opts.max_unproven) |limit| if (counts[3] > limit) {
         try out.print("zv-own: more unproven functions than the {d} allowed\n", .{limit});
         ok = false;
     };
-    if (opts.max_trusted) |limit| if (counts[3] > limit) {
+    if (opts.max_trusted) |limit| if (counts[4] > limit) {
         try out.print("zv-own: more trusted functions than the {d} allowed\n", .{limit});
         ok = false;
     };
     var total: check.Stats = .{};
     for (rows.items) |row| {
-        if (!row.project) continue;
-        total.maybe_alias += row.result.stats.maybe_alias;
-        total.maybe_stale += row.result.stats.maybe_stale;
-        total.summarized += row.result.stats.summarized;
-        total.alias_params += row.result.stats.alias_params;
-        total.unknown_calls += row.result.stats.unknown_calls;
-        total.transfers += row.result.stats.transfers;
-        total.unmodelled += row.result.stats.unmodelled;
-        total.blind += row.result.stats.blind;
-        total.dynamic_len += row.result.stats.dynamic_len;
-        total.lent += row.result.stats.lent;
-        total.ends += row.result.stats.ends;
-        total.uses += row.result.stats.uses;
+        if (row.project) total.add(row.result.stats);
     }
     if (unread != 0) try out.print("zv-own: {d} source files were not found: their ownership manifests were not read\n", .{unread});
-    try out.print("zv-own: assumed, not checked: {d} calls to functions outside the packs or too odd to read, {d} linear values handed to memory it does not follow\n", .{ total.unknown_calls, total.transfers });
-    if (total.unmodelled + total.blind + total.dynamic_len + total.lent != 0)
-        try out.print("zv-own: also assumed: {d} container methods with no model (taken to invalidate), {d} operations on memory it cannot name, {d} resizes by a length it cannot show to be non-zero, {d} pointers to locals handed to calls that return a new block or that the summary does not trace (what the result keeps of them is not followed)\n", .{ total.unmodelled, total.blind, total.dynamic_len, total.lent });
-    if (total.maybe_alias + total.maybe_stale + total.summarized + total.alias_params != 0)
-        try out.print("zv-own: undecided, counted and not reported: {d} uses of a pointer that may lead into freed memory, {d} pointers stale only if a container had no room, {d} ends that may not have happened to the block (a site that stands for several allocations, one of many, a value that may be one of several, a growth that depends on room), {d} functions that end or change memory through two or more pointer parameters, assumed not to overlap\n", .{ total.maybe_alias, total.maybe_stale, total.summarized, total.alias_params });
-    if (total.ends + total.uses != 0) {
-        const open_ends = @min(total.summarized, total.ends);
-        const open_uses = @min(total.maybe_alias + total.maybe_stale, total.uses);
-        try out.print("zv-own: decided: {d} of {d} ends and {d} of {d} uses of memory it follows\n", .{ total.ends - open_ends, total.ends, total.uses - open_uses, total.uses });
+    try out.print("zv-own: assumed, not checked: {d} calls to functions outside the packs or too odd to read, {d} linear values handed to memory it does not follow\n", .{ total.count(.unknown_call), total.count(.transfer) });
+    var also = false;
+    for (check.Reason.all) |reason| {
+        if (!reason.assumed() or reason == .unknown_call or reason == .transfer or total.count(reason) == 0) continue;
+        try out.print("{s}{d} {s}", .{ if (also) ", " else "zv-own: also assumed: ", total.count(reason), reason.phrase() });
+        also = true;
     }
+    if (also) try out.writeByte('\n');
+    if (total.undecided() != 0) {
+        try out.writeAll("zv-own: undecided, counted and not reported: ");
+        try printCounts(out, total);
+        try out.writeByte('\n');
+    }
+    if (opts.effects) {
+        try out.writeAll("zv-own: decided by a rule, not by an end:");
+        for (std.enums.values(check.Clean)) |why| {
+            if (why != .applied and total.cleans.get(why) != 0) try out.print(" {d} {t},", .{ total.cleans.get(why), why });
+        }
+        try out.writeByte('\n');
+    }
+    if (total.ends + total.uses != 0)
+        try out.print("zv-own: decided: {d} of {d} ends and {d} of {d} uses of memory it follows\n", .{ total.ends - total.open_ends, total.ends, total.uses - total.open_uses, total.uses });
+    if (!try gate(io, arena, out, opts, rows.items)) ok = false;
     try out.flush();
     if (!ok) std.process.exit(1);
+}
+
+/// The reasons of a run that are left open, with their counts (the assumptions about code outside the packs are apart).
+fn printCounts(out: *Io.Writer, stats: check.Stats) !void {
+    var first = true;
+    for (check.Reason.all) |reason| {
+        if (reason.assumed() or stats.count(reason) == 0) continue;
+        if (!first) try out.writeAll(", ");
+        first = false;
+        try out.print("{d} {s}", .{ stats.count(reason), reason.phrase() });
+    }
+}
+
+/// `--max-undecided` and `--baseline`: how much a run leaves open, in all and per function, must not grow.
+fn gate(io: Io, arena: Allocator, out: *Io.Writer, opts: Options, rows: []const Row) !bool {
+    var ok = true;
+    var per: std.StringArrayHashMapUnmanaged(usize) = .empty;
+    var total: usize = 0;
+    for (rows) |row| {
+        if (!row.project) continue;
+        const n = row.result.stats.undecided();
+        const gop = try per.getOrPut(arena, row.name);
+        gop.value_ptr.* = (if (gop.found_existing) gop.value_ptr.* else 0) + n;
+        total += n;
+    }
+    if (opts.max_undecided) |limit| if (total > limit) {
+        try out.print("zv-own: {d} undecided ends and uses, more than the {d} allowed\n", .{ total, limit });
+        ok = false;
+    };
+    if (opts.baseline) |path| {
+        const text = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 22)) catch |err| fatal("{s}: {t}", .{ path, err });
+        var pinned: std.StringHashMapUnmanaged(usize) = .empty;
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t\r");
+            if (line.len == 0 or line[0] == '#') continue;
+            var it = std.mem.tokenizeAny(u8, line, " \t");
+            const name = it.next().?;
+            const n = std.fmt.parseInt(usize, it.next() orelse "", 10) catch fatal("{s}: bad line `{s}`", .{ path, line });
+            try pinned.put(arena, name, n);
+        }
+        var below: usize = 0;
+        for (per.keys(), per.values()) |name, got| {
+            const allowed = pinned.get(name) orelse 0;
+            if (got > allowed) {
+                try out.print("zv-own: {s} leaves {d} undecided, its baseline is {d}\n", .{ name, got, allowed });
+                ok = false;
+            } else if (got < allowed) below += 1;
+        }
+        var stale = pinned.iterator();
+        while (stale.next()) |e| if (!per.contains(e.key_ptr.*) and e.value_ptr.* != 0) {
+            below += 1;
+        };
+        if (below != 0) try out.print("zv-own: {d} functions leave less undecided than their baseline: write it again with --write-baseline\n", .{below});
+    }
+    if (opts.write_baseline) |path| {
+        var bytes: std.ArrayList(u8) = .empty;
+        const Order = struct {
+            keys: []const []const u8,
+            pub fn lessThan(self: @This(), a: usize, b: usize) bool {
+                return std.mem.lessThan(u8, self.keys[a], self.keys[b]);
+            }
+        };
+        per.sort(Order{ .keys = per.keys() });
+        for (per.keys(), per.values()) |name, n| if (n != 0) try bytes.print(arena, "{s} {d}\n", .{ name, n });
+        Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes.items }) catch |err| fatal("{s}: {t}", .{ path, err });
+    }
+    return ok;
 }
 
 /// Library code (`zv`) and the exporter's root are not what a project asks to have checked.
@@ -186,12 +263,18 @@ fn selected(pack: *const schema.Pack, f: schema.Func, opts: Options) bool {
 fn printRow(out: *Io.Writer, srcs: *sources.Sources, row: Row, all: bool) !void {
     const label = switch (row.verdict) {
         .clean => "clean    ",
+        .counted => "COUNTED  ",
         .@"error" => "FINDINGS ",
         .unproven => "UNPROVEN ",
         .trusted => "TRUSTED  ",
     };
     if ((row.verdict == .clean or row.verdict == .trusted) and !all) return;
     try out.print("{s}{s}\n", .{ label, row.name });
+    if (row.result.stats.undecided() != 0) {
+        try out.writeAll("      counted: ");
+        try printCounts(out, row.result.stats);
+        try out.writeByte('\n');
+    }
     for (row.result.diags) |d| {
         try printWhere(out, srcs, row.pack, d.loc);
         try out.print(": {s}: {s}\n", .{ d.kind.title(), d.text });
@@ -230,8 +313,12 @@ fn printRow(out: *Io.Writer, srcs: *sources.Sources, row: Row, all: bool) !void 
 fn printEffects(out: *Io.Writer, row: Row) !void {
     const s = row.result.summary;
     try out.print("      effects: complete={} frees={x} moves={x} token_stores={x}\n", .{ s.complete, s.frees, s.moves, s.token_stores });
-    const st = row.result.stats;
-    if (st.blind + st.unknown_calls + st.unmodelled + st.dynamic_len + st.maybe_alias + st.maybe_stale != 0) try out.print("      assumed: {d} unknown calls, {d} unmodelled, {d} blind, {d} dynamic lengths, {d} may-alias, {d} may-stale\n", .{ st.unknown_calls, st.unmodelled, st.blind, st.dynamic_len, st.maybe_alias, st.maybe_stale });
+    if (s.outside.count() != 0) {
+        try out.writeAll("      ends it cannot say:");
+        var it = s.outside.iterator();
+        while (it.next()) |why| try out.print(" {t}", .{why});
+        try out.writeByte('\n');
+    }
     for (s.kills) |k| {
         try out.print("      kills param {d} {t} path {any}{s}{s}", .{ k.slot.param, k.slot.kind, k.slot.path, if (k.on_fail) " on-fail" else "", if (k.lost) " lost" else "" });
         for (k.when, 0..) |c, i| try out.print("{s} param {d} path {any} {s} {d}", .{ if (i == 0) " when" else " and", c.slot.param, c.slot.path, if (c.eq) "==" else "!=", c.value });
@@ -302,7 +389,8 @@ fn compareExpected(io: Io, arena: Allocator, out: *Io.Writer, path: []const u8, 
             ok = false;
             continue;
         };
-        if (verdict != want) {
+        // `counted` is the most a pin claims: a pack with std's bodies may decide what the model leaves open.
+        if (verdict != want and !(want == .counted and verdict == .clean)) {
             try out.print("expected {s} {t}, got {t}\n", .{ name, want, verdict });
             ok = false;
         }
@@ -397,6 +485,12 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
                 o.max_trusted = std.fmt.parseInt(usize, v, 10) catch return null;
             } else if (std.mem.eql(u8, a, "--max-unproven")) {
                 o.max_unproven = std.fmt.parseInt(usize, v, 10) catch return null;
+            } else if (std.mem.eql(u8, a, "--max-undecided")) {
+                o.max_undecided = std.fmt.parseInt(usize, v, 10) catch return null;
+            } else if (std.mem.eql(u8, a, "--baseline")) {
+                o.baseline = v;
+            } else if (std.mem.eql(u8, a, "--write-baseline")) {
+                o.write_baseline = v;
             } else if (std.mem.eql(u8, a, "--module")) {
                 const eq = std.mem.indexOfScalar(u8, v, '=') orelse return null;
                 modules.append(arena, .{ v[0..eq], v[eq + 1 ..] }) catch return null;
@@ -412,7 +506,7 @@ fn parseArgs(arena: Allocator, args: []const [:0]const u8) ?Options {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only PATH] [--files PREFIX] [--project NAME] [--expect FILE] [--pins FILE] [--max-unproven N] [--max-trusted N] [--summary] [--effects] [--dump] PACK|INDEX_DIR...\n", .{});
+    std.debug.print("usage: zv-own [--src DIR] [--module NAME=DIR] [--only PATH] [--files PREFIX] [--project NAME] [--expect FILE] [--pins FILE] [--max-unproven N] [--max-trusted N] [--max-undecided N] [--baseline FILE] [--write-baseline FILE] [--summary] [--effects] [--dump] PACK|INDEX_DIR...\n", .{});
     std.process.exit(2);
 }
 

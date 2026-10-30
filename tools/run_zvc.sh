@@ -93,8 +93,8 @@ done
 $zvc --src tests/zvc --only soundness2.useLenBound --expect tests/zvc/soundness2.dup.expect tests/zvc/soundness2.zvp tests/zvc/dup/soundness2.zvp
 
 # The one source of tokens is a premise: named in the verdict, passed on to callers, counted against the ratchet.
-mint="$zvc --src examples --only bump.Bump.init tests/zvc/bump.zvp"
-$mint --max-assume 1 >/dev/null
+mint="$zvc --src examples --timeout 120000 --only bump.Bump.init tests/zvc/bump.zvp"
+$mint --max-assume 1
 if $mint --max-assume 0 >/dev/null; then
     echo "run_zvc: --max-assume 0 passed a proof that rests on zv.PointsTo.own" >&2
     exit 1
@@ -109,15 +109,15 @@ case $shown in
 esac
 
 # The same for the pool: the one source of block tokens is a premise.
-mint="$zvc --src examples --only pool.Pool.init tests/zvc/pool.zvp"
-$mint --max-assume 1 >/dev/null
+mint="$zvc --src examples --timeout 120000 --only pool.Pool.init tests/zvc/pool.zvp"
+$mint --max-assume 1
 if $mint --max-assume 0 >/dev/null; then
     echo "run_zvc: --max-assume 0 passed a proof that rests on zv.BlockSet.own" >&2
     exit 1
 fi
 
-mint="$zvc --src examples --only freelist.FreeList.init tests/zvc/freelist.zvp"
-$mint --max-assume 1 >/dev/null
+mint="$zvc --src examples --timeout 120000 --only freelist.FreeList.init tests/zvc/freelist.zvp"
+$mint --max-assume 1
 if $mint --max-assume 0 >/dev/null; then
     echo "run_zvc: --max-assume 0 passed a proof that rests on zv.BlockSet.own (freelist)" >&2
     exit 1

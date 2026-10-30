@@ -4,7 +4,7 @@ realish_bugs.badPrintAfterFree error
 realish_bugs.badRenderAfterDestroy error
 realish_bugs.badRenderDoubleFree error
 realish_bugs.gapInternedAfterDeinit clean
-realish_bugs.gapLeakOnErrorPath clean
-realish_bugs.gapPutFreesOwnedKey clean
+realish_bugs.gapLeakOnErrorPath counted
+realish_bugs.gapPutFreesOwnedKey counted
 realish_bugs.okLruPointerWithinCall clean
 realish_bugs.same clean

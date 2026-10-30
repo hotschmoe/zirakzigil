@@ -15,7 +15,7 @@ review1.badFreeSubslice error
 review1.badFromOwnedSlice error
 review1.badGetOrPutThenGrow error
 review1.badInsert error
-review1.badIteratorAfterGrow clean
+review1.badIteratorAfterGrow counted
 review1.badKeyIteratorAfterGrow error
 review1.badLabeledLeak error
 review1.badLinearBytes unproven
@@ -34,9 +34,9 @@ review1.fpEnsureNoGrow clean
 review1.fpExpandToCapacity clean
 review1.fpGetOrPutAssume clean
 review1.fpLockPointers clean
-review1.fpPopKeepsFirst clean
+review1.fpPopKeepsFirst counted
 review1.fpPutAfterEnsure clean
-review1.fpShrinkKeepsFirst clean
+review1.fpShrinkKeepsFirst counted
 review1.fpToOwnedAssert clean
 review1.freeHandleRec clean
 review1.freeRec clean

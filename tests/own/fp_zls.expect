@@ -1,12 +1,12 @@
 # Reductions of the false positives on zls and ziggy (class A, B, C, D, E, F, G, H): every function is correct and clean.
-fp_zls.Cache.resolve clean
-fp_zls.Cache.resolveTwice clean
-fp_zls.Lazy.deinit clean
+fp_zls.Cache.resolve counted
+fp_zls.Cache.resolveTwice counted
+fp_zls.Lazy.deinit counted
 fp_zls.Pieces.deinit clean
-fp_zls.Queue.drain clean
+fp_zls.Queue.drain counted
 fp_zls.make clean
-fp_zls.perIteration clean
+fp_zls.perIteration counted
 fp_zls.pickLonger clean
-fp_zls.render clean
+fp_zls.render counted
 fp_zls.run clean
 fp_zls.runAndFree clean
