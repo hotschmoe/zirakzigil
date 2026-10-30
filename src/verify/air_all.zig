@@ -1,5 +1,5 @@
 //! Root for exporting what a file defines, also the functions no test of it reaches:
-//!   ZV_AIR_OUT=DIR zig-zv test -fno-emit-bin --dep target --dep selection -Mroot=tools/air_all.zig -Mtarget=FILE.zig -Mselection=sel.zig
+//!   ZV_AIR_OUT=DIR zig-zv test -fno-emit-bin --dep target --dep selection -Mroot=src/verify/air_all.zig -Mtarget=FILE.zig -Mselection=sel.zig
 //! `selection` is `pub const items = .{ target.a.b, target.c };`: the containers whose functions to export
 //! (tools/zvc_export.sh writes it). Taking the address of a function as a runtime value makes the compiler
 //! analyze its body. Generic functions and type constructors have no body to analyze until they are

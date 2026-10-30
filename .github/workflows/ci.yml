@@ -52,6 +52,8 @@ jobs:
         run: sh tools/run_zvc.sh
       - name: Ownership checker (zv-own) on the fresh packs against its pinned verdicts
         run: sh tools/run_own.sh
+      - name: Consumer flow (zig build verify in a fresh project: prebuilt zig-zv fetched and checksummed, Z3 fetched, cold, warm, edit)
+        run: sh tools/consumer_flow.sh "$RUNNER_TEMP/flow"
 
   hook:
     runs-on: ubuntu-latest
@@ -62,6 +64,8 @@ jobs:
           version: 0.17.0
       - name: The pack reader and its tool build
         run: zig build zv-air
+      - name: Pinned zig-zv assets belong to this patch queue
+        run: sh tools/check_pins.sh
       - name: Every hook anchor resolves exactly once in the pinned Zig tree
         run: |
           git clone --quiet --filter=blob:none https://codeberg.org/ziglang/zig.git upstream

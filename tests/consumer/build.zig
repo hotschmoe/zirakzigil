@@ -37,11 +37,14 @@ pub fn build(b: *std.Build) void {
         .report = report,
         .src = b.path("src"),
         .lib_name = "consumer",
-        .laws = &.{ "seq.zig", "laws.zig" },
+        .laws = &.{ "seq.zig", "laws.zig", "bounds.zig" },
     });
 
-    // The ownership gate: zv-own checks the exported AIR of own/handoff.zig.
-    _ = zirakzigil.addOwnershipGate(b, .{ .packs = &.{"own/handoff.zvp"}, .pins = "own/SOURCES", .src = "own", .max_undecided = 0 });
+    // `zig build verify`: export the AIR, prove the .verified functions of bounds.zig, check the ownership of handoff.zig.
+    _ = zirakzigil.addVerify(b, .{
+        .exports = &.{ .{ .file = "src/bounds.zig", .shallow = true }, .{ .file = "src/handoff.zig", .shallow = true } },
+        .own = .{ .max_undecided = 0 },
+    });
 
     // One line for every optimize mode, ghost on and off, plus freestanding checks.
     _ = zirakzigil.addTestMatrix(b, .{

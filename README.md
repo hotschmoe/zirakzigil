@@ -92,6 +92,7 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 | `src/own/` | The ownership checker: reads AIR packs, follows `zv.Linear` tokens (and, from M2, owners of memory) over the structured control flow (`docs/phase3.md`) |
 | `src/zvc/` | The verifier: reads AIR packs (`zv_air`), derives verification conditions, discharges them with Z3 over a pipe (`docs/phase2.md`) |
 | `tools/zvc_export.sh`, `tools/run_zvc.sh`, `tools/install_z3.sh` | Export a file's AIR pack (with `ZV_AIR_STD=1`, also the std functions it reaches, cut by `zv-air slice`), run the zvc suite (`tests/zvc/`: fresh packs, pinned verdicts), install the pinned Z3 |
+| `tools/consumer_flow.sh`, `tools/package_zig_zv.sh`, `tools/pin_assets.sh`, `tools/queue_hash.sh` | The consumer flow end to end (CI), and the release assets of zig-zv: package, pin in `build.zig.zon`, name by patch queue hash |
 | `tools/run_own.sh` | Run the zv-own suite (`tests/own/`: fresh packs, pinned verdicts) |
 | `tools/zvc_packs.sh`, `tools/own_packs.sh`, `tools/check.sh` | Export the suites' packs from the sources in the tree (none is committed); `check.sh` builds zig-zv if needed, exports every pack and runs both suites |
 | `tools/run_negative.sh` | Runs the should-panic and compile-fail suites |
@@ -101,7 +102,7 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 
 ## Running it
 
-Requires **Zig 0.17.0** (pinned in `build.zig.zon`), and Z3 for the verifier (`tools/install_z3.sh DEST` installs the pinned release; `zvc` finds it through `ZV_Z3` or `PATH`).
+Requires **Zig 0.17.0** (pinned in `build.zig.zon`). The repository's own suites also need Z3 (`tools/install_z3.sh DEST` installs the pinned release; `zvc` finds it through `ZV_Z3` or `PATH`). A project that adopts zv needs neither Z3 nor a patched compiler by hand: `zirakzigil.addVerify` fetches both (see below).
 
 ```sh
 zig build test                          # unit, example and law tests, freestanding cross-compile, tests/consumer
@@ -119,9 +120,9 @@ tools/run_zvc.sh                        # the verifier against the exported pack
 tools/run_own.sh                        # the ownership checker against the exported packs and its pinned verdicts (after tools/own_packs.sh; no solver)
 ```
 
-The suites' AIR packs are never committed: CI builds zig-zv (cached per pinned tag and patch queue), exports every pack from the pull request's sources and runs both suites on them. `zig build matrix` needs `tools/own_packs.sh` first, because `tests/consumer` checks an exported pack.
+The suites' AIR packs are never committed: CI builds zig-zv (cached per pinned tag and patch queue), exports every pack from the pull request's sources and runs both suites on them.
 
-To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, `zirakzigil.addAssuranceGate` for the Phase 0 gate (a root module and the names of your law and scenario files). Your own `zig build matrix` is one call to `zirakzigil.addTestMatrix`; see "Build matrix" there.
+To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, `zirakzigil.addAssuranceGate` for the Phase 0 gate (a root module and the names of your law and scenario files). Your own `zig build matrix` is one call to `zirakzigil.addTestMatrix`; see "Build matrix" there. For verification, one call to `zirakzigil.addVerify` gives `zig build verify`: it fetches the prebuilt zig-zv and Z3 (checksummed), exports the AIR, proves the `.verified` functions with per-function cached verdicts, and checks ownership, with no WSL and no export scripts ("Verifying" there; `tests/consumer/` is the example).
 
 ## Results (Zig 0.17.0, 2026-10-28)
 
