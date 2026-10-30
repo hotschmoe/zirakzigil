@@ -771,6 +771,7 @@ pub const Vc = struct {
                 const val = try v.arg(inst, 0);
                 try v.useTokens(st, val, v.func.ret, false);
                 for (v.ptr_params.items) |p| try v.useTokens(st, st.cells[p.cell], p.ty, false);
+                try v.distinctTokens(st, val);
                 var site = v.siteOf(v.ops(inst)[0], val);
                 // A value the compiler knew (`null`) is a constant operand, not the result of the `zv.ensures` that checked it.
                 if (site == null and v.ops(inst)[0].kind == .constant) if (v.latest) |p| if (p.tag == .dbg_inline_block) if (v.sites.get(p.id)) |s| if (v.sameConstant(s.value, val)) {
@@ -836,7 +837,7 @@ pub const Vc = struct {
                 .bool_lit, .bv_lit => true,
                 else => false,
             },
-            .opt => |o| v.isConstant(.{ .scalar = o.has }) and v.isConstant(o.payload),
+            .opt => |o| v.isConstant(.{ .scalar = o.has }) and (v.pool.isFalse(o.has) or v.isConstant(o.payload)),
             .eu => |e| v.isConstant(.{ .scalar = e.is_err }) and v.isConstant(.{ .scalar = e.err }) and v.isConstant(e.payload),
             .obj => |o| o.base == null and for (o.fields) |f| {
                 if (!v.isConstant(f.value)) break false;
@@ -943,6 +944,18 @@ pub const Vc = struct {
         }
     }
 
+    /// What a function gives back, the result and the pointees, holds no token twice: a copy of a live token is a second
+    /// owner, and the caller would see two tokens.
+    fn distinctTokens(v: *Vc, st: *State, val: Value) StepError!void {
+        var found: std.ArrayList(*const value.Obj) = .empty;
+        try v.tokensOf(val, v.func.ret, &found);
+        for (v.ptr_params.items) |p| try v.tokensOf(st.cells[p.cell], p.ty, &found);
+        for (found.items, 0..) |a, i| for (found.items[i + 1 ..]) |b| if (a.token == b.token) {
+            try v.oblige(st, null, .other, "a token is given back twice", .{}, try v.pool.fls());
+            return;
+        };
+    }
+
     /// Obliges every token in `val` to be unconsumed; `consume` ends them.
     fn useTokens(v: *Vc, st: *State, val: Value, ty: schema.TypeId, consume: bool) StepError!void {
         var found: std.ArrayList(*const value.Obj) = .empty;
@@ -953,9 +966,69 @@ pub const Vc = struct {
         }
     }
 
-    fn tokenOpEnter(v: *Vc, inst: *const Inst, st: *State, op: TokenOp, args: []const schema.Operand) StepError!void {
+    fn tokenOpEnter(v: *Vc, inst: *const Inst, st: *State, op: ?TokenOp, args: []const schema.Operand) StepError!void {
         for (args) |a| try v.useTokens(st, try v.operand(a), v.operandType(a), false);
-        if (op == .own and !v.pure and v.alive(st)) try v.assumed.append(v.arena(), if (inst.loc != .none) inst.loc else v.loc);
+        if (op == TokenOp.own) try v.premise(inst, st);
+    }
+
+    /// A premise the proof takes without proving it: named in the verdict and counted by `--max-assume`.
+    fn premise(v: *Vc, inst: *const Inst, st: *const State) Allocator.Error!void {
+        if (!v.pure and v.alive(st)) try v.assumed.append(v.arena(), if (inst.loc != .none) inst.loc else v.loc);
+    }
+
+    /// The operations of `zv.BlockSet` that are not run: `own` (a fresh pool name and the mask it is given) and the lemma
+    /// `apart` (two tokens alive together, of one pool, share no block). False for the ones whose bodies are run.
+    fn setIntrinsic(v: *Vc, inst: *const Inst, st: *State, op: zv_air.tokens.SetOp, args: []const schema.Operand) StepError!bool {
+        const pool = v.pool;
+        const set_ty = for (v.ctx.pack.t.types, 0..) |_, i| {
+            const id: schema.TypeId = @enumFromInt(i);
+            if (std.mem.eql(u8, v.ctx.typeName(id), zv_air.tokens.set_type_name)) break id;
+        } else return v.ctx.unsupported("zv.BlockSet is not in the pack", .{});
+        const fields = v.pack.fieldsOf(set_ty) orelse return v.ctx.unsupported("zv.BlockSet has no fields in the pack", .{});
+        if (fields.len != 2) return v.ctx.unsupported("zv.BlockSet has {d} fields", .{fields.len});
+        switch (op) {
+            .own => {
+                try v.premise(inst, st);
+                const mask = try v.operand(args[0]);
+                if (mask != .scalar) return v.ctx.unsupported("a mask that is not a number", .{});
+                const id = try pool.fresh("$pool", .{ .bv = 64 });
+                v.setResult(inst, try v.newSet(set_ty, .{ .scalar = id }, mask));
+                return true;
+            },
+            .apart => {
+                const a = try v.operand(args[0]);
+                const b = try v.operand(args[1]);
+                if (a != .obj or b != .obj) return v.ctx.unsupported("a token that is not one", .{});
+                try v.live(st, a.obj);
+                try v.live(st, b.obj);
+                if (a.obj.token == b.obj.token) try v.oblige(st, inst, .other, "the same token is given twice", .{}, try pool.fls());
+                const ia = try v.ctx.field(a.obj, 0, fields[0].ty);
+                const ma = try v.ctx.field(a.obj, 1, fields[1].ty);
+                const ib = try v.ctx.field(b.obj, 0, fields[0].ty);
+                const mb = try v.ctx.field(b.obj, 1, fields[1].ty);
+                if (ia != .scalar or ma != .scalar or ib != .scalar or mb != .scalar) return v.ctx.unsupported("a token with fields that are not numbers", .{});
+                const zero = try pool.bv(64, 0);
+                const disjoint = try pool.eq(try pool.bin(.band, ma.scalar, mb.scalar), zero);
+                st.pc = try pool.@"and"(st.pc, try pool.@"or"(try pool.ne(ia.scalar, ib.scalar), disjoint));
+                try v.markDead(st, a.obj.token);
+                try v.markDead(st, b.obj.token);
+                const head = try v.newSet(set_ty, ia, ma);
+                const tail = try v.newSet(set_ty, ib, mb);
+                const pair_fields = try v.arena().alloc(value.Field, 2);
+                pair_fields[0] = .{ .index = 0, .value = head };
+                pair_fields[1] = .{ .index = 1, .value = tail };
+                v.setResult(inst, .{ .obj = try v.ctx.create(value.Obj, .{ .base = null, .fields = pair_fields, .ty = inst.ty }) });
+                return true;
+            },
+            .cut, .join, .discard => return false,
+        }
+    }
+
+    fn newSet(v: *Vc, ty: schema.TypeId, id: Value, mask: Value) Allocator.Error!Value {
+        const fields = try v.arena().alloc(value.Field, 2);
+        fields[0] = .{ .index = 0, .value = id };
+        fields[1] = .{ .index = 1, .value = mask };
+        return .{ .obj = try v.ctx.create(value.Obj, .{ .base = null, .fields = fields, .ty = ty, .token = v.ctx.newToken() }) };
     }
 
     /// Obliges every token on the way down `path` into `cell` to be unconsumed: reading a field of a consumed
@@ -1204,7 +1277,9 @@ pub const Vc = struct {
         const amount_bits = pool.bitsOf(amount);
         if (amount_bits > info.bits) return v.ctx.unsupported("shift amount wider than the value", .{});
         amount = try pool.zext(amount, info.bits);
-        try v.oblige(st, inst, .shift, "shift amount is too large", .{}, try pool.cmp(.ult, amount, try pool.bv(info.bits, info.bits)));
+        // An amount of type `std.math.Log2Int` has too few bits to be too large.
+        if (!(amount_bits < 16 and (@as(u32, 1) << @intCast(amount_bits)) <= info.bits))
+            try v.oblige(st, inst, .shift, "shift amount is too large", .{}, try pool.cmp(.ult, amount, try pool.bv(info.bits, info.bits)));
         const left = inst.tag == .shl or inst.tag == .shl_exact;
         const op: term.Op = if (left) .shl else if (info.signed) .ashr else .lshr;
         const result = try pool.bin(op, a, amount);
@@ -1521,12 +1596,14 @@ pub const Vc = struct {
         const contract = contractOf(callee) orelse {
             if (try v.ghostCall(inst, st, callee, args[0..n])) return;
             const token_op = tokenOpOf(callee);
-            if (token_op) |op| try v.tokenOpEnter(inst, st, op, args[0..n]);
+            const set_op = zv_air.tokens.setOpOf(callee);
+            if (set_op) |op| if (try v.setIntrinsic(inst, st, op, args[0..n])) return;
+            if (token_op != null or set_op != null) try v.tokenOpEnter(inst, st, token_op, args[0..n]);
             try v.inline_names.append(v.arena(), callee);
             defer _ = v.inline_names.pop();
             try v.block(inst, st, body);
-            if (token_op) |op| if (zv_air.tokens.consumes(op))
-                for (args[0..n]) |a| try v.useTokens(st, try v.operand(a), v.operandType(a), true);
+            const ends = if (token_op) |op| zv_air.tokens.consumes(op) else if (set_op) |op| zv_air.tokens.setConsumes(op) else false;
+            if (ends) for (args[0..n]) |a| try v.useTokens(st, try v.operand(a), v.operandType(a), true);
             return;
         };
         if (v.pure and contract != .invariant and contract != .decreases) return;

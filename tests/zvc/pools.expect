@@ -1,0 +1,18 @@
+# name verdict. zv.BlockSet and a pool on it. A verdict changing here is reviewed as a soundness or completeness change of zvc.
+# Controls (proved): take, give, pairDistinct, roundTrip, twoMints.
+pools.P.apartSame refuted
+pools.P.copyAndHandOut refuted
+pools.P.dupBlock refuted
+pools.P.foreignFree refuted
+pools.P.forgeMask unproven
+pools.P.forgeSet unproven
+pools.P.give proved
+pools.P.giveTwice refuted
+pools.P.giveUnchecked refuted
+pools.P.giveWrongBit refuted
+pools.P.pairDistinct proved
+pools.P.roundTrip proved
+pools.P.take proved
+pools.P.takeFromEmpty refuted
+pools.P.takeNoClear refuted
+pools.P.twoMints proved

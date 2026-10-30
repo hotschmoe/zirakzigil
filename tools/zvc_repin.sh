@@ -4,12 +4,14 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-for file in examples/search.zig tests/zvc/cases.zig tests/zvc/features.zig tests/zvc/soundness.zig tests/zvc/soundness2.zig tests/zvc/soundness3.zig tests/zvc/tokens.zig tests/zvc/pointers.zig examples/bump.zig; do
+for file in examples/search.zig tests/zvc/cases.zig tests/zvc/features.zig tests/zvc/soundness.zig tests/zvc/soundness2.zig tests/zvc/soundness3.zig tests/zvc/tokens.zig tests/zvc/pointers.zig tests/zvc/pools.zig examples/bump.zig examples/pool.zig; do
     case $file in
         examples/bump.zig) sh tools/zvc_export.sh tests/zvc "$file" --only Bump ;;
         tests/zvc/pointers.zig) sh tools/zvc_export.sh tests/zvc "$file" --only R ;;
+        examples/pool.zig) sh tools/zvc_export.sh tests/zvc "$file" --only Pool ;;
+        tests/zvc/pools.zig) sh tools/zvc_export.sh tests/zvc "$file" --only P ;;
         *) sh tools/zvc_export.sh tests/zvc "$file" ;;
     esac
 done
 sh tools/zvc_export.sh tests/zvc/dup tests/zvc/dup/soundness2.zig
-sha256sum examples/search.zig tests/zvc/cases.zig tests/zvc/features.zig tests/zvc/soundness.zig tests/zvc/soundness2.zig tests/zvc/soundness3.zig tests/zvc/tokens.zig tests/zvc/pointers.zig examples/bump.zig >tests/zvc/SOURCES
+sha256sum examples/search.zig tests/zvc/cases.zig tests/zvc/features.zig tests/zvc/soundness.zig tests/zvc/soundness2.zig tests/zvc/soundness3.zig tests/zvc/tokens.zig tests/zvc/pointers.zig tests/zvc/pools.zig examples/bump.zig examples/pool.zig >tests/zvc/SOURCES

@@ -11,6 +11,7 @@ const Examples = struct {
     pub const regress = @import("regress.zig");
     pub const queries = @import("queries.zig");
     pub const bump = @import("bump.zig");
+    pub const pool = @import("pool.zig");
 };
 
 pub fn main(init: std.process.Init) !void {

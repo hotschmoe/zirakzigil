@@ -1,0 +1,5 @@
+# name verdict. examples/pool.zig: the block pool, every method proved, under the premise of the one zv.BlockSet.own in init.
+pool.Pool.alloc proved
+pool.Pool.free proved
+pool.Pool.init proved
+pool.Pool.pair proved
