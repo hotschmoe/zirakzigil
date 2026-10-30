@@ -21,13 +21,14 @@ tools/run_zvc.sh, tools/run_own.sh   the suites       tokens.expect, pointers.ex
 
 ```zig
 pub const PointsTo = if (ghost) struct {
-    lo: usize,
-    hi: usize,
+    from: usize,
+    to: usize,
+    pub inline fn lo(self: Self) usize           // read in specifications; in a build without ghost code it returns 0 and marks the contract unchecked
     pub inline fn own(buf: []const u8) Self      // the one source of tokens: [0, buf.len), a premise
     pub inline fn split(self: Self, cut: usize) Pair   // [lo, cut) and [cut, hi); needs lo <= cut <= hi
-    pub inline fn join(head: Self, tail: Self) Self    // needs head.hi == tail.lo
+    pub inline fn join(head: Self, tail: Self) Self    // needs head.hi() == tail.lo()
     pub inline fn discard(self: Self) void
-} else void;
+} else struct { ...the same operations, which do nothing };
 ```
 
 A token is the right to use the bytes `[lo, hi)` of one region, owned by whoever holds the value. It is ghost the way `zv.Int` is: in a ghost build it is a struct of two words, elsewhere it is `void`, so a field of this type costs nothing (`@sizeOf(Bump)` is 2 words in production and 4 in a ghost build; a test pins it). It has no pointer in it. As in Verus, the address (here an offset into the region) and the permission are separate values, and the allocator manages the offsets: the bytes stay with the caller, who turns an offset into a slice in the shell.
@@ -54,9 +55,9 @@ A block's token covers its alignment padding too (`base` is where the allocator 
 
 Specifications of a method name the state before and after: `const old = self.*;` at the top, `granted(old, len, alignment, self.*, blk)` in `zv.ensures`. A copy of a struct that holds a token is the same token, so `old.spare` is not usable after `self.spare` was cut, and the specification reads only the plain fields of `old` (`old.next`, `old.cap`).
 
-Ghost expressions use the idiom of `zv.Int`: `const parts = if (zv.ghost) self.spare.split(end) else {};` and `self.spare = if (zv.ghost) parts.tail else {};`. Specifications read token fields behind `!zv.ghost or ...`. In a normal build every token disappears.
+A token is a type in every build: the real struct under ghost code, a struct with no fields and the same operations otherwise. Code calls `self.spare.split(end)` and assigns `self.spare = parts.tail` with no condition, and specifications read `b.spare.lo()`. Reading a token in a build without ghost code returns zero and marks the running contract unchecked (`zv.holds`), so a contract that talks about tokens is proved by `zvc` and checked in ghost builds only. Ghost values that are not tokens (an array of the blocks on a list) are fields of type `zv.Ghost(T)`.
 
-A specification may not read a token it already passed on, as in Verus: `roundTrip` copies `p.lo` and `p.hi` before `split(p)` and compares the result with the copies.
+A specification may not read a token it already passed on, as in Verus: `roundTrip` copies `p.lo()` and `p.hi()` before `split(p)` and compares the result with the copies.
 
 ## What `zvc` does with a token
 

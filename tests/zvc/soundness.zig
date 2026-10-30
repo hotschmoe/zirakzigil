@@ -67,24 +67,24 @@ pub fn useSafeInc(x: u8) u8 {
 // A ghost integer is as wide in the proof as it is when run.
 
 pub fn ghostMul(a: u64, b: u64) bool {
-    const ok = !zv.ghost or zv.Int.of(a).mul(zv.Int.of(b)).ge(zv.Int.of(0));
+    const ok = zv.Int.of(a).mul(zv.Int.of(b)).ge(zv.Int.of(0));
     return zv.ensures(ok, ok);
 }
 
 pub fn ghostMulWide(a: u128) bool {
     const k: u128 = 1 << 127;
-    const ok = !zv.ghost or zv.Int.of(a).mul(zv.Int.of(k)).mul(zv.Int.of(2)).ge(zv.Int.of(0));
+    const ok = zv.Int.of(a).mul(zv.Int.of(k)).mul(zv.Int.of(2)).ge(zv.Int.of(0));
     return zv.ensures(ok, ok);
 }
 
 pub fn ghostNeg(x: i128) bool {
-    const ok = !zv.ghost or zv.Int.of(x).neg().eq(zv.Int.of(0).sub(zv.Int.of(x)));
+    const ok = zv.Int.of(x).neg().eq(zv.Int.of(0).sub(zv.Int.of(x)));
     return zv.ensures(ok, ok);
 }
 
 pub fn ghostAdd(x: i128, y: i128) bool {
     zv.requires(y >= 0);
-    const ok = !zv.ghost or zv.Int.of(x).add(zv.Int.of(y)).ge(zv.Int.of(x));
+    const ok = zv.Int.of(x).add(zv.Int.of(y)).ge(zv.Int.of(x));
     return zv.ensures(ok, ok);
 }
 
@@ -92,18 +92,18 @@ pub fn ghostAdd(x: i128, y: i128) bool {
 
 pub fn seqFull() bool {
     var s = zv.Seq.empty();
-    if (zv.ghost) inline for (0..zv.Seq.capacity) |_| {
+    inline for (0..zv.Seq.capacity) |_| {
         s = s.push(zv.Int.of(1));
-    };
-    const ok = !zv.ghost or s.len().eq(zv.Int.of(zv.Seq.capacity));
+    }
+    const ok = s.len().eq(zv.Int.of(zv.Seq.capacity));
     return zv.ensures(ok, ok);
 }
 
 pub fn seqOverfull() bool {
     var s = zv.Seq.empty();
-    if (zv.ghost) inline for (0..zv.Seq.capacity + 1) |_| {
+    inline for (0..zv.Seq.capacity + 1) |_| {
         s = s.push(zv.Int.of(1));
-    };
+    }
     return zv.ensures(true, true);
 }
 
