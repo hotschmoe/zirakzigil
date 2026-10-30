@@ -170,10 +170,11 @@ _ = zirakzigil.addOwnershipGate(b, .{
     .src = "src",
     .max_unproven = 0,   // a function outside what the checker models fails the build until it is looked at
     .max_trusted = 0,    // `.trusted` entries of the ownership manifest are exempt and counted
+    .max_undecided = 0,  // or `.baseline = "own/undecided.baseline"`: what the run leaves open may not grow
 });
 ```
 
-`zig build own` fails on a finding (printed with `file:line:col`, the path taken and notes at the related places), on more unproven or trusted functions than allowed, and on a pinned source that changed since the export. A second gate with `.step = "own-seeded"`, `.expect = "..."` and `.files` pins the verdicts on mistakes seeded in the shape of the project's own API. Every run ends with what it assumed and did not check (calls into code with no model, linear values handed on, container methods with no model, operations on memory it cannot name, resizes by a length it cannot show to be non-zero). Stock Zig runs the gate; only exporting needs the patched compiler.
+`zig build own` fails on a finding (printed with `file:line:col`, the path taken and notes at the related places), on more unproven or trusted functions than allowed, on more undecided ends and uses than `max_undecided` (or than a function's line in the `baseline` file, which `zv-own --write-baseline` writes and which may only go down), and on a pinned source that changed since the export. A function with something undecided is `COUNTED`, not `clean`: read `clean` as "nothing left open, relative to the constructs the checker validated" (phase3.md lists the counted classes and the known silent ones). A second gate with `.step = "own-seeded"`, `.expect = "..."` and `.files` pins the verdicts on mistakes seeded in the shape of the project's own API. Every run ends with what it assumed and did not check (calls into code with no model, linear values handed on, container methods with no model, operations on memory it cannot name, resizes by a length it cannot show to be non-zero). Stock Zig runs the gate; only exporting needs the patched compiler.
 
 ## Borrowed slots: `zv.Slots`
 

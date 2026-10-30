@@ -23,6 +23,7 @@ const spec = @import("spec.zig");
 const dom = @import("domain.zig");
 const diag = @import("diag.zig");
 const calls = @import("calls.zig");
+const outcome = @import("outcome.zig");
 const Set = dom.Set;
 const Val = dom.Val;
 const PlaceId = dom.PlaceId;
@@ -31,35 +32,12 @@ const Inst = schema.Inst;
 
 pub const Ref = struct { pack: *const schema.Pack, func: schema.Func };
 
-pub const Stats = struct {
-    insts: u32 = 0,
-    /// Calls to functions that are not in the packs and that the checker has no model of: they are assumed
-    /// to neither end identities nor keep their arguments.
-    unknown_calls: u32 = 0,
-    /// Tokens handed to memory the function does not own: ownership passes on, the checker stops following it.
-    transfers: u32 = 0,
-    /// Container methods nobody wrote down and whose body is not in the packs: assumed to invalidate.
-    unmodelled: u32 = 0,
-    /// Operations on a container or allocation the checker cannot name a place for: their effects are not applied.
-    blind: u32 = 0,
-    /// `resize` or `remap` with a length the checker cannot show to be non-zero: assumed not to free.
-    dynamic_len: u32 = 0,
-    /// A use or a free of something that is ended on some of the things a pointer may lead to, not on all: the
-    /// checker cannot tell which, and does not report it.
-    maybe_alias: u32 = 0,
-    /// A pointer into storage that an operation reallocates only if there is no room, and the room is not known.
-    maybe_stale: u32 = 0,
-    /// An end of an identity that stands for several allocations (one site run again before the last was ended).
-    summarized: u32 = 0,
-    /// Functions that end or change memory through two pointer parameters of one type, assumed not to overlap.
-    alias_params: u32 = 0,
-    /// Ends and uses of memory the checker follows, to set against what it counted and did not decide.
-    ends: u32 = 0,
-    uses: u32 = 0,
-    /// A pointer to a local handed to a call that returns a new block or that the summary does not trace, whose result may
-    /// keep it: not followed.
-    lent: u32 = 0,
-};
+pub const Stats = outcome.Stats;
+pub const Reason = outcome.Reason;
+pub const Outcome = outcome.Outcome;
+pub const Site = outcome.Site;
+pub const Clean = outcome.Clean;
+pub const Reasons = outcome.Reasons;
 
 /// What of a callee's parameter an effect names: the value passed (`value`: its identities, below `path` for a
 /// by-value aggregate), the memory a pointer parameter points to (`content`, at `path` below it), or the object
@@ -170,9 +148,12 @@ pub const Summary = struct {
     /// Bit i: the function returns the result of a `realloc` or `remap` of parameter i, so the allocation is gone
     /// when the result holds a payload.
     moves: u64 = 0,
+    /// Ends the function made that this summary cannot say: memory a caller sees but no slot names (a global, a value with
+    /// no provenance, a soft end of the caller's own memory). A caller counts them at the call.
+    outside: Reasons = .empty,
 
     pub fn eql(a: Summary, b: Summary) bool {
-        if (a.complete != b.complete or a.clobbers.len != b.clobbers.len or (a.ok_when == null) != (b.ok_when == null) or (a.ok_when != null and a.ok_when.?.len != b.ok_when.?.len) or a.frees != b.frees or a.maybe_frees != b.maybe_frees or a.token_stores != b.token_stores or a.moves != b.moves) return false;
+        if (a.complete != b.complete or !a.outside.eql(b.outside) or a.clobbers.len != b.clobbers.len or (a.ok_when == null) != (b.ok_when == null) or (a.ok_when != null and a.ok_when.?.len != b.ok_when.?.len) or a.frees != b.frees or a.maybe_frees != b.maybe_frees or a.token_stores != b.token_stores or a.moves != b.moves) return false;
         if (a.ret.len != b.ret.len or a.kills.len != b.kills.len or a.writes.len != b.writes.len or a.fresh.len != b.fresh.len or a.derefs.len != b.derefs.len) return false;
         for (a.derefs, b.derefs) |x, y| if (!x.eql(y)) return false;
         for (a.ret, b.ret) |x, y| if (!std.mem.eql(u32, x.path, y.path) or !eqlDescs(x.descs, y.descs)) return false;
@@ -437,6 +418,8 @@ pub const State = struct {
     ended: Set = .empty,
     /// Parameter values freed on every path that led here (the dead set is the paths' union).
     freed: Set = .empty,
+    /// Parameter values freed on some path that led here.
+    freed_some: Set = .empty,
     /// Identities that no longer exist, and why (the first cause on this path).
     dead: std.AutoArrayHashMapUnmanaged(dom.Id, Event) = .empty,
     /// Allocations and objects that exist now (on some path): a new one of the same site gets another name.
@@ -486,6 +469,7 @@ pub const State = struct {
         out.trail = entry;
         out.live = try a.live.merge(arena, b.live);
         out.freed = try a.freed.minus(arena, try a.freed.minus(arena, b.freed));
+        out.freed_some = try a.freed_some.merge(arena, b.freed_some);
         out.ended = try a.ended.merge(arena, b.ended);
         out.alloced = try a.alloced.merge(arena, b.alloced);
         for (b.touched.keys()) |k| try out.touched.put(arena, k, {});
@@ -544,7 +528,7 @@ pub const State = struct {
         if (a.alive != b.alive) return false;
         if (!a.alive) return true;
         if (!a.live.eql(b.live) or !a.ended.eql(b.ended)) return false;
-        if (!a.freed.eql(b.freed) or !a.alloced.eql(b.alloced) or !a.multi.eql(b.multi)) return false;
+        if (!a.freed.eql(b.freed) or !a.freed_some.eql(b.freed_some) or !a.alloced.eql(b.alloced) or !a.multi.eql(b.multi)) return false;
         if (a.caps.count() != b.caps.count()) return false;
         var caps_it = a.caps.iterator();
         while (caps_it.next()) |e| {
@@ -588,6 +572,8 @@ const LoopCtx = struct { back: std.ArrayList(State) = .empty };
 const Snap = struct {
     kills: []const Kill,
     frees: u64,
+    /// Parameters freed on some path that led to this `ret`.
+    some_frees: u64,
     moves: u64,
     ret: []const Leaf,
     ret_place: ?Slot,
@@ -673,8 +659,10 @@ pub const Run = struct {
     diags: std.ArrayList(diag.Diag) = .empty,
     seen: std.StringHashMapUnmanaged(void) = .empty,
     stats: Stats = .{},
-    /// The (instruction, kind) pairs already counted in `stats`: a loop body runs several times.
-    tallied: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    /// The (instruction, site, outcome) triples already written down by `settle`: a loop body runs several times.
+    settled: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    /// The reasons of the ends this run left open that a caller cannot see from the summary.
+    escaped: Reasons = .empty,
     quiet: u32 = 0,
     next_arg: u32 = 0,
     cur_loc: schema.LocId = .none,
@@ -737,6 +725,7 @@ pub const Run = struct {
         for (diags, r.diags.items) |*out, d| out.* = try r.persist(arena, d);
         var summary = try r.merge(arena);
         summary.complete = complete;
+        summary.outside = r.escaped;
         summary.token_stores = r.token_stored;
         return .{ .name = try arena.dupe(u8, r.name), .diags = diags, .stats = r.stats, .summary = summary };
     }
@@ -759,11 +748,56 @@ pub const Run = struct {
         return .{ .kind = d.kind, .loc = d.loc, .text = try arena.dupe(u8, d.text), .notes = copied, .trail = trail };
     }
 
-    /// Counts an assumption once per instruction, however many times the loop around it is run.
-    pub fn tally(r: *Run, comptime field: []const u8, inst: *const Inst) Allocator.Error!void {
-        const kind: u64 = comptime @intCast(std.meta.fieldIndex(Stats, field).?);
-        const gop = try r.tallied.getOrPut(r.arena, (@as(u64, inst.id) << 8) | kind);
-        if (!gop.found_existing) @field(r.stats, field) += 1;
+    // The choke point. Every end and every use of memory the run follows is decided by a function that returns an `Outcome`
+    // (reported, clean for a named reason, or counted for a named reason), and this is where it is written down: once per
+    // instruction and outcome, however many times the loop around it is run. Nothing else touches `stats`.
+
+    pub fn settle(r: *Run, inst: *const Inst, site: Site, result: Outcome) Allocator.Error!void {
+        const open = switch (result) {
+            .counted => true,
+            .reported, .clean => false,
+        };
+        const base = (@as(u64, inst.id) << 16) | (@as(u64, @backingInt(site)) << 8);
+        // The instruction has this kind of event.
+        if (!(try r.settled.getOrPut(r.arena, base | 0xff)).found_existing) switch (site) {
+            .end => r.stats.ends += 1,
+            .use => r.stats.uses += 1,
+            .note => {},
+        };
+        const reason = switch (result) {
+            .counted => |why| why,
+            .reported => return,
+            .clean => |why| {
+                if (why != .applied and !(try r.settled.getOrPut(r.arena, base | (0x80 + @as(u64, @backingInt(why))))).found_existing)
+                    r.stats.cleans.set(why, r.stats.cleans.get(why) + 1);
+                return;
+            },
+        };
+        if (!(try r.settled.getOrPut(r.arena, base | 0xfe)).found_existing and open) switch (site) {
+            .end => r.stats.open_ends += 1,
+            .use => r.stats.open_uses += 1,
+            .note => {},
+        };
+        if ((try r.settled.getOrPut(r.arena, base | (1 + @as(u64, @backingInt(reason))))).found_existing) return;
+        r.stats.counts.set(reason, r.stats.count(reason) + 1);
+        if (site == .end and reason.escapes()) r.escaped.insert(reason);
+    }
+
+    /// An end the whole function made that the summary cannot say, which is not at one instruction.
+    fn leave(r: *Run, why: Reason) void {
+        if (r.escaped.contains(why)) return;
+        r.escaped.insert(why);
+        r.stats.counts.set(why, r.stats.count(why) + 1);
+    }
+
+    /// Whether the instruction has an event of this kind written down.
+    pub fn settledAt(r: *Run, inst: *const Inst, site: Site) bool {
+        return r.settled.contains((@as(u64, inst.id) << 16) | (@as(u64, @backingInt(site)) << 8) | 0xff);
+    }
+
+    /// An assumption at an instruction that is neither an end nor a use.
+    pub fn assume(r: *Run, inst: *const Inst, why: Reason) Allocator.Error!void {
+        return r.settle(inst, .note, .{ .counted = why });
     }
 
     // Findings.
@@ -1073,7 +1107,7 @@ pub const Run = struct {
                 const k = r.v.constant(o);
                 if (r.scalarConst(k)) |c| break :blk .{ .con = c, .ep = dom.fixed_epoch };
                 if (k.kind == .undef or k.kind == .null or !r.ty.isPointer(k.ty)) break :blk .none;
-                const pl = r.places.root(r.arena, .other, o.value) catch break :blk .none;
+                const pl = r.places.root(r.arena, .global, o.value) catch break :blk .none;
                 break :blk .{ .place = pl, .off = 0 };
             },
             else => .none,
@@ -1102,7 +1136,7 @@ pub const Run = struct {
         if (!isScalar(r.ty.kind(k.ty))) return null;
         return switch (k.kind) {
             .int, .bool => k.a,
-            .enum_tag, .enum_literal => std.hash.Wyhash.hash(0, r.pack.str(@enumFromInt(k.a))),
+            .enum_tag, .enum_literal => std.hash.Wyhash.hash(0, r.pack.str(@fromBackingInt(@intCast(k.a)))),
             else => null,
         };
     }
@@ -1464,23 +1498,26 @@ pub const Run = struct {
         try r.noteDeref(val, what);
         var soft = false;
         var first: ?dom.Id = null;
+        var followed = false;
         for (val.ids.ids) |o| {
             const rec = r.identRec(o);
-            if (rec.kind == .heap or rec.kind == .init) try r.tally("uses", inst);
+            if (rec.kind == .heap or rec.kind == .init) followed = true;
             if (rec.kind != .tomb) continue;
-            try r.tally("uses", inst);
+            followed = true;
             if (rec.b == 1) {
                 soft = true;
             } else if (first == null) first = o;
         }
         const o = first orelse {
-            if (soft) try r.tally("maybe_stale", inst);
+            if (soft) return r.settle(inst, .use, .{ .counted = .maybe_stale });
+            if (followed) try r.settle(inst, .use, .applied);
             return;
         };
         var items: std.ArrayList(diag.Note) = .empty;
         if (st.dead.get(r.identRec(o).a) orelse r.tomb_events.get(o)) |e| try items.append(r.arena, .{ .loc = e.loc, .text = e.text });
         if (try r.origin(r.identRec(o).a)) |where| try items.append(r.arena, where);
         try r.report(st, .use_after_free, inst.loc, try r.noteList(items.items), "memory that was freed or invalidated is used here ({s})", .{what});
+        try r.settle(inst, .use, .reported);
     }
 
     /// Where the pointer that depends on identity `o` came from, for the finding that names it.
@@ -1635,7 +1672,7 @@ pub const Run = struct {
             };
             var written = val;
             if (kind != .cell and !val.toks.isEmpty()) {
-                try r.tally("transfers", inst);
+                try r.assume(inst, .transfer);
                 r.noteTokenStored(val);
                 try r.sink(st, inst, val, "stored into memory the caller owns", "");
                 // The place holds a token again, one the caller owns: not one this function can consume.
@@ -1671,7 +1708,7 @@ pub const Run = struct {
                 gop.value_ptr.* = if (gop.found_existing) try gop.value_ptr.join(r.arena, val.flat()) else val.flat();
             }
             if (!val.toks.isEmpty()) {
-                try r.tally("transfers", inst);
+                try r.assume(inst, .transfer);
                 r.noteTokenStored(val);
                 try r.sink(st, inst, val, "stored into memory the checker does not track", "");
             }
@@ -1816,6 +1853,7 @@ pub const Run = struct {
             .cell => r.names.get(rec.n) orelse "a local",
             .param => r.paramName(rec.n),
             .heap => "an allocation",
+            .global => "a global",
             .other => "memory",
         };
         const base = r.placeName(rec.parent);
@@ -1842,17 +1880,22 @@ pub const Run = struct {
 
     /// Ends `id`; one that stands for several allocations stays, and the end is counted.
     pub fn end(r: *Run, st: *State, inst: *const Inst, id: dom.Id, event: Event) Allocator.Error!void {
-        try r.tally("ends", inst);
         // An end that may not have happened to this block (it stands for several, or is one of many, or depends on room)
         // is not decided.
-        if (event.soft or event.open or (st.multi.has(id) and !event.exact)) try r.tally("summarized", inst);
+        const open = event.soft or event.open or (st.multi.has(id) and !event.exact);
+        try r.settle(inst, .end, if (open) .{ .counted = .summarized } else .applied);
         try r.kill(st, id, event);
     }
 
-    /// The allocations that came from the objects `objs` end with them.
-    pub fn endRegion(r: *Run, st: *State, inst: *const Inst, objs: Set, event: Event) Allocator.Error!void {
+    /// The allocations that came from the objects `objs` end with them; how many there were.
+    pub fn endRegion(r: *Run, st: *State, inst: *const Inst, objs: Set, event: Event) Allocator.Error!usize {
+        var n: usize = 0;
         var it = r.region_of.iterator();
-        while (it.next()) |e| if (e.value_ptr.meets(objs)) try r.end(st, inst, e.key_ptr.*, event);
+        while (it.next()) |e| if (e.value_ptr.meets(objs)) {
+            try r.end(st, inst, e.key_ptr.*, event);
+            n += 1;
+        };
+        return n;
     }
 
     /// The payload exists: what the call that made it moved is gone.
@@ -1932,7 +1975,7 @@ pub const Run = struct {
         var place_ok = true;
         for (snaps, 0..) |s, n| {
             frees &= s.frees;
-            some_frees |= s.frees;
+            some_frees |= s.some_frees;
             moves &= s.moves;
             for (s.kills) |k| {
                 var at: ?usize = null;
@@ -2047,7 +2090,7 @@ pub const Run = struct {
             for (r.pack.t.params[r.func.params.off..][0..r.func.params.len]) |a| {
                 if (r.ty.isPointer(a.ty) and !r.ty.isAllocator(r.ty.payload(a.ty))) pointers += 1;
             }
-            if (pointers >= 2) r.stats.alias_params = 1;
+            if (pointers >= 2) r.stats.counts.set(.alias_params, 1);
         }
         return out;
     }
@@ -2094,7 +2137,7 @@ pub const Run = struct {
 
     fn lessSlot(_: void, a: Slot, b: Slot) bool {
         if (a.param != b.param) return a.param < b.param;
-        if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+        if (a.kind != b.kind) return @backingInt(a.kind) < @backingInt(b.kind);
         return std.mem.order(u32, a.path, b.path) == .lt;
     }
 
@@ -2122,8 +2165,8 @@ pub const Run = struct {
 
     fn lessDesc(_: void, a: Desc, b: Desc) bool {
         if (a.obj != b.obj) return !a.obj;
-        const ta = @intFromEnum(std.meta.activeTag(a.src));
-        const tb = @intFromEnum(std.meta.activeTag(b.src));
+        const ta = @backingInt(std.meta.activeTag(a.src));
+        const tb = @backingInt(std.meta.activeTag(b.src));
         if (ta != tb) return ta < tb;
         return switch (a.src) {
             .from => |x| lessSlot({}, x, b.src.from),
@@ -2277,33 +2320,44 @@ pub const Run = struct {
         return true;
     }
 
+    /// The parameters among `ids`, as a bit each.
+    fn freedBits(r: *Run, ids: Set) u64 {
+        var bits: u64 = 0;
+        for (ids.ids) |id| {
+            const rec = r.identRec(id);
+            if (rec.kind == .init and rec.b == 0) {
+                const n = r.places.rec(rec.a).n;
+                if (n < 64) bits |= @as(u64, 1) << @intCast(n);
+            }
+        }
+        return bits;
+    }
+
     /// Records what this `ret` shows of the function: what it ended, what the memory below its parameters holds, and
     /// where the result comes from.
     fn snapshot(r: *Run, inst: *const Inst, st: *State, val: Val) Allocator.Error!void {
         var kills: std.ArrayList(Kill) = .empty;
         var it = st.dead.iterator();
         while (it.next()) |e| {
-            // The caller's names for blocks that stand for several are not the callee's to end.
-            if ((e.value_ptr.soft and !e.value_ptr.open) or (e.value_ptr.exact and st.multi.has(e.key_ptr.*))) continue;
             const id = e.key_ptr.*;
             const rec = r.identRec(id);
             // The parameter's own value is a free when it is one on every path (below).
             if (rec.kind == .init and rec.b == 0 and r.places.rec(rec.a).parent == dom.no_place) continue;
+            // The caller's names for blocks that stand for several are not the callee's to end. What the caller sees of
+            // them is not nothing: the summary cannot say it, so the caller counts it.
+            if ((e.value_ptr.soft and !e.value_ptr.open) or (e.value_ptr.exact and st.multi.has(id))) {
+                if ((try r.slotOf(id)) != null) r.leave(.unexpressed);
+                continue;
+            }
             if (try r.slotOf(id)) |s| {
                 const alts: []const []const Cond = e.value_ptr.when orelse &.{&.{}};
                 for (alts) |when| try kills.append(r.arena, .{ .slot = s, .when = when, .lost = e.value_ptr.lost });
             }
         }
-        var frees: u64 = 0;
-        for (st.freed.ids) |id| {
-            const rec = r.identRec(id);
-            if (rec.kind == .init and rec.b == 0) {
-                const n = r.places.rec(rec.a).n;
-                if (n < 64) frees |= @as(u64, 1) << @intCast(n);
-            }
-        }
+        const frees = freedBits(r, st.freed);
+        const some_frees = freedBits(r, st.freed_some);
         var moves: u64 = 0;
-                for (val.moved.ids) |id| {
+        for (val.moved.ids) |id| {
             const rec = r.identRec(id);
             if (rec.kind == .init and rec.b == 0 and r.places.rec(rec.a).parent == dom.no_place) {
                 const n = r.places.rec(rec.a).n;
@@ -2341,7 +2395,7 @@ pub const Run = struct {
             const into = (try r.slotOfPlace(key, .content)) orelse continue;
             try writes.append(r.arena, .{ .into = into, .descs = try r.descsOf(v) });
         }
-        try r.snaps.put(r.arena, inst.id, .{ .kills = kills.items, .frees = frees, .moves = moves, .ret = leaves.items, .ret_place = ret_place, .writes = writes.items, .failed = r.returnsError(inst), .when = try r.guardOf(st, &.{}) });
+        try r.snaps.put(r.arena, inst.id, .{ .kills = kills.items, .frees = frees, .some_frees = some_frees, .moves = moves, .ret = leaves.items, .ret_place = ret_place, .writes = writes.items, .failed = r.returnsError(inst), .when = try r.guardOf(st, &.{}) });
     }
 
     fn ret(r: *Run, inst: *const Inst, st: *State, val: Val) Error!void {
@@ -2382,7 +2436,7 @@ pub const Run = struct {
             .constant => blk: {
                 const k = r.v.constant(ops[0]);
                 // An error union that holds an error is printed as `error.Name`.
-                break :blk k.kind == .@"error" or (k.kind == .text and r.ty.kind(k.ty) == .error_union and std.mem.startsWith(u8, r.pack.str(@enumFromInt(k.a)), "error."));
+                break :blk k.kind == .@"error" or (k.kind == .text and r.ty.kind(k.ty) == .error_union and std.mem.startsWith(u8, r.pack.str(@fromBackingInt(@intCast(k.a))), "error."));
             },
             .none => false,
         };

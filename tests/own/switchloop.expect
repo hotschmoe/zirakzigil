@@ -3,7 +3,7 @@
 switchloop.badFreeInSwitchLoop error
 switchloop.badTokenizeStale error
 switchloop.okFreeThroughArena clean
-switchloop.okIndirectKeeps clean
-switchloop.okIndirectResult clean
-switchloop.okTokenize clean
+switchloop.okIndirectKeeps counted
+switchloop.okIndirectResult counted
+switchloop.okTokenize counted
 switchloop.Source.at clean

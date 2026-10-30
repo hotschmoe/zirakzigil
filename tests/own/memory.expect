@@ -1,4 +1,4 @@
-memory.Sock.attach clean
+memory.Sock.attach counted
 memory.Sock.init clean
 memory.advAliasThroughOptional error
 memory.advAliasThroughStruct error
@@ -62,7 +62,7 @@ memory.badUseAfterFreeSlice error
 memory.drop clean
 memory.firstOf clean
 memory.fpCorrelatedBranches error
-memory.gapConditionalFreeInHelper clean
+memory.gapConditionalFreeInHelper counted
 memory.gapDoubleFreeOfElement error
 memory.grow clean
 memory.maybeFree clean
@@ -74,7 +74,7 @@ memory.okArenaCopyOut clean
 memory.okArenaResetLoop clean
 memory.okArenaScope clean
 memory.okAttachLocalSocket clean
-memory.okAttachParamBuffer clean
+memory.okAttachParamBuffer counted
 memory.okDeferOrder clean
 memory.okDupeReturn clean
 memory.okErrdeferFree clean
@@ -89,16 +89,16 @@ memory.okMapValueAcrossPut clean
 memory.okMemcpyDisjoint clean
 memory.okMemcpyDynamic clean
 memory.okMemcpyThenFree clean
-memory.okMemcpyTwoBuffers clean
+memory.okMemcpyTwoBuffers counted
 memory.okNoGrowWhileHeld clean
 memory.okPoolPointerOtherHandle clean
 memory.okPoolUse clean
 memory.okRealloc clean
-memory.okReloadEachRound clean
+memory.okReloadEachRound counted
 memory.okReturnParamSlice clean
-memory.okSlotsHandleKept clean
+memory.okSlotsHandleKept counted
 memory.okSlotsUse clean
-memory.okToOwnedSlice clean
+memory.okToOwnedSlice counted
 memory.okUnrelatedFreeKeepsPointer clean
 memory.okValueCopyAcrossAppend clean
 memory.peek clean
