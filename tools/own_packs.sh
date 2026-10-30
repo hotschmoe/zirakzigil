@@ -1,6 +1,6 @@
 #!/bin/sh
-# Exports the AIR packs of the zv-own suite again and pins the sources they come from (needs zig-zv, see
-# tools/zvc_export.sh). Run it after editing a source listed in tests/own/SOURCES.
+# Exports the AIR packs of the zv-own suite and of tests/consumer from the sources in the tree (needs zig-zv, see
+# tools/zvc_export.sh). The packs are build products and not committed: tools/run_own.sh and the consumer read what this writes.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -30,5 +30,4 @@ for out in tests/own tests/own/std; do
 done
 unset ZV_AIR_STD
 sh tools/zvc_export.sh tests/consumer/own tests/consumer/own/handoff.zig
-sha256sum tests/own/linear.zig tests/own/memory.zig tests/own/registry.zig tests/own/trusted.zig tests/own/pinned.zig tests/should_panic/pin_copy.zig tests/own/realish.zig tests/own/realish_bugs.zig tests/should_panic/double_consume.zig examples/ledger.zig tests/own/review1.zig tests/own/stdcode.zig tests/own/review2.zig tests/own/review2b.zig tests/own/real.zig tests/own/switchloop.zig tests/own/fp_zls.zig tests/own/fp_zls2.zig tests/own/fp_zls3.zig tests/own/fp_zls4.zig tests/own/fp_zls5.zig tests/own/fp_zls6.zig tests/own/fp_zls7.zig tests/own/fp_idioms.zig tests/own/fp_loops.zig tests/own/fp_tags.zig tests/own/fp_tags2.zig tests/own/review3.zig tests/own/review3b.zig tests/own/tokens.zig tests/own/review4.zig tests/own/overseer.zig tests/own/overseer2.zig >tests/own/SOURCES
 (cd tests/consumer && sha256sum own/handoff.zig >own/SOURCES)

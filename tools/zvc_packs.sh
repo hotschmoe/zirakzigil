@@ -1,6 +1,6 @@
 #!/bin/sh
-# Exports the AIR packs of the zvc suite again and pins the sources they come from (needs zig-zv, see
-# tools/zvc_export.sh). Run it after editing a source listed in tests/zvc/SOURCES.
+# Exports the AIR packs of the zvc suite from the sources in the tree (needs zig-zv, see tools/zvc_export.sh).
+# The packs are build products and not committed: tools/run_zvc.sh reads what this writes.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -17,4 +17,3 @@ for file in examples/search.zig tests/zvc/cases.zig tests/zvc/features.zig tests
     esac
 done
 sh tools/zvc_export.sh tests/zvc/dup tests/zvc/dup/soundness2.zig
-sha256sum examples/search.zig tests/zvc/cases.zig tests/zvc/features.zig tests/zvc/soundness.zig tests/zvc/soundness2.zig tests/zvc/soundness3.zig tests/zvc/tokens.zig tests/zvc/pointers.zig tests/zvc/pools.zig tests/zvc/lists.zig tests/zvc/cells.zig examples/bump.zig examples/pool.zig examples/freelist.zig >tests/zvc/SOURCES

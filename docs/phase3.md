@@ -11,7 +11,7 @@ zv-own [--src DIR] [--module NAME=DIR] [--only PATH] [--files PREFIX] [--project
 ZVC_DEEP=1 tools/zvc_export.sh OUT_DIR FILE.zig [--only PATH]...   a whole project: nested containers and imported files too
 ZV_AIR_STD=1 tools/zvc_export.sh OUT_DIR FILE.zig                  also the std functions the project reaches (the effects of std's containers are then read from their bodies)
 zv-air slice PACK OUT.zvp                                         what `ZV_AIR_STD` does to a pack, on any pack: the project and what it reaches in std
-tools/run_own.sh                                                 the suite: pinned packs against pinned verdicts (CI)
+tools/run_own.sh                                                 the suite: packs from tools/own_packs.sh against pinned verdicts (CI)
 zirakzigil.addOwnershipGate(b, .{ .packs = ..., .pins = ... })   `zig build own` in a consumer project
 ```
 
@@ -320,7 +320,7 @@ Cost: `zv-own` checked the 986 production functions of zmoltcp and its seeded ca
 
 What the bodies show, with the identity model of M2: `append`, `ensureTotalCapacity`, `put`, `getOrPut`, `insert`, `shrinkAndFree`, `toOwnedSlice` and `deinit` replace or end the storage identities of the container because their bodies do; `pop`, `shrinkRetainingCapacity`, `clearRetainingCapacity`, `lockPointers` and every `AssumeCapacity` and `Bounded` method do not; `toOwnedSlice` of a `MultiArrayList` moves the buffer to its result and leaves the container empty, which is exactly how its body reads. `src/own/spec.zig` keeps the allocator primitives of std, the pool types of zv and `MemoryPool`, and the documented semantics a body cannot show: `deinit` ends the object, `orderedRemove` and `insert` shift, a heap sifts in a way that depends on the data, `ensureTotalCapacity(n)` makes room for a count, the `AssumeCapacity` and `Bounded` methods never reallocate, and which methods hand out pointers into storage (the hash maps' header, metadata, keys and values are one block reached by pointer arithmetic). For a pack without std bodies the table holds the same facts for each method of `ArrayList`, `MultiArrayList`, `HashMap`, `ArrayHashMap`, `Deque`, `PriorityQueue` and `Io.Writer.Allocating`; a method in neither is taken to invalidate and counted (`container methods with no model`). Where a body derives less than the table says, the table is kept (`ends`), so the pack with the std bodies is a superset of the table; `tools/run_own.sh` runs every suite on both packs against the same verdicts.
 
-The probe pack is 181 KB (project only), 842 KB (project and the std it reaches) or 10.8 MB (all of std). The pinned packs of `tests/own` are exported twice (`tests/own/std/`).
+The probe pack is 181 KB (project only), 842 KB (project and the std it reaches) or 10.8 MB (all of std). The packs of `tests/own` are exported twice (`tests/own/std/`).
 
 **What is still the table's.** The first reallocation of an empty container, and any growth policy; the hash maps' result aliasing; element ownership inside containers; a `resize` by a length that is not a constant does not free. Each is in the assumptions above or in the corpus as a `gap*`.
 

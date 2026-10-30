@@ -1,7 +1,7 @@
 #!/bin/sh
-# The zv-own suite: every pinned AIR pack in tests/own against its pinned verdicts. No solver needed.
-# The packs are exports of the sources listed in tests/own/SOURCES; editing a source without exporting it
-# again (tools/own_repin.sh) fails here, because the verdicts would be about the old program.
+# The zv-own suite: every AIR pack in tests/own against its pinned verdicts. No solver needed.
+# The packs are exported from the sources in the tree by tools/own_packs.sh (tools/check.sh runs both);
+# none is committed, so the verdicts are always about the program as it stands.
 # Every suite runs twice against the same verdicts: on the packs of the project alone, where std's containers
 # come from the documented model in src/own/spec.zig, and on tests/own/std, where the packs hold the bodies of the
 # std functions the project reaches (ZV_AIR_STD) and the effects are derived from them.
@@ -13,7 +13,7 @@ log=${TMPDIR:-/tmp}/own-run.log
 # Every run, with the footer it printed: the backstop counts an end that no rule decided, and the corpus has none.
 own() {
     status=0
-    zig-out/bin/zv-own --pins tests/own/SOURCES --module zv=src "$@" >"$log" 2>&1 || status=$?
+    zig-out/bin/zv-own --module zv=src "$@" >"$log" 2>&1 || status=$?
     cat "$log"
     if grep -q "ends whose rule decided nothing" "$log"; then
         echo "run_own: an end had no outcome (see the footer above)" >&2
@@ -42,7 +42,6 @@ for dir in tests/own tests/own/std; do
 done
 
 # Packs together: a function has the verdict of its own pack, and a function exported into two packs is one function.
-pins=tests/own/SOURCES
 cat tests/own/review2.expect tests/own/real.expect tests/own/switchloop.expect >"${TMPDIR:-/tmp}/own-together.expect"
 own --module target=tests/own --expect "${TMPDIR:-/tmp}/own-together.expect" tests/own/review2.zvp tests/own/std/review2.zvp tests/own/real.zvp tests/own/std/real.zvp tests/own/switchloop.zvp
 own --module target=tests/own --expect "${TMPDIR:-/tmp}/own-together.expect" tests/own/std/switchloop.zvp tests/own/std/real.zvp tests/own/std/review2.zvp tests/own/switchloop.zvp tests/own/review2.zvp tests/own/real.zvp

@@ -91,8 +91,9 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 | `tests/baseline/` | The same mistakes in plain Zig, showing what the stock compiler does with them |
 | `src/own/` | The ownership checker: reads AIR packs, follows `zv.Linear` tokens (and, from M2, owners of memory) over the structured control flow (`docs/phase3.md`) |
 | `src/zvc/` | The verifier: reads AIR packs (`zv_air`), derives verification conditions, discharges them with Z3 over a pipe (`docs/phase2.md`) |
-| `tools/zvc_export.sh`, `tools/run_zvc.sh`, `tools/install_z3.sh` | Export a file's AIR pack (with `ZV_AIR_STD=1`, also the std functions it reaches, cut by `zv-air slice`), run the zvc suite (`tests/zvc/`: pinned packs and verdicts), install the pinned Z3 |
-| `tools/run_own.sh`, `tools/own_repin.sh` | Run the zv-own suite (`tests/own/`: pinned packs and verdicts); export its packs again |
+| `tools/zvc_export.sh`, `tools/run_zvc.sh`, `tools/install_z3.sh` | Export a file's AIR pack (with `ZV_AIR_STD=1`, also the std functions it reaches, cut by `zv-air slice`), run the zvc suite (`tests/zvc/`: fresh packs, pinned verdicts), install the pinned Z3 |
+| `tools/run_own.sh` | Run the zv-own suite (`tests/own/`: fresh packs, pinned verdicts) |
+| `tools/zvc_packs.sh`, `tools/own_packs.sh`, `tools/check.sh` | Export the suites' packs from the sources in the tree (none is committed); `check.sh` builds zig-zv if needed, exports every pack and runs both suites |
 | `tools/run_negative.sh` | Runs the should-panic and compile-fail suites |
 | `tools/run_baseline.sh` | Runs the plain-Zig controls in three build modes |
 | `docs/design.md` | Design document |
@@ -113,9 +114,12 @@ zig build test --fuzz                   # laws under the real fuzzer (Linux/macO
 zig build test --fuzz=100K              # the same, stopping after 100K iterations (what CI runs)
 ./tools/run_negative.sh                 # 6 must-fail + 36 must-not-compile cases
 ./tools/run_baseline.sh                 # the same bugs in plain Zig (about 1.5 min)
-tools/run_zvc.sh                        # the verifier against its pinned AIR packs and verdicts (needs Z3)
-tools/run_own.sh                         # the ownership checker against its pinned AIR packs and verdicts (no solver)
+tools/check.sh                          # builds zig-zv once, exports every AIR pack from the tree, runs the verifier (needs Z3) and the ownership checker
+tools/run_zvc.sh                        # the verifier against the exported packs and its pinned verdicts (after tools/zvc_packs.sh)
+tools/run_own.sh                        # the ownership checker against the exported packs and its pinned verdicts (after tools/own_packs.sh; no solver)
 ```
+
+The suites' AIR packs are never committed: CI builds zig-zv (cached per pinned tag and patch queue), exports every pack from the pull request's sources and runs both suites on them. `zig build matrix` needs `tools/own_packs.sh` first, because `tests/consumer` checks an exported pack.
 
 To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, `zirakzigil.addAssuranceGate` for the Phase 0 gate (a root module and the names of your law and scenario files). Your own `zig build matrix` is one call to `zirakzigil.addTestMatrix`; see "Build matrix" there.
 
