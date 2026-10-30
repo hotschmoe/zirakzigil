@@ -1,0 +1,60 @@
+name: zv-own oracle
+
+# Nightly: builds zig-zv, generates programs from a seed that changes every day, runs them in Debug for ground
+# truth and against zv-own, and uploads the report (silent-miss and false-positive rate per construct, the
+# minimized silent misses). It reports; it does not gate. See tools/oracle/ and docs/reviews/oracle-1.md.
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Seed (default: the day number)
+        default: ""
+      count:
+        description: Programs to generate
+        default: "2000"
+
+permissions:
+  contents: read
+
+jobs:
+  oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - name: zig-zv, cached on the pin and the compiler sources
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: compiler/.work
+          key: zig-zv-${{ hashFiles('compiler/ZIG_VERSION', 'compiler/src/**', 'compiler/hook/**', 'tools/build_zig_zv.sh') }}
+      - name: Build zig-zv
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: sh tools/build_zig_zv.sh
+      - name: Oracle
+        env:
+          ZIG_ZV: ${{ github.workspace }}/compiler/.work/zig-src/zig-out/bin/zig-zv
+        run: |
+          seed="${{ inputs.seed }}"
+          [ -n "$seed" ] || seed=$(( $(date +%s) / 86400 ))
+          count="${{ inputs.count }}"
+          echo "seed $seed"
+          sh tools/oracle/run.sh --seed "$seed" --count "${count:-2000}" --minimize 8 --out "$PWD/oracle-out"
+      - name: Summary
+        if: always()
+        run: |
+          [ -f oracle-out/report.md ] && sed -n '1,/^### By motif, programs of exactly one/p' oracle-out/report.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: oracle-report
+          path: |
+            oracle-out/report.md
+            oracle-out/report.json
+            oracle-out/results.jsonl
