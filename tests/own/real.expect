@@ -18,5 +18,5 @@ real.okScannerCopyAfter clean
 real.okValuesReloaded counted
 real.lostWidgetChild counted
 real.okWidgetOfParam clean
-real.processMessage clean
+real.processMessage counted
 real.savedScannerAdvances counted

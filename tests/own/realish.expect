@@ -1,5 +1,5 @@
 realish.Interner.deinit clean
-realish.Interner.init clean
+realish.Interner.init counted
 realish.Interner.intern counted
 realish.Lexer.init clean
 realish.Lexer.next clean
@@ -17,12 +17,12 @@ realish.Parser.parseTable counted
 realish.Parser.parseValue counted
 realish.Parser.skipNewlines clean
 realish.Table.deinit counted
-realish.Table.find clean
+realish.Table.find counted
 realish.Table.put counted
 realish.cacheDemo clean
 realish.countEntries clean
 realish.freeValue counted
 realish.internAll counted
 realish.loadAndRender counted
-realish.lookupPath clean
+realish.lookupPath counted
 realish.render counted

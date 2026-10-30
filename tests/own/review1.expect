@@ -19,7 +19,7 @@ review1.badIteratorAfterGrow counted
 review1.badKeyIteratorAfterGrow error
 review1.badLabeledLeak error
 review1.badLinearBytes unproven
-review1.badLinearInList clean
+review1.badLinearInList counted
 review1.badMultiSliceAfterGrow error
 review1.badRecFree error
 review1.badRecPool error

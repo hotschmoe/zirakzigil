@@ -36,7 +36,7 @@ for dir in tests/own tests/own/std; do
     own --module target=tests/own --expect tests/own/stdcode.expect $dir/stdcode.zvp
     own --module target=tests/own --expect tests/own/switchloop.expect $dir/switchloop.zvp
     own --module target=tests/own --expect tests/own/tokens.expect $dir/tokens.zvp
-    for suite in review2 review2b real fp_zls fp_zls2 fp_zls3 fp_zls4 fp_zls5 fp_zls6 fp_zls7 fp_idioms fp_loops fp_tags fp_tags2 review3 review3b review4 overseer overseer2; do
+    for suite in review2 review2b real fp_zls fp_zls2 fp_zls3 fp_zls4 fp_zls5 fp_zls6 fp_zls7 fp_idioms fp_loops fp_tags fp_tags2 review3 review3b review4 overseer overseer2 oracle1; do
         own --module target=tests/own --expect tests/own/$suite.expect $dir/$suite.zvp
     done
 done
@@ -132,3 +132,12 @@ for dir in tests/own tests/own/std; do
     own --module target=tests/own --expect tests/own/overseer2.expect --max-undecided 1000 $dir/overseer2.zvp >/dev/null
 done
 rm -f "$tmp" "$tmp.lower"
+
+# The oracle's silent misses (0.17.30): a global that still names a freed block, a walk that cannot say which node it frees, a call
+# through a pointer. Each says why in the footer; `clean` is for functions that leave nothing open, assumptions included.
+for dir in tests/own tests/own/std; do
+    counted $dir/oracle1.zvp oracle1.badStashFree "[1-9][0-9]* ends or growths of global memory"
+    counted $dir/oracle1.zvp oracle1.badWalkThenDestroy "[1-9][0-9]* ends that may not have happened to the block"
+    counted $dir/oracle1.zvp oracle1.badIndirectFree "[1-9][0-9]* calls to functions outside the packs"
+    counted $dir/oracle1.zvp oracle1.okIndirectNoPointers "[1-9][0-9]* calls to functions outside the packs"
+done

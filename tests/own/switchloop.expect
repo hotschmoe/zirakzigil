@@ -2,7 +2,7 @@
 # loop, badFreeInSwitchLoop frees a block on every dispatch.
 switchloop.badFreeInSwitchLoop error
 switchloop.badTokenizeStale error
-switchloop.okFreeThroughArena clean
+switchloop.okFreeThroughArena counted
 switchloop.okIndirectKeeps counted
 switchloop.okIndirectResult counted
 switchloop.okTokenize counted

@@ -19,8 +19,8 @@ tokens.okBothBranches clean
 tokens.okDiscard clean
 tokens.okInStruct clean
 tokens.okReadFieldsFirst clean
-tokens.okReplaceDirect clean
-tokens.okReplaceInPlace clean
+tokens.okReplaceDirect counted
+tokens.okReplaceInPlace counted
 tokens.okSplitJoin clean
 tokens.okTakeHolder clean
 tokens.okThroughCall clean

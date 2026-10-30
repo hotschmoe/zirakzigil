@@ -106,7 +106,8 @@ pub fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
         st.alive = false;
         return;
     }
-    if (effect == .none and (known == null or body == null) and (r.ty.hasPointers(inst.ty) or anyPointerLike(r, arg_tys))) try r.assume(inst, .unknown_call);
+    // A call through a pointer is a call to code nothing is known of, with or without pointers among its arguments.
+    if (effect == .none and (known == null or body == null) and (direct == null or r.ty.hasPointers(inst.ty) or anyPointerLike(r, arg_tys))) try r.assume(inst, .unknown_call);
     if (container_call and !model.modelled and body == null) try r.assume(inst, .unmodelled);
     // The state to take on the error path: a growth that failed changed nothing.
     if (r.ty.kind(inst.ty) == .error_union and (container_call or (summary != null and known != null and isLibrary(known.?) and summary.?.kills.len != 0))) {
@@ -159,6 +160,8 @@ pub fn call(r: *Run, inst: *const Inst, st: *State) Error!void {
             if (!region.isEmpty()) try r.region_of.put(r.arena, heap, region);
             res.ids = ids;
             res.place = try r.places.root(r.arena, .heap, inst.id);
+            // A new block: a pointer to its start.
+            res.off = 0;
             if (effect == .releases) {
                 const c = try containerAt(r, st, args[0], arg_tys[0]);
                 try r.settle(inst, .end, try releaseStorage(r, st, inst, c, text));
@@ -747,6 +750,7 @@ fn storeArgs(r: *Run, st: *State, inst: *const Inst, args: []const Val) Error!vo
     if (std.mem.indexOf(u8, callee, "Slice") != null or std.mem.indexOf(u8, callee, "NTimes") != null or std.mem.indexOf(u8, callee, "Many") != null) return;
     if (!isInsertion(callee)) return;
     const self_val = args[0];
+    if (self_val.place) |pl| if (r.rootKind(pl) == .global) for (args[1..]) |a| try r.expose(st, a);
     const into_local = r.isLocalPtr(self_val);
     for (args[1..]) |a| try r.escapesInto(st, inst, a, into_local, "stored into a container that outlives it", self_val.place);
 }
@@ -982,6 +986,16 @@ fn endIds(r: *Run, st: *State, inst: *const Inst, val: Val, what: []const u8, de
             if (st.dead.get(r.identRec(t).a) orelse r.tomb_events.get(t)) |e| try items.append(r.arena, .{ .loc = e.loc, .text = e.text });
             try r.report(st, .double_free, inst.loc, try r.noteList(items.items), "memory is freed twice", .{});
         } else if (soft or first != null) try r.settle(inst, .use, .{ .counted = .maybe_alias });
+    }
+    // A pointer that is known to be inside a block, past its start, is not one the allocator gave out.
+    if (report and val.off != null and val.off.? != 0 and !val.many and !val.maybe and !val.ids.isEmpty()) {
+        var blocks = true;
+        for (val.ids.ids) |o| blocks = blocks and r.identRec(o).kind == .heap;
+        if (blocks) {
+            const made = r.identRec(val.ids.ids[0]);
+            const where: diag.Note = .{ .loc = if (r.by_id[made.a]) |def| def.loc else .none, .text = "the block was allocated here" };
+            try r.report(st, .invalid_free, inst.loc, try r.noteList(&.{where}), "`{s}` is given a pointer {d} elements into a block, not its start", .{ what, val.off.? });
+        }
     }
     // A value that may be one of several allocations frees one of them, and the checker cannot tell which.
     const event: Event = .{ .loc = inst.loc, .text = try std.fmt.allocPrint(r.arena, "first freed here by {s}", .{what}), .trail = st.trail, .soft = val.maybe or val.many };
@@ -1255,6 +1269,15 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
     for (leaves, s.ret) |*v, l| v.* = try resolveDescs(r, st, inst, ctx, l.descs);
     const written = try r.arena.alloc(Val, s.writes.len);
     for (written, s.writes) |*v, w| v.* = try resolveDescs(r, st, inst, ctx, w.descs);
+    // What the callee stored into the blocks it hands out is what those blocks hold now: followed for one object (a node a
+    // constructor fills), not for buffers, whose elements are one place anyway.
+    const single_result = r.ty.pointee(r.ty.payload(inst.ty)) != null and r.ty.rec(r.ty.payload(inst.ty)).flags.size == .one;
+    for (if (single_result) s.fresh_writes else s.fresh_writes[0..0]) |w| {
+        const id = try freshId(r, st, inst, ctx, w.fresh);
+        var pl = try r.freshPlace(inst.id, w.fresh);
+        for (w.path) |step| pl = try r.places.child(r.arena, pl, step);
+        try r.writeLeafAs(st, pl, try resolveDescs(r, st, inst, ctx, w.descs), !st.multi.has(id));
+    }
     var moved: Set = res.moved;
     if (s.moves != 0) for (args, 0..) |a, i| {
         if (i < 64 and s.moves & (@as(u64, 1) << @intCast(i)) != 0) try r.settle(inst, .end, try endIds(r, st, inst, a, opts.callee, &moved, true));
@@ -1310,6 +1333,7 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
     const reallocated = acc.reallocated;
     const ended_by = acc.ended_by;
     for (args, 0..) |a, i| {
+        if (i < 64 and s.exposes & (@as(u64, 1) << @intCast(i)) != 0) try r.expose(st, a);
         if (i >= 64 or s.frees & (@as(u64, 1) << @intCast(i)) == 0) continue;
         ended_by[i] = try ended_by[i].merge(r.arena, a.ids);
         try r.settle(inst, .end, try endIds(r, st, inst, a, r.callName(inst), null, true));
@@ -1384,6 +1408,12 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
         res.obj = shaped.obj;
     }
     if (ret_place) |pl| res.place = pl;
+    // A result that is one new block points to the place that block's content is kept at.
+    if (ret_place == null and r.topLevelPointer(inst.ty)) for (s.ret) |l| {
+        if (l.path.len != 0 or l.descs.len != 1 or l.descs[0].obj or l.descs[0].src != .fresh) continue;
+        if (single_result) res.place = try r.freshPlace(inst.id, l.descs[0].src.fresh);
+        res.off = 0;
+    };
 }
 
 /// What the kills of one call add up to.
