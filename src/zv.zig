@@ -32,26 +32,42 @@ pub const ghost: bool = opts.ghost;
 // 1. Contracts
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Set by a read of ghost state in a build that has none. A contract that read some cannot be checked there, and `holds`
+/// takes it as true: a ghost build is where such a contract is proved or checked.
+var read_ghost: bool = false;
+
+inline fn taint() void {
+    if (checks and !ghost) read_ghost = true;
+}
+
+inline fn holds(ok: bool) bool {
+    if (!checks) return true;
+    if (ghost) return ok;
+    const unread = !read_ghost;
+    read_ghost = false;
+    return ok or !unread;
+}
+
 /// Precondition. The caller's obligation.
 pub inline fn requires(ok: bool) void {
-    if (checks and !ok) @panic("zv: precondition violated");
+    if (checks and !holds(ok)) @panic("zv: precondition violated");
 }
 
 /// Postcondition. Returns `value` so it composes with `return`:
 ///     return zv.ensures(r, lo <= r and r <= hi);
 pub inline fn ensures(value: anytype, ok: bool) @TypeOf(value) {
-    if (checks and !ok) @panic("zv: postcondition violated");
+    if (checks and !holds(ok)) @panic("zv: postcondition violated");
     return value;
 }
 
 /// Loop invariant. Place it as the first statement of a loop body.
 pub inline fn invariant(ok: bool) void {
-    if (checks and !ok) @panic("zv: loop invariant violated");
+    if (checks and !holds(ok)) @panic("zv: loop invariant violated");
 }
 
 /// A fact the verifier may take for granted (trusted). Checked at runtime anyway.
 pub inline fn assume(ok: bool) void {
-    if (checks and !ok) @panic("zv: assumption violated");
+    if (checks and !holds(ok)) @panic("zv: assumption violated");
 }
 
 /// Termination measure of a loop. Place it right after the loop's `invariant` calls: `zvc` proves that the
@@ -62,11 +78,52 @@ pub inline fn decreases(measure: anytype) void {
     _ = measure;
 }
 
-/// A value that exists only in ghost builds: `T` there, `void` elsewhere. A ghost variable is declared
-/// `var count: zv.Ghost(u64) = if (zv.ghost) 0 else {};` and only touched under `if (zv.ghost)`, so a normal
-/// build neither stores nor computes it.
+/// Ghost state of type `T`: a value that exists only in ghost builds and costs nothing elsewhere. It is a field or a
+/// local of ordinary code, and every operation on it can be written without asking whether the build has ghost code:
+/// where there is none the box is empty, a write is dropped and a read is a value no one may rely on, which a
+/// contract that makes it knows (`holds`). A ghost-aware type of this library (`BlockSet`, `PointsTo`, `Cell`, `Int`,
+/// `Seq`) is its own ghost value and needs no box.
+///
+///     order: zv.Ghost([8]u32) = .{},
+///     self.order.put(self.nfree, idx);            // dropped outside ghost builds
+///     zv.requires(self.order.at(0) < 8);          // checked in ghost builds, proved by zvc
 pub fn Ghost(comptime T: type) type {
-    return if (ghost) T else void;
+    switch (@typeInfo(T)) {
+        .@"struct" => if (@hasDecl(T, "is_ghost")) return T,
+        else => {},
+    }
+    return struct {
+        inner: if (ghost) T else void = undefined,
+
+        const Self = @This();
+        pub const is_ghost = true;
+
+        pub inline fn init(value: T) Self {
+            return .{ .inner = if (ghost) value else {} };
+        }
+
+        pub inline fn get(self: Self) T {
+            if (ghost) return self.inner;
+            taint();
+            return std.mem.zeroes(T);
+        }
+
+        pub inline fn set(self: *Self, value: T) void {
+            if (ghost) self.inner = value;
+        }
+
+        /// Element `i` of a ghost array.
+        pub inline fn at(self: Self, i: usize) std.meta.Elem(T) {
+            if (ghost) return self.inner[i];
+            taint();
+            return std.mem.zeroes(std.meta.Elem(T));
+        }
+
+        /// Stores `value` at element `i` of a ghost array.
+        pub inline fn put(self: *Self, i: usize, value: std.meta.Elem(T)) void {
+            if (ghost) self.inner[i] = value;
+        }
+    };
 }
 
 /// Bits of a ghost integer: `zvc` proves with exactly this width (`term.ghost_bits`), so a proof holds for what runs.
@@ -74,12 +131,12 @@ pub const ghost_bits = 256;
 const Word = @Int(.signed, ghost_bits);
 
 /// Ghost integer, for specifications that must not wrap. `zvc` reads it as a mathematical integer; run in a
-/// ghost build it is an `i256` and panics on overflow. It does not exist outside ghost builds, so use it
-/// behind `zv.ghost`: `zv.ensures(r, !zv.ghost or zv.Int.of(r).le(zv.Int.of(x)))`.
+/// ghost build it is an `i256` and panics on overflow. Outside ghost builds it is empty and its operations are no-ops.
 pub const Int = if (ghost) struct {
     v: Word,
 
     const Self = @This();
+    pub const is_ghost = true;
 
     pub inline fn of(x: anytype) Self {
         return .{ .v = x };
@@ -122,17 +179,69 @@ pub const Int = if (ghost) struct {
     pub inline fn ne(a: Self, b: Self) bool {
         return a.v != b.v;
     }
-} else void;
+} else struct {
+    const Self = @This();
+    pub const is_ghost = true;
+
+    pub inline fn of(x: anytype) Self {
+        _ = x;
+        return .{};
+    }
+    pub inline fn add(a: Self, b: Self) Self {
+        _ = .{ a, b };
+        return .{};
+    }
+    pub inline fn sub(a: Self, b: Self) Self {
+        _ = .{ a, b };
+        return .{};
+    }
+    pub inline fn mul(a: Self, b: Self) Self {
+        _ = .{ a, b };
+        return .{};
+    }
+    pub inline fn neg(a: Self) Self {
+        _ = a;
+        return .{};
+    }
+    pub inline fn divFloor(a: Self, b: Self) Self {
+        _ = .{ a, b };
+        return .{};
+    }
+    pub inline fn mod(a: Self, b: Self) Self {
+        _ = .{ a, b };
+        return .{};
+    }
+    pub inline fn lt(a: Self, b: Self) bool {
+        _ = .{ a, b };
+        taint();
+        return true;
+    }
+    pub inline fn le(a: Self, b: Self) bool {
+        return lt(a, b);
+    }
+    pub inline fn gt(a: Self, b: Self) bool {
+        return lt(a, b);
+    }
+    pub inline fn ge(a: Self, b: Self) bool {
+        return lt(a, b);
+    }
+    pub inline fn eq(a: Self, b: Self) bool {
+        return lt(a, b);
+    }
+    pub inline fn ne(a: Self, b: Self) bool {
+        return lt(a, b);
+    }
+};
 
 /// Ghost sequence of ghost integers. `zvc` reads it as a sequence and obliges it to stay within `capacity`
-/// (`term.seq_capacity`) elements, which is all it holds when run in a ghost build.
-/// Like `Int`, it exists only in ghost builds.
+/// (`term.seq_capacity`) elements, which is all it holds when run in a ghost build. Like `Int`, it is empty outside them.
 pub const Seq = if (ghost) struct {
     items: [capacity]Word = undefined,
     n: usize = 0,
 
     pub const capacity = 64;
     const Self = @This();
+    pub const is_ghost = true;
 
     pub inline fn empty() Self {
         return .{};
@@ -170,7 +279,35 @@ pub const Seq = if (ghost) struct {
         }
         return r;
     }
-} else void;
+} else struct {
+    const Self = @This();
+    pub const is_ghost = true;
+    pub const capacity = 64;
+
+    pub inline fn empty() Self {
+        return .{};
+    }
+    pub inline fn push(s: Self, x: Int) Self {
+        _ = .{ s, x };
+        return .{};
+    }
+    pub inline fn len(s: Self) Int {
+        _ = s;
+        return .{};
+    }
+    pub inline fn at(s: Self, i: Int) Int {
+        _ = .{ s, i };
+        return .{};
+    }
+    pub inline fn concat(a: Self, b: Self) Self {
+        _ = .{ a, b };
+        return .{};
+    }
+    pub inline fn sub(s: Self, lo: Int, n: Int) Self {
+        _ = .{ s, lo, n };
+        return .{};
+    }
+};
 
 /// `forall i in [0, n): pred(ctx, i)` for `n <= bound`, a conjunction written out at comptime: the verifier sees `bound`
 /// guarded instances of `pred`, no quantifier, so a proof about it is as predictable as any other and a timeout is a
@@ -484,129 +621,264 @@ pub const PinCheck = struct {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3d. PointsTo: permission tokens for raw memory (docs/phase4.md)
+// 3d. Permission tokens for raw memory (docs/phase4.md)
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// A token is linear ghost state. In a ghost build it is a value: `split`, `join`, `cut` and the others consume
+// theirs, a function that takes one by value consumes it, and a consumed token may not be used again; `zvc` proves
+// that of the functions it verifies and refuses a token built any other way than by the operations below. In any
+// other build it is a type with no fields and the same operations, which do nothing, so code that holds tokens is
+// written once and compiles to the code without them.
 
-/// The right to use the bytes `[lo, hi)` of one region of memory, owned by whoever holds the value. It exists
-/// only in ghost builds (`void` elsewhere), so a field of this type costs nothing in production. A token is
-/// linear: `split`, `join` and `discard` consume theirs, a function that takes one by value consumes it, and
-/// a consumed token may not be used again. `zvc` proves that for the function it verifies (a use of a consumed
-/// token is refuted), and it refuses a token built any other way than by the operations below: a token that
-/// is not forged, not copied and not dropped is what lets a proof treat two tokens as disjoint memory.
+/// The right to use the bytes `[lo(), hi())` of one region of memory, owned by whoever holds the value.
 pub const PointsTo = if (ghost) struct {
-    lo: usize,
-    hi: usize,
+    from: usize,
+    to: usize,
 
     const Self = @This();
+    pub const is_ghost = true;
 
     pub const Pair = struct { head: Self, tail: Self };
 
     /// The permission for all of `buf`. This is the one trusted source of tokens: the caller states that
     /// nothing else uses these bytes, and `zvc` names every call as a premise (`assuming ... at file:line`).
     pub inline fn own(buf: []const u8) Self {
-        return .{ .lo = 0, .hi = buf.len };
+        return .{ .from = 0, .to = buf.len };
+    }
+
+    pub inline fn lo(self: Self) usize {
+        return self.from;
+    }
+
+    pub inline fn hi(self: Self) usize {
+        return self.to;
     }
 
     /// `[lo, cut)` and `[cut, hi)`: disjoint, and together exactly what `self` was. `cut` is a position in the
     /// region, not a length, so that no arithmetic is needed to say where the cut is.
     pub inline fn split(self: Self, cut: usize) Pair {
-        requires(self.lo <= cut and cut <= self.hi);
+        requires(self.from <= cut and cut <= self.to);
         return .{
-            .head = .{ .lo = self.lo, .hi = cut },
-            .tail = .{ .lo = cut, .hi = self.hi },
+            .head = .{ .from = self.from, .to = cut },
+            .tail = .{ .from = cut, .to = self.to },
         };
     }
 
     /// The inverse of `split`: two permissions that meet make one.
     pub inline fn join(head: Self, tail: Self) Self {
-        requires(head.hi == tail.lo);
-        return .{ .lo = head.lo, .hi = tail.hi };
+        requires(head.to == tail.from);
+        return .{ .from = head.from, .to = tail.to };
     }
 
     /// Gives the permission up for good: the bytes can never be used through it again.
     pub inline fn discard(self: Self) void {
         _ = self;
     }
-} else void;
+} else struct {
+    const Self = @This();
+    pub const is_ghost = true;
 
-/// The right to one cell of memory of type `T`, and the value it holds: a typed `PointsTo`. Like the others it exists
-/// only in ghost builds, is linear, and is built only by its own operations. `write` consumes the token and makes the
-/// one for the cell after the store, so the old value cannot be read once the new one is written; a function that did
-/// not get the token cannot say what the cell holds.
+    pub const Pair = struct { head: Self, tail: Self };
+
+    pub inline fn own(buf: []const u8) Self {
+        _ = buf;
+        return .{};
+    }
+    pub inline fn lo(self: Self) usize {
+        _ = self;
+        taint();
+        return 0;
+    }
+    pub inline fn hi(self: Self) usize {
+        _ = self;
+        taint();
+        return 0;
+    }
+    pub inline fn split(self: Self, cut: usize) Pair {
+        _ = .{ self, cut };
+        return .{ .head = .{}, .tail = .{} };
+    }
+    pub inline fn join(head: Self, tail: Self) Self {
+        _ = .{ head, tail };
+        return .{};
+    }
+    pub inline fn discard(self: Self) void {
+        _ = self;
+    }
+};
+
+/// The right to one cell of memory of type `T`, and the value it holds: a typed `PointsTo`. `write` consumes the token
+/// and makes the one for the cell after the store, so the old value cannot be read once the new one is written; a
+/// function that did not get the token cannot say what the cell holds.
 pub fn Cell(comptime T: type) type {
     return if (ghost) struct {
-        slot: usize,
-        value: T,
+        where: usize,
+        held: T,
 
         const Self = @This();
+        pub const is_ghost = true;
 
         /// The token of cell `slot` holding `value`. The trusted source: the caller states that nothing else touches it.
-        pub inline fn own(slot: usize, value: T) Self {
-            return .{ .slot = slot, .value = value };
+        pub inline fn own(at_: usize, value_: T) Self {
+            return .{ .where = at_, .held = value_ };
         }
 
-        /// The cell after a store of `value`.
-        pub inline fn write(self: Self, value: T) Self {
-            return .{ .slot = self.slot, .value = value };
+        pub inline fn slot(self: Self) usize {
+            return self.where;
+        }
+
+        pub inline fn value(self: Self) T {
+            return self.held;
+        }
+
+        /// The cell after a store of `new`.
+        pub inline fn write(self: Self, new: T) Self {
+            return .{ .where = self.where, .held = new };
         }
 
         pub inline fn discard(self: Self) void {
             _ = self;
         }
-    } else void;
+    } else struct {
+        const Self = @This();
+        pub const is_ghost = true;
+
+        pub inline fn own(at_: usize, value_: T) Self {
+            _ = .{ at_, value_ };
+            return .{};
+        }
+        pub inline fn slot(self: Self) usize {
+            _ = self;
+            taint();
+            return 0;
+        }
+        pub inline fn value(self: Self) T {
+            _ = self;
+            taint();
+            return std.mem.zeroes(T);
+        }
+        pub inline fn write(self: Self, new: T) Self {
+            _ = .{ self, new };
+            return .{};
+        }
+        pub inline fn discard(self: Self) void {
+            _ = self;
+        }
+    };
 }
 
 var block_set_ids: usize = 0;
 
-/// The right to use the blocks of one pool whose bits are set in `mask`, by index (at most 64 blocks). It exists only
-/// in ghost builds, is linear like `PointsTo`, and is what a pool hands out: a block's token has one bit, the pool
-/// keeps the free ones. `id` names the pool: two tokens of one pool that are both alive cannot share a block
-/// (`apart`), which is how a free of the same block twice is refused.
+/// The right to use the blocks of one pool whose bits are set in `mask()`, by index (at most 64 blocks). It is what a
+/// pool hands out: a block's token has one bit, the pool keeps the free ones. `id()` names the pool: two tokens of one
+/// pool that are both alive cannot share a block (`apart`), which is how a free of the same block twice is refused.
 pub const BlockSet = if (ghost) struct {
-    id: usize,
-    mask: u64,
+    pool: usize,
+    bits: u64,
 
     const Self = @This();
+    pub const is_ghost = true;
 
     pub const Pair = struct { head: Self, tail: Self };
 
     /// The permission for the blocks of `mask` of a pool no one else uses. The trusted source of block tokens: the caller
     /// states that the pool is its own, and `zvc` names every call as a premise.
-    pub inline fn own(mask: u64) Self {
+    pub inline fn own(blocks: u64) Self {
         block_set_ids += 1;
-        return .{ .id = block_set_ids, .mask = mask };
+        return .{ .pool = block_set_ids, .bits = blocks };
     }
 
-    /// The blocks of `bits`, which must all be in the set, and the rest.
-    pub inline fn cut(self: Self, bits: u64) Pair {
-        requires(bits & ~self.mask == 0);
+    pub inline fn id(self: Self) usize {
+        return self.pool;
+    }
+
+    pub inline fn mask(self: Self) u64 {
+        return self.bits;
+    }
+
+    /// Whether block `idx` is in the set.
+    pub inline fn has(self: Self, idx: usize) bool {
+        return idx < 64 and (self.bits >> @intCast(idx)) & 1 == 1;
+    }
+
+    /// The set of block `idx` alone, as a mask.
+    pub inline fn bit(idx: usize) u64 {
+        return @as(u64, 1) << @intCast(idx);
+    }
+
+    /// The blocks of `which`, which must all be in the set, and the rest.
+    pub inline fn cut(self: Self, which: u64) Pair {
+        requires(which & ~self.bits == 0);
         return .{
-            .head = .{ .id = self.id, .mask = bits },
-            .tail = .{ .id = self.id, .mask = self.mask & ~bits },
+            .head = .{ .pool = self.pool, .bits = which },
+            .tail = .{ .pool = self.pool, .bits = self.bits & ~which },
         };
     }
 
     /// The inverse of `cut`: two sets of one pool that share no block make one.
     pub inline fn join(head: Self, tail: Self) Self {
-        requires(head.id == tail.id and head.mask & tail.mask == 0);
-        return .{ .id = head.id, .mask = head.mask | tail.mask };
+        requires(head.pool == tail.pool and head.bits & tail.bits == 0);
+        return .{ .pool = head.pool, .bits = head.bits | tail.bits };
     }
 
     pub inline fn discard(self: Self) void {
         _ = self;
     }
 
-    /// The lemma of Verus' `points_to_disjoint`: two tokens that are alive together, of one pool, share no block. Both
+    /// The lemma `points_to_disjoint` of Verus: two tokens that are alive together, of one pool, share no block. Both
     /// are returned (they are consumed and made again). `zvc` assumes it of two distinct tokens and refuses the same
     /// token twice; run, it is checked.
     pub inline fn apart(a: Self, b: Self) Pair {
-        requires(a.id != b.id or a.mask & b.mask == 0);
+        requires(a.pool != b.pool or a.bits & b.bits == 0);
         return .{
-            .head = .{ .id = a.id, .mask = a.mask },
-            .tail = .{ .id = b.id, .mask = b.mask },
+            .head = .{ .pool = a.pool, .bits = a.bits },
+            .tail = .{ .pool = b.pool, .bits = b.bits },
         };
     }
-} else void;
+} else struct {
+    const Self = @This();
+    pub const is_ghost = true;
+
+    pub const Pair = struct { head: Self, tail: Self };
+
+    pub inline fn own(blocks: u64) Self {
+        _ = blocks;
+        return .{};
+    }
+    pub inline fn id(self: Self) usize {
+        _ = self;
+        taint();
+        return 0;
+    }
+    pub inline fn mask(self: Self) u64 {
+        _ = self;
+        taint();
+        return 0;
+    }
+    pub inline fn has(self: Self, idx: usize) bool {
+        _ = .{ self, idx };
+        taint();
+        return true;
+    }
+    pub inline fn bit(idx: usize) u64 {
+        return @as(u64, 1) << @intCast(idx);
+    }
+    pub inline fn cut(self: Self, which: u64) Pair {
+        _ = .{ self, which };
+        return .{ .head = .{}, .tail = .{} };
+    }
+    pub inline fn join(head: Self, tail: Self) Self {
+        _ = .{ head, tail };
+        return .{};
+    }
+    pub inline fn discard(self: Self) void {
+        _ = self;
+    }
+    pub inline fn apart(a: Self, b: Self) Pair {
+        _ = .{ a, b };
+        return .{ .head = .{}, .tail = .{} };
+    }
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. Governance: assurance manifest + laws

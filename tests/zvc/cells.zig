@@ -32,7 +32,7 @@ pub const Box = struct {
     }
 
     inline fn sound(b: Box) bool {
-        return b.cell.value == b.val;
+        return b.cell.value() == b.val;
     }
 
     pub fn set(self: *Box, v: u32) void {
@@ -44,7 +44,7 @@ pub const Box = struct {
 
     pub fn get(self: *const Box) u32 {
         zv.requires(sound(self.*));
-        return zv.ensures(self.val, self.cell.value == self.val);
+        return zv.ensures(self.val, self.cell.value() == self.val);
     }
 
     pub fn swap(a: *Box, b: *Box) void {
@@ -61,7 +61,7 @@ pub const Box = struct {
     pub fn twoMints(x: u32, y: u32) u32 {
         const p = zv.Cell(u32).own(1, x);
         const q = zv.Cell(u32).own(2, y);
-        return zv.ensures(p.value, p.value == x and q.value == y);
+        return zv.ensures(p.value(), p.value() == x and q.value() == y);
     }
 
     /// The store is not recorded in the cell: it still says the old value.
@@ -84,7 +84,7 @@ pub const Box = struct {
         zv.requires(sound(self.*));
         const old = self.cell;
         self.cell = old.write(v);
-        return old.value;
+        return old.value();
     }
 
     /// Writes through a token that was given away.
@@ -103,13 +103,13 @@ pub const Box = struct {
     }
 
     pub fn forgeCell(slot: usize, v: u32) zv.Cell(u32) {
-        const c: zv.Cell(u32) = .{ .slot = slot, .value = v };
+        const c: zv.Cell(u32) = .{ .where = slot, .held = v };
         return c;
     }
 
     pub fn forgeValue(c: zv.Cell(u32)) zv.Cell(u32) {
         var d = c;
-        d.value = 7;
+        d.held = 7;
         return d;
     }
 

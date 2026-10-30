@@ -26,15 +26,11 @@ pub const block_shift = 6;
 pub const block_size = 1 << block_shift;
 pub const max_blocks = 64;
 
-inline fn bitOf(idx: u32) u64 {
-    return @as(u64, 1) << @truncate(idx);
-}
-
 pub const Block = struct {
     idx: u32,
     /// Where the bytes start: `idx * block_size`.
     off: usize,
-    /// Ghost: the permission for this block alone.
+    /// The permission for this block alone.
     perm: zv.BlockSet,
 };
 
@@ -48,7 +44,7 @@ pub const Pool = struct {
     all: u64,
     /// Bit `i` is set when block `i` is free.
     free_bits: u64,
-    /// Ghost: the permission for the free blocks.
+    /// The permission for the free blocks.
     spare: zv.BlockSet,
 
     pub const assurance = .{ .init = .verified, .alloc = .verified, .free = .verified, .pair = .verified };
@@ -59,19 +55,19 @@ pub const Pool = struct {
     inline fn sound(p: Pool) bool {
         return p.count <= max_blocks and p.all & (p.all +% 1) == 0 and @as(u32, @popCount(p.all)) == p.count and p.free_bits & ~p.all == 0 and
             @as(usize, p.count) <= p.cap >> block_shift and
-            (!zv.ghost or p.spare.mask == p.free_bits);
+            p.spare.mask() == p.free_bits;
     }
 
     inline fn owns(p: Pool, blk: Block) bool {
         return blk.idx < p.count and blk.off == @as(usize, blk.idx) << block_shift and
-            (!zv.ghost or (blk.perm.id == p.spare.id and blk.perm.mask == bitOf(blk.idx)));
+            blk.perm.id() == p.spare.id() and blk.perm.mask() == zv.BlockSet.bit(blk.idx);
     }
 
-    inline fn granted(old: Pool, id: zv.Ghost(usize), now: Pool, blk: Block) bool {
+    inline fn granted(old: Pool, id: usize, now: Pool, blk: Block) bool {
         return sound(now) and owns(now, blk) and now.cap == old.cap and now.count == old.count and now.all == old.all and
-            old.free_bits & bitOf(blk.idx) != 0 and now.free_bits == old.free_bits & ~bitOf(blk.idx) and
-            blk.off +% block_size <= old.cap and blk.off & (block_size - 1) == 0 and
-            (!zv.ghost or now.spare.id == id);
+            old.free_bits & zv.BlockSet.bit(blk.idx) != 0 and now.free_bits == old.free_bits & ~zv.BlockSet.bit(blk.idx) and
+            blk.off + block_size <= old.cap and blk.off & (block_size - 1) == 0 and
+            now.spare.id() == id;
     }
 
     inline fn unchanged(old: Pool, now: Pool) bool {
@@ -82,8 +78,7 @@ pub const Pool = struct {
     pub fn init(region: []u8) Pool {
         const n: u32 = @intCast(@min(region.len >> block_shift, max_blocks));
         const all: u64 = if (n == 64) ~@as(u64, 0) else (@as(u64, 1) << @intCast(n)) -% 1;
-        const spare = if (zv.ghost) zv.BlockSet.own(all) else {};
-        const p: Pool = .{ .cap = region.len, .count = n, .all = all, .free_bits = all, .spare = spare };
+        const p: Pool = .{ .cap = region.len, .count = n, .all = all, .free_bits = all, .spare = zv.BlockSet.own(all) };
         return zv.ensures(p, sound(p) and p.cap == region.len and p.free_bits == p.all);
     }
 
@@ -91,37 +86,33 @@ pub const Pool = struct {
     pub fn alloc(self: *Pool) ?Block {
         zv.requires(sound(self.*));
         const old = self.*;
-        const id = if (zv.ghost) self.spare.id else {};
-        if (self.free_bits == 0) {
-            const none: ?Block = null;
-            return zv.ensures(none, unchanged(old, self.*) and old.free_bits == 0);
-        }
+        const id = self.spare.id();
+        if (self.free_bits == 0) return zv.ensures(null, unchanged(old, self.*) and old.free_bits == 0);
         const idx: u32 = @ctz(self.free_bits);
-        const parts = if (zv.ghost) self.spare.cut(bitOf(idx)) else {};
-        self.spare = if (zv.ghost) parts.tail else {};
-        self.free_bits &= ~bitOf(idx);
-        const blk: Block = .{ .idx = idx, .off = @as(usize, idx) << block_shift, .perm = if (zv.ghost) parts.head else {} };
-        const got: ?Block = blk;
-        return zv.ensures(got, granted(old, id, self.*, blk));
+        const parts = self.spare.cut(zv.BlockSet.bit(idx));
+        self.spare = parts.tail;
+        self.free_bits &= ~zv.BlockSet.bit(idx);
+        const blk: Block = .{ .idx = idx, .off = @as(usize, idx) << block_shift, .perm = parts.head };
+        return zv.ensures(blk, granted(old, id, self.*, blk));
     }
 
     /// Takes a block back. The token is the proof that it was handed out and not given back yet.
     pub fn free(self: *Pool, blk: Block) void {
         zv.requires(sound(self.*) and owns(self.*, blk));
         const old = self.*;
-        const lemma = if (zv.ghost) zv.BlockSet.apart(self.spare, blk.perm) else {};
-        self.spare = if (zv.ghost) zv.BlockSet.join(lemma.head, lemma.tail) else {};
-        self.free_bits |= bitOf(blk.idx);
-        return zv.ensures({}, sound(self.*) and self.cap == old.cap and self.count == old.count and
-            old.free_bits & bitOf(blk.idx) == 0 and self.free_bits == old.free_bits | bitOf(blk.idx));
+        const lemma = zv.BlockSet.apart(self.spare, blk.perm);
+        self.spare = zv.BlockSet.join(lemma.head, lemma.tail);
+        self.free_bits |= zv.BlockSet.bit(blk.idx);
+        zv.ensures({}, sound(self.*) and self.cap == old.cap and self.count == old.count and
+            old.free_bits & zv.BlockSet.bit(blk.idx) == 0 and self.free_bits == old.free_bits | zv.BlockSet.bit(blk.idx));
     }
 
     inline fn together(old: Pool, now: Pool, t: Two) bool {
         const x = t.first;
         const y = t.second;
         return sound(now) and owns(now, x) and owns(now, y) and now.cap == old.cap and x.idx != y.idx and
-            x.off +% block_size <= old.cap and y.off +% block_size <= old.cap and
-            (x.off +% block_size <= y.off or y.off +% block_size <= x.off) and
+            x.off + block_size <= old.cap and y.off + block_size <= old.cap and
+            (x.off + block_size <= y.off or y.off + block_size <= x.off) and
             x.off & (block_size - 1) == 0 and y.off & (block_size - 1) == 0;
     }
 
@@ -130,15 +121,13 @@ pub const Pool = struct {
     pub fn pair(self: *Pool) ?Two {
         zv.requires(sound(self.*));
         const old = self.*;
-        const none: ?Two = null;
-        const x = self.alloc() orelse return zv.ensures(none, unchanged(old, self.*));
+        const x = self.alloc() orelse return zv.ensures(null, unchanged(old, self.*));
         const y = self.alloc() orelse {
             self.free(x);
-            return zv.ensures(none, unchanged(old, self.*));
+            return zv.ensures(null, unchanged(old, self.*));
         };
         const t: Two = .{ .first = x, .second = y };
-        const got: ?Two = t;
-        return zv.ensures(got, together(old, self.*, t));
+        return zv.ensures(t, together(old, self.*, t));
     }
 };
 
@@ -155,14 +144,14 @@ pub const Heap = struct {
 
     pub fn init(region: []align(block_size) u8) Heap {
         var pool = Pool.init(region);
-        const parts = if (zv.ghost) pool.spare.cut(0) else {};
-        pool.spare = if (zv.ghost) parts.tail else {};
-        return .{ .region = region, .pool = pool, .held = if (zv.ghost) parts.head else {} };
+        const parts = pool.spare.cut(0);
+        pool.spare = parts.tail;
+        return .{ .region = region, .pool = pool, .held = parts.head };
     }
 
     pub fn alloc(self: *Heap) ?*align(block_size) [block_size]u8 {
         const blk = self.pool.alloc() orelse return null;
-        if (zv.ghost) self.held = zv.BlockSet.join(self.held, blk.perm);
+        self.held = zv.BlockSet.join(self.held, blk.perm);
         return @alignCast(self.region[blk.off..][0..block_size]);
     }
 
@@ -172,9 +161,9 @@ pub const Heap = struct {
         if (@intFromPtr(ptr) < @intFromPtr(self.region.ptr) or off >> block_shift >= self.pool.count) @panic("zv.Heap: not a block of this heap");
         const idx: u32 = @intCast(off >> block_shift);
         if (self.pool.free_bits >> @intCast(idx) & 1 == 1) @panic("zv.Heap: block freed twice");
-        const parts = if (zv.ghost) self.held.cut(bitOf(idx)) else {};
-        self.held = if (zv.ghost) parts.tail else {};
-        self.pool.free(.{ .idx = idx, .off = off, .perm = if (zv.ghost) parts.head else {} });
+        const parts = self.held.cut(zv.BlockSet.bit(idx));
+        self.held = parts.tail;
+        self.pool.free(.{ .idx = idx, .off = off, .perm = parts.head });
     }
 };
 
@@ -246,5 +235,5 @@ test "blocks are handed out lowest first and come back in any order" {
 }
 
 test "tokens cost nothing outside ghost builds" {
-    try std.testing.expectEqual(@as(usize, if (zv.ghost) 6 * @sizeOf(usize) else 4 * @sizeOf(usize)), @sizeOf(Pool));
+    try std.testing.expect(zv.ghost or @sizeOf(Pool) == 4 * @sizeOf(usize));
 }

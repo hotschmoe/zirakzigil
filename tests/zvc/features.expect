@@ -38,3 +38,8 @@ features.tri proved
 features.highestBit proved
 features.popcountBound proved
 features.trailingZerosWrong refuted
+features.requiresAfterCompute proved
+features.requiresObligation proved
+features.nullPlain proved
+features.indexPlain proved
+features.indexUnguarded refuted

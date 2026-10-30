@@ -1,4 +1,4 @@
-# The differential oracle, first run (0.17.25)
+# The differential oracle, first run (0.17.27)
 
 Four adversarial reviews each found new silent false negatives: `zv-own` said `clean` and the footer said everything was decided, while the program crashed in Debug. Hand-written cases find them one class at a time. `tools/oracle` is the generated version of that review: a seeded generator of small allocator-heavy programs, a Debug ground truth, the same programs through `zv-own`, a classification, an automatic minimizer for the silent misses, and a report with a rate per construct. The overseer's recommendation 2 (OVERSEER.md, Q2) is this tool. `tools/oracle/run.sh` runs it at a fixed seed and budget; `.github/workflows/oracle.yml` runs it nightly with a new seed and uploads the report.
 

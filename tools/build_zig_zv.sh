@@ -72,7 +72,7 @@ fi
 # passes the checks below. Any other error fails the script.
 log=$work/$name.build.log
 status=0
-"$host_zig" build -Dno-lib -Denable-llvm=false -Doptimize=ReleaseFast $flags >"$log" 2>&1 || status=$?
+"$host_zig" build -Dno-lib -Denable-llvm=false -Doptimize=ReleaseFast -Dcpu=baseline $flags >"$log" 2>&1 || status=$?
 cat "$log"
 if [ "$status" -ne 0 ]; then
     others=$(grep '^error:' "$log" | grep -v 'memory usage peaked at .* exceeding the declared upper bound' | grep -v 'the following build command' || true)

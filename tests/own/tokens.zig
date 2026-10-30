@@ -43,7 +43,7 @@ pub fn okTakeHolder(h: Holder) usize {
 }
 
 pub fn okReadFieldsFirst(t: Tok) usize {
-    const n = t.hi - t.lo;
+    const n = t.hi() - t.lo();
     t.discard();
     return n;
 }
@@ -55,7 +55,7 @@ pub fn okReplaceInPlace(self: *Holder, more: Tok) void {
 
 pub fn badDrop(buf: []u8) usize {
     const t = Tok.own(buf);
-    return t.hi;
+    return t.hi();
 }
 
 pub fn badDropHalf(buf: []u8) Tok {
@@ -84,7 +84,7 @@ pub fn badCopyBothUsed(buf: []u8) void {
 pub fn badUseAfterConsume(buf: []u8) usize {
     const t = Tok.own(buf);
     t.discard();
-    return t.hi;
+    return t.hi();
 }
 
 pub fn badLeakOnBranch(buf: []u8, c: bool) void {
