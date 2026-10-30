@@ -123,7 +123,7 @@ To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.
 
 | Check | Result |
 | --- | --- |
-| `zig build test` | 48/48 (unit, examples, consumer project, freestanding cross-compile) in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each with and without `-Dghost=true` |
+| `zig build test` | 51/51 (unit, examples, consumer project, freestanding cross-compile) in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each with and without `-Dghost=true` |
 | Must panic: double consume, stale handle, pinned copy, violated precondition, parser law with an unguarded read, a falsified stateful law (must print a pasteable pinned entry) | 6/6 |
 | Must not compile: the original 6 plus 15 manifest rules (type constructors, methods, re-exports, foreign types, witnesses, typos, stale entries), 13 malformed `pinned` entries and 2 slot-brand mixups | 36/36 |
 | Plain-Zig controls | 9/9 behave as documented: 5 silent in every mode, 4 caught only at runtime in safe builds |
@@ -153,7 +153,7 @@ Each phase ships value before the next one starts. Phases are ordered by depende
 | **1. AIR exporter** | One small compiler patch: per-function AIR as a versioned binary pack (JSON on request) | Every function in a pilot codebase exports and round-trips |
 | **2. `zvc` on AIR** | Port the spike: modular calls, structs, termination, ghost `Int` and `Seq` | Spike results reproduce from AIR, plus one real kernel verified |
 | **3. `zv-own`** | Linearity, allocator regions, pointer invalidation, pinned types | Catches seeded ownership bugs at a false-positive rate the team accepts. **Done** (0.17.11), hardened after review 1 (0.17.13), rebuilt by identity after review 2 (0.17.15), tags and review 3 (0.17.18) |
-| **4. Verified core** | `PointsTo` permission tokens, a verified allocator, proof agents in CI | The core is `.verified` and the `.trusted` count is falling. **M1 done** (0.17.17): `zv.PointsTo`, a bump allocator proved in bounds, aligned and disjoint, 23 pinned soundness verdicts. **M2 done** (0.17.19): `*Self` parameters in `zvc`, the allocator as methods, tokens checked by `zv-own`. **M3 done** (0.17.21): a pool of blocks on `zv.BlockSet`; see [`docs/phase4.md`](docs/phase4.md) |
+| **4. Verified core** | `PointsTo` permission tokens, a verified allocator, proof agents in CI | The core is `.verified` and the `.trusted` count is falling. **M1 done** (0.17.17): `zv.PointsTo`, a bump allocator proved in bounds, aligned and disjoint, 23 pinned soundness verdicts. **M2 done** (0.17.19): `*Self` parameters in `zvc`, the allocator as methods, tokens checked by `zv-own`. **M3 done** (0.17.21): a pool of blocks on `zv.BlockSet`. **M4 done** (0.17.25): unrolled quantified invariants, array stores, `zv.Cell(T)` and an intrusive free list proved; see [`docs/phase4.md`](docs/phase4.md) |
 | **Parallel track F** | C backend plus CBMC proof harnesses | Needs no fork, so it can start any time |
 
 Phase 1 is the one decision that commits the project to maintaining a pinned compiler patch.

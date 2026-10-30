@@ -14,7 +14,11 @@ const Pool = term.Pool;
 /// A field of `owner`, a struct type: the type is how a store into a place that holds nothing yet knows what it builds.
 pub const FieldStep = struct { index: u32, owner: schema.TypeId };
 
+/// An element of an array of `len` elements, by a computed index.
+pub const ElemStep = struct { idx: Term, len: u64 };
+
 pub const Step = union(enum) {
+    index: ElemStep,
     field: FieldStep,
     slice_len,
     slice_ptr,
@@ -375,6 +379,7 @@ pub const Ctx = struct {
                 .payload = try c.havocNamed(try std.fmt.allocPrint(c.arena, "{s}.val", .{name}), o.payload),
             }) },
             .obj => |o| return .{ .obj = try c.create(Obj, .{ .base = name, .fields = &.{}, .token = if (o.token != 0) try c.tokenNamed(name) else 0 }) },
+            .array => |a| return .{ .array = .{ .mem = try c.named(try std.fmt.allocPrint(c.arena, "{s}.mem", .{name}), p.sortOf(a.mem)), .len = a.len } },
             else => return c.unsupported("a join where one struct lacks a field of this kind", .{}),
         }
     }

@@ -1,0 +1,18 @@
+# name verdict. The free-list pool broken one way at a time, and the quantifier encoding. A verdict changing here is reviewed as a soundness or completeness change of zvc.
+# Controls (proved): alloc, free, storeKeeps, storeSees.
+lists.L.alloc proved
+lists.L.allocEmpty refuted
+lists.L.allocLoses refuted
+lists.L.allocStuck refuted
+lists.L.forallShort refuted
+lists.L.free proved
+lists.L.freeAndKeep refuted
+lists.L.freeCycle refuted
+lists.L.freeNoLink refuted
+lists.L.freeTwice refuted
+lists.L.freeUnchecked refuted
+lists.L.freeWrongLink refuted
+lists.L.storeBreaks refuted
+lists.L.storeClobbers refuted
+lists.L.storeKeeps proved
+lists.L.storeSees proved

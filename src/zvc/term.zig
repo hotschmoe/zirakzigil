@@ -427,6 +427,11 @@ pub const Pool = struct {
                 else => unreachable,
             });
         };
+        // A zero-extended number is below any constant that its width cannot reach.
+        if (op == .ult or op == .ule) if (p.isOp(a, .zext)) |ext| if (p.bvValue(b)) |y| {
+            const narrow = bits - ext.p;
+            if (narrow < 64 and y + @intFromBool(op == .ule) >= (@as(u256, 1) << @intCast(narrow))) return p.tru();
+        };
         if (a == b) return p.boolean(op == .ule or op == .sle);
         return p.app2(op, .bool, a, b);
     }
