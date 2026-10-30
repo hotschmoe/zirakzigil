@@ -11,6 +11,7 @@ zv-own [--src DIR] [--module NAME=DIR] [--only PATH] [--files PREFIX] [--project
 ZVC_DEEP=1 tools/zvc_export.sh OUT_DIR FILE.zig [--only PATH]...   a whole project: nested containers and imported files too
 ZV_AIR_STD=1 tools/zvc_export.sh OUT_DIR FILE.zig                  also the std functions the project reaches (the effects of std's containers are then read from their bodies)
 zv-air slice PACK OUT.zvp                                         what `ZV_AIR_STD` does to a pack, on any pack: the project and what it reaches in std
+tools/oracle/run.sh                                              generated programs against Debug ground truth: silent-miss and false-positive rates per construct
 tools/run_own.sh                                                 the suite: packs from tools/own_packs.sh against pinned verdicts (CI)
 zirakzigil.addVerify(b, .{ .exports = ..., .own = .{} })               `zig build verify` and `zig build own` in a consumer project
 ```
@@ -417,3 +418,7 @@ Reading: the "no provenance" ends are almost all the idiom `for (list.items) |e|
 ## Tokens (0.17.19)
 
 `zv.PointsTo` is a linear value for `zv-own` too, with the same rules as `zv.Linear` plus one for tokens in memory the caller owns (a read takes the token out, a write puts one back, and a token taken out and not put back is a finding). The names of the type and its operations come from `src/air/tokens.zig`, shared with `zvc`. Cases in `tests/own/tokens.zig`; the account of what is and is not followed is in [phase4.md](phase4.md). One verdict of the earlier corpus changed: `linear.advViaPointer` (a `Linear` read out of `*Tok` and consumed) was unproven and is an error.
+
+## The differential oracle (0.17.29)
+
+`tools/oracle/run.sh` generates small allocator-heavy programs from a seed, decides by running them in Debug whether each one has a memory error, runs `zv-own` on the same programs (with and without `ZV_AIR_STD`), and publishes the silent-miss and false-positive rate per construct with the minimized silent misses. A silent miss is a faulting program that `zv-own` calls `clean` with nothing counted in that function's footer. It measures the property the hand-written reviews sample, with a fixed seed so the numbers compare across versions. First report: [reviews/oracle-1.md](reviews/oracle-1.md); nightly in `.github/workflows/oracle.yml`.
