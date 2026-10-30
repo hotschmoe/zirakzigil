@@ -419,6 +419,30 @@ No finding appeared or went away: the project findings are the same in every pac
 
 Reading: the "no provenance" ends are almost all the idiom `for (list.items) |e| allocator.free(e.field)`: an element of a container is one of many and is not followed, so a double free of an element (freed in the loop, freed again by a `deinit` that walks the same list) was invisible and is now counted. The project functions that fall from `clean` to `COUNTED` are the ones that free or grow what the run does not follow; a project ratchets them with `--baseline`. No rule was added to win precision back. `dropped` is zero in every pack. Time: about 25% more on zls under a loaded machine (2m12s to 2m45s, nostd pack, both runs sharing the CPU with other jobs).
 
+## Oracle round (0.17.30)
+
+The first run of the differential oracle (`docs/reviews/oracle-1.md`, 6000 programs, seed 1) left 118 faulting programs (3.6%) called plainly `clean`, 92 more `clean` with only an assumption in the footer, and put the cause of 42 of the 47 faulting node programs on a regression: a zv-own of 0.17.13 reported the `destroy` walks, and the identity rewrite of 0.17.15 lost them. Bisect: 0.17.13 FINDINGS, 0.17.15 and every later release clean with nothing counted. Two causes. A pointer parameter's own identity was never a dereference in a summary (`nextOf(n)` reads `n.next`, and the summary said it read nothing), and a kill of a block that another path had already ended returned early, leaving the values the instruction computed holding the live block. A third gap hid the rest: what a constructor stores into the block it returns (`n.* = .{ .next = next }`) was not in its summary, so `n2.next` was nothing.
+
+| | silent, plain | silent, std | assumed only, plain | assumed only, std | COUNTED (counted + assumed), plain | true finding | false positive |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0.17.28 (master) | 118 (3.6%) | 120 (3.7%) | 92 | 71 | 854 + 92 | 2211 | 128 (4.7%) |
+| 0.17.30 | 0 | 0 | 0 | 0 | 941 | 2334 | 128 (4.7%) |
+
+Findings went up by 123 and the false positives did not move: the single-motif node programs that fault are 33 findings and 14 counted of 47 (42 were silent). Counted rows stay: a walk that frees the node it reached through `next` is `COUNTED`, not a finding (the value is one of several nodes), and so are the globals (`m_global`: 40 counted of 50 faulting, 10 findings) and the function pointers (29 of 29). Cost on the five projects (packs with std's bodies; "clean" is nothing left open or assumed, which since 0.17.30 includes every call through a pointer and every call outside the packs with a pointer among its arguments):
+
+| Project (pack) | findings | clean, 0.17.28 | clean, 0.17.30 | COUNTED, 0.17.30 | ends decided |
+| --- | --- | --- | --- | --- | --- |
+| zls | 3 -> 3 | 621 | 456 | 590 | 1172 of 2995 (same) |
+| ziggy lib | 0 -> 0 | 83 | 67 | 31 | 332 of 687 (same) |
+| ziggy cli | 1 -> 2 | 48 | 12 | 52 | 40 of 102 (same) |
+| libvaxis (force) | 6 -> 6 | 442 | 355 | 148 | 215 of 443 (same) |
+| libvaxis (capi) | 5 -> 5 | 589 | 419 | 292 | 1041 of 1383 (same) |
+| webzocket (tests) | 2 -> 2 | 236 | 172 | 149 | 194 -> 246 of 620 |
+| rich_zig (tests) | 0 -> 0 | 1044 | 813 | 527 | 2397 of 3083 (same) |
+| zmoltcp (986 functions) | 0 -> 0 | 986 | 890 | 96 | 6 of 6 |
+
+The extra ziggy finding is `cli.lsp.logic.schemaForDoc`: `defer arena.free(dot_schema_path)` where `dot_schema_path` is `dot_schema_uri["file://".len..]`, a free of a pointer seven bytes into the allocation (`invalid_free`). Nothing else changed in a finding. The functions that left `clean` for `COUNTED` did so because of an assumed call (not an undecided end), so the ends-decided figures did not move.
+
 ## Tokens (0.17.19)
 
 `zv.PointsTo` is a linear value for `zv-own` too, with the same rules as `zv.Linear` plus one for tokens in memory the caller owns (a read takes the token out, a write puts one back, and a token taken out and not put back is a finding). The names of the type and its operations come from `src/air/tokens.zig`, shared with `zvc`. Cases in `tests/own/tokens.zig`; the account of what is and is not followed is in [phase4.md](phase4.md). One verdict of the earlier corpus changed: `linear.advViaPointer` (a `Linear` read out of `*Tok` and consumed) was unproven and is an error.
