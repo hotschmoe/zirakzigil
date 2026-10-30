@@ -59,7 +59,7 @@ git clean --quiet -fd -e zig-out -e .zig-cache
 
 if [ "$name" != zig-stock ]; then
     cp -R "$compiler/src/zv_air" src/zv_air
-    cp "$root/src/air/schema.zig" "$root/src/air/builder.zig" "$root/src/air/json.zig" src/zv_air/
+    cp "$root/src/air/schema.zig" "$root/src/air/builder.zig" "$root/src/air/json.zig" "$root/src/air/names.zig" src/zv_air/
     # Loud on drift: every anchor must match exactly once, or nothing is written.
     hook="$host_zig run $root/tools/zv_hook.zig --"
     $hook apply "$compiler/hook/rules.zon" .

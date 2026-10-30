@@ -5,7 +5,7 @@ review2b.badArenaResetCopy error
 review2b.badArrayHashShift error
 review2b.badBufPrint error
 review2b.badDeferReturn error
-review2b.badDequeReuse clean
+review2b.badDequeReuse counted
 review2b.badDerefCopy error
 review2b.badFieldCopy error
 review2b.badFieldRet error
@@ -27,7 +27,7 @@ review2b.ctrlHashGrow error
 review2b.ctrlStoreOut error
 review2b.ctrlStoreThenFree error
 review2b.deinitCopy clean
-review2b.freeBoth clean
+review2b.freeBoth counted
 review2b.okHashWithin clean
 review2b.okRoomAppend clean
 review2b.sliceOf clean

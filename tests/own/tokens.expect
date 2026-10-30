@@ -14,7 +14,7 @@ tokens.badSplitTwice error
 tokens.badTakenNotPutBack error
 tokens.badUseAfterConsume error
 tokens.drain clean
-tokens.gapOverwriteLive clean
+tokens.gapOverwriteLive counted
 tokens.okBothBranches clean
 tokens.okDiscard clean
 tokens.okInStruct clean

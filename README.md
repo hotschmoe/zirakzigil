@@ -25,7 +25,7 @@ Zig gives explicit *mechanics* (allocators, control flow, error handling) but no
 | **A. Contracts** `zv.requires` / `ensures` / `invariant` | Broken pre/postconditions, blamed on the side that broke them | Built |
 | **B. Refinement and brand types** `zv.Ranged`, `zv.Pool(..., struct {})` | Overflow in ranged arithmetic, out-of-range values, cross-pool handle mixups, unsafe narrowing | Built |
 | **C. Runtime ownership backstops** `zv.Linear`, generational handles (`zv.Pool`, and `zv.Slots` over borrowed storage), `zv.PinCheck` | Double consume, use-after-free via stale handle, copied self-referential structs, leaks | Built |
-| **D. Static ownership checker** `zv-own` (over AIR) | The bugs in C, at compile time, plus region escapes, pointer invalidation, pinned copies and aliasing writes | Phase 3 done, hardened by two adversarial reviews (`docs/reviews/own-1.md`, `docs/reviews/own-2.md`) and rebuilt on identities instead of places in 0.17.15: 225 seeded mistakes, 211 found, 4 unproven and 7 missed; 2 pinned false positives in the corpus, 0 on zmoltcp (986 functions); on zls, ziggy, libvaxis, webzocket and rich_zig the project functions it reports fell from 80 to 26 (see `docs/reviews/own-2.md`); std's containers are read from their bodies (`ZV_AIR_STD`) (`docs/phase3.md`) |
+| **D. Static ownership checker** `zv-own` (over AIR) | The bugs in C, at compile time, plus region escapes, pointer invalidation, pinned copies and aliasing writes | Phase 3 built; four adversarial reviews and an overseer review found silent misses each time, so since 0.17.22 every end and use has a counted outcome and a `clean` verdict means "nothing left open" **relative to the constructs the checker validated** (`docs/phase3.md`: what `clean` means, the counted classes, the known silent classes). 225 seeded mistakes in the first corpus: 211 found, 4 unproven, 7 missed; 0 findings on zmoltcp (986 functions, no allocator: it exercises little of the identity model); `--max-undecided` and `--baseline` gate how much a run leaves open |
 | **E. Deductive verifier** `zvc` (Verus-style, Z3) | Functional correctness and absence of every safety panic | Phase 2 done: reads AIR packs, bit-precise, Z3 over a pipe; seven zmoltcp functions proved in its build |
 | **F. C backend + CBMC** | Panic-freedom of bounded proof harnesses | C emission tested, checker not wired |
 | **H. Governance** assurance manifest + laws | Silent erosion of guarantees by contributors | Built |
@@ -91,8 +91,9 @@ To be clear about the weak spots: the runtime backstops (layer C) are switched o
 | `tests/baseline/` | The same mistakes in plain Zig, showing what the stock compiler does with them |
 | `src/own/` | The ownership checker: reads AIR packs, follows `zv.Linear` tokens (and, from M2, owners of memory) over the structured control flow (`docs/phase3.md`) |
 | `src/zvc/` | The verifier: reads AIR packs (`zv_air`), derives verification conditions, discharges them with Z3 over a pipe (`docs/phase2.md`) |
-| `tools/zvc_export.sh`, `tools/run_zvc.sh`, `tools/install_z3.sh` | Export a file's AIR pack (with `ZV_AIR_STD=1`, also the std functions it reaches, cut by `zv-air slice`), run the zvc suite (`tests/zvc/`: pinned packs and verdicts), install the pinned Z3 |
-| `tools/run_own.sh`, `tools/own_repin.sh` | Run the zv-own suite (`tests/own/`: pinned packs and verdicts); export its packs again |
+| `tools/zvc_export.sh`, `tools/run_zvc.sh`, `tools/install_z3.sh` | Export a file's AIR pack (with `ZV_AIR_STD=1`, also the std functions it reaches, cut by `zv-air slice`), run the zvc suite (`tests/zvc/`: fresh packs, pinned verdicts), install the pinned Z3 |
+| `tools/run_own.sh` | Run the zv-own suite (`tests/own/`: fresh packs, pinned verdicts) |
+| `tools/zvc_packs.sh`, `tools/own_packs.sh`, `tools/check.sh` | Export the suites' packs from the sources in the tree (none is committed); `check.sh` builds zig-zv if needed, exports every pack and runs both suites |
 | `tools/run_negative.sh` | Runs the should-panic and compile-fail suites |
 | `tools/run_baseline.sh` | Runs the plain-Zig controls in three build modes |
 | `docs/design.md` | Design document |
@@ -113,9 +114,12 @@ zig build test --fuzz                   # laws under the real fuzzer (Linux/macO
 zig build test --fuzz=100K              # the same, stopping after 100K iterations (what CI runs)
 ./tools/run_negative.sh                 # 6 must-fail + 36 must-not-compile cases
 ./tools/run_baseline.sh                 # the same bugs in plain Zig (about 1.5 min)
-tools/run_zvc.sh                        # the verifier against its pinned AIR packs and verdicts (needs Z3)
-tools/run_own.sh                         # the ownership checker against its pinned AIR packs and verdicts (no solver)
+tools/check.sh                          # builds zig-zv once, exports every AIR pack from the tree, runs the verifier (needs Z3) and the ownership checker
+tools/run_zvc.sh                        # the verifier against the exported packs and its pinned verdicts (after tools/zvc_packs.sh)
+tools/run_own.sh                        # the ownership checker against the exported packs and its pinned verdicts (after tools/own_packs.sh; no solver)
 ```
+
+The suites' AIR packs are never committed: CI builds zig-zv (cached per pinned tag and patch queue), exports every pack from the pull request's sources and runs both suites on them. `zig build matrix` needs `tools/own_packs.sh` first, because `tests/consumer` checks an exported pack.
 
 To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.dependency("zirakzigil", .{ .ghost = ghost }).module("zv")`, `zirakzigil.addAssuranceGate` for the Phase 0 gate (a root module and the names of your law and scenario files). Your own `zig build matrix` is one call to `zirakzigil.addTestMatrix`; see "Build matrix" there.
 
@@ -123,7 +127,7 @@ To use `zv` from another project see [`docs/adoption.md`](docs/adoption.md): `b.
 
 | Check | Result |
 | --- | --- |
-| `zig build test` | 48/48 (unit, examples, consumer project, freestanding cross-compile) in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each with and without `-Dghost=true` |
+| `zig build test` | 51/51 (unit, examples, consumer project, freestanding cross-compile) in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each with and without `-Dghost=true` |
 | Must panic: double consume, stale handle, pinned copy, violated precondition, parser law with an unguarded read, a falsified stateful law (must print a pasteable pinned entry) | 6/6 |
 | Must not compile: the original 6 plus 15 manifest rules (type constructors, methods, re-exports, foreign types, witnesses, typos, stale entries), 13 malformed `pinned` entries and 2 slot-brand mixups | 36/36 |
 | Plain-Zig controls | 9/9 behave as documented: 5 silent in every mode, 4 caught only at runtime in safe builds |
@@ -153,7 +157,7 @@ Each phase ships value before the next one starts. Phases are ordered by depende
 | **1. AIR exporter** | One small compiler patch: per-function AIR as a versioned binary pack (JSON on request) | Every function in a pilot codebase exports and round-trips |
 | **2. `zvc` on AIR** | Port the spike: modular calls, structs, termination, ghost `Int` and `Seq` | Spike results reproduce from AIR, plus one real kernel verified |
 | **3. `zv-own`** | Linearity, allocator regions, pointer invalidation, pinned types | Catches seeded ownership bugs at a false-positive rate the team accepts. **Done** (0.17.11), hardened after review 1 (0.17.13), rebuilt by identity after review 2 (0.17.15), tags and review 3 (0.17.18) |
-| **4. Verified core** | `PointsTo` permission tokens, a verified allocator, proof agents in CI | The core is `.verified` and the `.trusted` count is falling. **M1 done** (0.17.17): `zv.PointsTo`, a bump allocator proved in bounds, aligned and disjoint, 23 pinned soundness verdicts. **M2 done** (0.17.19): `*Self` parameters in `zvc`, the allocator as methods, tokens checked by `zv-own`. **M3 done** (0.17.21): a pool of blocks on `zv.BlockSet`; see [`docs/phase4.md`](docs/phase4.md) |
+| **4. Verified core** | `PointsTo` permission tokens, a verified allocator, proof agents in CI | The core is `.verified` and the `.trusted` count is falling. **M1 done** (0.17.17): `zv.PointsTo`, a bump allocator proved in bounds, aligned and disjoint, 23 pinned soundness verdicts. **M2 done** (0.17.19): `*Self` parameters in `zvc`, the allocator as methods, tokens checked by `zv-own`. **M3 done** (0.17.21): a pool of blocks on `zv.BlockSet`. **M4 done** (0.17.25): unrolled quantified invariants, array stores, `zv.Cell(T)` and an intrusive free list proved; see [`docs/phase4.md`](docs/phase4.md) |
 | **Parallel track F** | C backend plus CBMC proof harnesses | Needs no fork, so it can start any time |
 
 Phase 1 is the one decision that commits the project to maintaining a pinned compiler patch.

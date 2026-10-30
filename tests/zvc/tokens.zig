@@ -31,6 +31,14 @@ pub const assurance = .{
     .forgeAgain = .verified,
     .loopConsume = .verified,
     .dupResult = .verified,
+    .useHolder = .verified,
+    .optionalBoth = .verified,
+    .twoFieldsPassed = .verified,
+    .storedTwice = .verified,
+    .errorUnionBoth = .verified,
+    .pointeeAndResult = .verified,
+    .arrayOfTokens = .verified,
+    .loopCarried = .verified,
 };
 
 comptime {
@@ -270,5 +278,66 @@ pub const Both = struct { a: zv.PointsTo, b: zv.PointsTo };
 /// One token given back twice: the caller would own the same memory twice.
 pub fn dupResult(p: zv.PointsTo) Both {
     const t: Both = .{ .a = p, .b = p };
+    return t;
+}
+
+// Ways a token can flow, each tried to be used twice.
+
+pub const Holder = struct { a: zv.PointsTo, b: zv.PointsTo };
+
+pub fn useHolder(h: Holder) void {
+    h.a.discard();
+    h.b.discard();
+}
+
+/// Held in an optional that is unwrapped and kept.
+pub fn optionalBoth(p: zv.PointsTo) zv.PointsTo {
+    const o: ?zv.PointsTo = p;
+    if (o) |q| q.discard();
+    return p;
+}
+
+/// Two fields of one struct, passed on.
+pub fn twoFieldsPassed(p: zv.PointsTo) void {
+    const h: Holder = .{ .a = p, .b = p };
+    useHolder(h);
+}
+
+/// Stored into two fields one after the other, then each consumed.
+pub fn storedTwice(p: zv.PointsTo) void {
+    var h: Holder = undefined;
+    h.a = p;
+    h.b = p;
+    h.a.discard();
+    h.b.discard();
+}
+
+/// Through an error union that is also kept.
+pub fn errorUnionBoth(p: zv.PointsTo, fail: bool) error{Failed}!zv.PointsTo {
+    if (fail) return error.Failed;
+    p.discard();
+    return p;
+}
+
+/// Through the pointee of a pointer parameter and the result.
+pub fn pointeeAndResult(h: *Holder) zv.PointsTo {
+    return h.a;
+}
+
+/// An array of tokens: not in the fragment.
+pub fn arrayOfTokens(p: zv.PointsTo, q: zv.PointsTo) usize {
+    const both = [2]zv.PointsTo{ p, q };
+    return both[1].lo;
+}
+
+/// Carried round a loop without being consumed or copied.
+pub fn loopCarried(p: zv.PointsTo, k: u8) zv.PointsTo {
+    var t = p;
+    var i: u8 = 0;
+    while (i < k) : (i += 1) {
+        zv.invariant(i <= k);
+        zv.decreases(k - i);
+        t = t;
+    }
     return t;
 }

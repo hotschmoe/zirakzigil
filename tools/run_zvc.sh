@@ -1,12 +1,12 @@
 #!/bin/sh
-# The zvc suite: every pinned AIR pack in tests/zvc against its pinned verdicts. Needs Z3 (ZV_Z3 or PATH).
-# The packs are exports of the sources listed in tests/zvc/SOURCES; editing a source without exporting it
-# again (tools/zvc_repin.sh) fails here, because the verdicts would be about the old program.
+# The zvc suite: every AIR pack in tests/zvc against its pinned verdicts. Needs Z3 (ZV_Z3 or PATH).
+# The packs are exported from the sources in the tree by tools/zvc_packs.sh (tools/check.sh runs both);
+# none is committed, so the verdicts are always about the program as it stands.
 set -eu
 cd "$(dirname "$0")/.."
 
 zig build zvc
-zvc="zig-out/bin/zvc --pins tests/zvc/SOURCES"
+zvc="zig-out/bin/zvc"
 
 $zvc --src examples --expect tests/zvc/search.expect tests/zvc/search.zvp
 $zvc --src tests/zvc --expect tests/zvc/cases.expect tests/zvc/cases.zvp
@@ -22,6 +22,19 @@ $zvc --src examples --timeout 60000 --expect tests/zvc/bump.expect tests/zvc/bum
 $zvc --src tests/zvc --expect tests/zvc/pointers.expect tests/zvc/pointers.zvp
 $zvc --src tests/zvc --expect tests/zvc/pools.expect tests/zvc/pools.zvp
 $zvc --src examples --expect tests/zvc/pool.expect tests/zvc/pool.zvp
+
+# Quantified invariants (zv.forall, unrolled at comptime), stores into array elements, the typed cell token, and the
+# intrusive free list. The list is proved under a long timeout, and a short one must never turn into a proof.
+$zvc --src tests/zvc --timeout 120000 --expect tests/zvc/lists.expect tests/zvc/lists.zvp
+$zvc --src tests/zvc --expect tests/zvc/cells.expect tests/zvc/cells.zvp
+$zvc --src examples --timeout 120000 --expect tests/zvc/freelist.expect tests/zvc/freelist.zvp
+short=$($zvc --src examples --timeout 1 --only freelist.FreeList.alloc tests/zvc/freelist.zvp || true)
+case $short in
+    *"proved   freelist.FreeList.alloc"*)
+        echo "run_zvc: a solver timeout of 1 ms still reports freelist.FreeList.alloc proved" >&2
+        exit 1
+        ;;
+esac
 
 # --only names whole dotted components: packBit does not select packBit2.
 $zvc --src tests/zvc --only soundness3.packBit --expect tests/zvc/soundness3.only.expect tests/zvc/soundness3.zvp
@@ -80,8 +93,8 @@ done
 $zvc --src tests/zvc --only soundness2.useLenBound --expect tests/zvc/soundness2.dup.expect tests/zvc/soundness2.zvp tests/zvc/dup/soundness2.zvp
 
 # The one source of tokens is a premise: named in the verdict, passed on to callers, counted against the ratchet.
-mint="$zvc --src examples --only bump.Bump.init tests/zvc/bump.zvp"
-$mint --max-assume 1 >/dev/null
+mint="$zvc --src examples --timeout 120000 --only bump.Bump.init tests/zvc/bump.zvp"
+$mint --max-assume 1
 if $mint --max-assume 0 >/dev/null; then
     echo "run_zvc: --max-assume 0 passed a proof that rests on zv.PointsTo.own" >&2
     exit 1
@@ -96,9 +109,16 @@ case $shown in
 esac
 
 # The same for the pool: the one source of block tokens is a premise.
-mint="$zvc --src examples --only pool.Pool.init tests/zvc/pool.zvp"
-$mint --max-assume 1 >/dev/null
+mint="$zvc --src examples --timeout 120000 --only pool.Pool.init tests/zvc/pool.zvp"
+$mint --max-assume 1
 if $mint --max-assume 0 >/dev/null; then
     echo "run_zvc: --max-assume 0 passed a proof that rests on zv.BlockSet.own" >&2
+    exit 1
+fi
+
+mint="$zvc --src examples --timeout 120000 --only freelist.FreeList.init tests/zvc/freelist.zvp"
+$mint --max-assume 1
+if $mint --max-assume 0 >/dev/null; then
+    echo "run_zvc: --max-assume 0 passed a proof that rests on zv.BlockSet.own (freelist)" >&2
     exit 1
 fi

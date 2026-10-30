@@ -113,9 +113,19 @@ pub const RootKind = enum(u8) {
     param,
     /// The memory an allocator call (instruction `n`) returned.
     heap,
+    /// A global variable or constant: memory of its own that no function in the run sees all of.
+    global,
     /// A place nothing is known about.
     other,
 };
+
+/// Whether the run sees what the places of this root hold: a function's own locals, its parameters, what it allocated.
+pub fn followed(kind: RootKind) bool {
+    return switch (kind) {
+        .cell, .param, .heap => true,
+        .global, .other => false,
+    };
+}
 
 /// One step down from a place: field `n`, or an element of an array or slice (all elements are one place).
 pub const elem_step: u32 = std.math.maxInt(u32);
