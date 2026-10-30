@@ -112,3 +112,31 @@ Acceptance: a `.verified` module declares ownership without any new syntax in it
 Track ghost lines per code line, time from fresh clone to first green, re-check time, and diagnostics per seeded mistake. Dogfood on a small, fun program (an allocator for a toy game) and file each point of friction as a bug.
 
 Acceptance: the numbers are in this file and updated with each release; the dogfood program exists in `examples/` and verifies.
+
+## Copied from libghostty
+
+Four practices from ghostty's terminal core (`C:\Users\hotschmoe\zr\ext\REPORT-ghostty.md`, commit `ca91d0a`), chosen because they are cheap, need no compiler fork and already pay off in a large Zig codebase with many contributors. They belong to the lightest tier of zv: a project can use them without `zvc` or `zv-own`.
+
+## 7. Fault injection for `errdefer`
+
+Ghostty's `src/tripwire.zig` ("Improper `errdefer` is one of the highest sources of bugs in Zig code"): named fail points in a function (`tw.check(.alloc_rows)`), a test that arms each point in turn, and an `end(.reset)` that fails if an armed point was never reached. `zv` gets the same as a library type plus a law helper that runs a function once per fail point under `DebugAllocator`.
+
+Acceptance: `zv.tripwire` exists with no cost in release builds; an e2e case finds an OOM-only double free of the #12811 shape that ordinary tests miss; `docs/adoption.md` recommends it for every function with more than one `errdefer`.
+
+## 8. `verifyIntegrity` as the run-time half of invariants
+
+A type exposes `verifyIntegrity(self) IntegrityError!void` with a named error per invariant, and an inline `assertIntegrity()` that runs it, called through `defer` at the top of each mutating method, with a nesting pause for multi-step updates and a written list of invariants deliberately not checked. Ghostty gates it to Debug only; `zv` gates it separately for Debug and ReleaseSafe. `zv.invariant` and laws reuse the same function, so one invariant serves the run-time check, the laws and (where it is in the fragment) `zvc`.
+
+Acceptance: `examples/` has one container written this way; its laws call `verifyIntegrity`; the same predicate is the `zvc` invariant of a `.verified` method.
+
+## 9. `errdefer comptime unreachable` as a commit point
+
+Ghostty marks the point after which a multi-step update cannot fail with `errdefer comptime unreachable` (27 uses): the compiler rejects any later `try`. `zv-own` and `zvc` treat it as a boundary: no error exit past it, so error-path states after it are not explored, and `docs/adoption.md` recommends it.
+
+Acceptance: a pinned case where the marker removes a COUNTED or UNPROVEN that came only from an impossible error path.
+
+## 10. Compile every `pub` declaration
+
+Zig analyses only what is referenced, so unreferenced `pub` code rots unnoticed (forced analysis found six declarations in ghostty that no longer compile on 0.17). `zv.checkAll(root)` is a test-time helper (stock Zig, no fork) that references every `pub` declaration of a module tree, with a skip list.
+
+Acceptance: `zig build test` in the consumer project runs it; it reports a seeded dead declaration that does not compile.

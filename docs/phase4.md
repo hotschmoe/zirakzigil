@@ -253,6 +253,7 @@ M2 numbers: 7 `.verified` methods of `Bump` (`init`, `padTo`, `carve`, `alloc`, 
 | **M4** (0.17.25) | bounded `zv.forall` (unrolled), element places and stores in arrays, `zv.Cell(T)`, an intrusive free list proved | done, see above; the hash map is not |
 | **M4b** | typed `PointsTo(T)` with an initialization flag, `Tracked(T)`, a ring buffer proved with its read/write laws | |
 | **M5** | region identity and epochs: a token belongs to one allocator instance; `reset` bumps the epoch and revokes outstanding tokens without collecting them | cross-allocator misuse refuted; shell needs no `used` |
+| **M5b** | typed offset regions: `zv.Offset(T)` resolved against a region base, carrying the region's generation; growth, prune and reset end the generation, so a stale offset or a `*T` derived from one is a finding instead of `@ptrFromInt` UNPROVEN (the page/pin bug class of ghostty, `ext/REPORT-ghostty.md`: #1, #14, #23, #25, #13997); handle registries that are remapped on mutation (tracked pins) as a first-class obligation | a stale-cell-pointer-after-grow reduction of ghostty #13960 is a finding in `zv-own` and refuted in `zvc` |
 | **M6** | proof agents in CI (below) on the core | the pilot in the next section |
 
 ## Proof agents in CI (not built)
