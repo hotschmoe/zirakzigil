@@ -1269,8 +1269,10 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
     for (leaves, s.ret) |*v, l| v.* = try resolveDescs(r, st, inst, ctx, l.descs);
     const written = try r.arena.alloc(Val, s.writes.len);
     for (written, s.writes) |*v, w| v.* = try resolveDescs(r, st, inst, ctx, w.descs);
-    // What the callee stored into the blocks it hands out is what those blocks hold now.
-    for (s.fresh_writes) |w| {
+    // What the callee stored into the blocks it hands out is what those blocks hold now: followed for one object (a node a
+    // constructor fills), not for buffers, whose elements are one place anyway.
+    const single_result = r.ty.pointee(r.ty.payload(inst.ty)) != null and r.ty.rec(r.ty.payload(inst.ty)).flags.size == .one;
+    for (if (single_result) s.fresh_writes else s.fresh_writes[0..0]) |w| {
         const id = try freshId(r, st, inst, ctx, w.fresh);
         var pl = try r.freshPlace(inst.id, w.fresh);
         for (w.path) |step| pl = try r.places.child(r.arena, pl, step);
@@ -1409,7 +1411,7 @@ fn applySummary(r: *Run, st: *State, inst: *const Inst, s: Summary, args: []cons
     // A result that is one new block points to the place that block's content is kept at.
     if (ret_place == null and r.topLevelPointer(inst.ty)) for (s.ret) |l| {
         if (l.path.len != 0 or l.descs.len != 1 or l.descs[0].obj or l.descs[0].src != .fresh) continue;
-        res.place = try r.freshPlace(inst.id, l.descs[0].src.fresh);
+        if (single_result) res.place = try r.freshPlace(inst.id, l.descs[0].src.fresh);
         res.off = 0;
     };
 }
