@@ -66,7 +66,7 @@ Four review rounds and an overseer review found silent false negatives, each in 
 | a soft end of a parameter's content dropped from a summary | skipped without a trace | 0.17.22 | fixed: `unexpressed` |
 | a `free`-like call with no argument to free | the rule fell through | 0.17.22 | fixed: the backstop counts `dropped` |
 
-The oracle (`tools/oracle`) measures the silent rate by construct on generated programs; this table is the list of what a review has found, not a measure.
+A differential oracle (generated programs, Debug run against `zv-own`) is the intended measure of the silent rate by construct; this table is the list of what the reviews have found, not a measure.
 
 ### What the assumptions are
 
@@ -184,7 +184,7 @@ The caller reads what the result and the writes hold as they are **before** it a
 - The writes of a function are certain if they happen on every path that goes on after a `try`: the paths that return an error (a `wrap_errunion_err` or an error constant) do not make them uncertain, except for a block the function allocates, which the failing paths do not make.
 - A call ends the same memory through two parameters only if another parameter of the call ended it.
 
-### What is not followed (printed at the end of every run, never silent)
+### What is not followed (counted at the end of every run; the classes that still are not are listed under "What a verdict means")
 
 - Calls to functions outside the packs with no entry in the table are assumed to neither end identities nor keep their arguments. The count is printed.
 - What is stored inside a std container is not followed (an element is one of many); a linear value appended to a list is counted as handed to memory the checker does not follow.
@@ -394,6 +394,25 @@ An independent review of 0.17.21 wrote two files of programs (17 and 8 entry poi
 `okGlobalRefill` (a global refilled after a free) is now `COUNTED` too: the checker does not follow a global, and says so. The cost is that every function that touches a global container is open; the baseline file is how a project ratchets that down.
 
 `tools/run_own.sh` pins each of the seven with the reason the footer must give, runs the gate flags against a baseline made from the run, and fails if any run in the suite counts `dropped`.
+
+Not done, on purpose: following a global as a place of the run (a lazily created identity for the storage behind it, strong updates, a clobber at every call that may write it, a summary slot that names it). That is a precision rule, it would turn the global cases into findings, and it would add a class of false positives for every call the run cannot read; this round counts instead. The cases are pinned as `counted` so that the day a global is followed they change to findings and the pin says so.
+
+### What it cost (measured on the packs of the five projects and zmoltcp, 0.17.21 against 0.17.22)
+
+No finding appeared or went away: the project findings are the same in every pack. What changed is how much is left open. The ends that used to vanish (a free of an element of a container, of a global, of a value from a call the run does not follow) are events now, and a callee's `blind` ends reach its callers. Packs with std's bodies (`ZV_AIR_STD`); the project's own functions; `decided` is ends decided of ends met.
+
+| Project (pack) | findings | clean in 0.17.21 | clean now | COUNTED now | ends decided, 0.17.21 | ends decided, now | largest additions |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| zls | 3 -> 3 | 1046 | 621 | 425 | 1637 of 2262 (72%) | 1172 of 2995 (39%) | 626 ends of a value with no provenance, 1315 operations on memory it cannot name (143 before: callers now count a callee's) |
+| ziggy lib | 0 -> 0 | 98 | 83 | 15 | 344 of 584 (58%) | 332 of 687 (48%) | |
+| ziggy cli | 1 -> 1 | 65 | 48 | 17 | 63 of 67 (94%) | 40 of 102 (39%) | 38 ends of a value with no provenance |
+| libvaxis (force) | 6 -> 6 | 503 | 442 | 61 | 236 of 354 (66%) | 215 of 443 (48%) | 34 no provenance, 2 global |
+| libvaxis (capi) | 5 -> 5 | 711 | 589 | 122 | 1188 of 1294 (91%) | 1041 of 1383 (75%) | 164 no provenance |
+| webzocket (tests) | 2 -> 2 | 321 | 236 | 85 | 348 of 494 (70%) | 194 of 620 (31%) | 179 no provenance, 38 global, 26 unexpressed |
+| rich_zig (tests) | 0 -> 0 | 1340 | 1044 | 296 | 2483 of 2721 (91%) | 2397 of 3083 (77%) | 380 no provenance |
+| zmoltcp (986 functions) | 0 -> 0 | 986 | 986 | 0 | 6 of 6 | 6 of 6 | none: it has no allocator and no global memory |
+
+Reading: the "no provenance" ends are almost all the idiom `for (list.items) |e| allocator.free(e.field)`: an element of a container is one of many and is not followed, so a double free of an element (freed in the loop, freed again by a `deinit` that walks the same list) was invisible and is now counted. The project functions that fall from `clean` to `COUNTED` are the ones that free or grow what the run does not follow; a project ratchets them with `--baseline`. No rule was added to win precision back. `dropped` is zero in every pack. Time: about 25% more on zls under a loaded machine (2m12s to 2m45s, nostd pack, both runs sharing the CPU with other jobs).
 
 ## Tokens (0.17.19)
 
