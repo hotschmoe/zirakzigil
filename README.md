@@ -148,6 +148,8 @@ Integers of any width, bool, slices and arrays of integers, optionals, structs b
 
 ## Roadmap
 
+**Current state and next steps: [docs/status.md](docs/status.md).**
+
 Each phase ships value before the next one starts. Phases are ordered by dependency, not dated; each gate is the evidence that the next phase is worth building.
 
 ![Roadmap: Phase 0 to Phase 4 with exit gates, plus parallel track F](docs/img/roadmap.png)
