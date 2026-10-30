@@ -6,12 +6,12 @@ Four adversarial reviews each found new silent false negatives: `zv-own` said `c
 
 6000 programs, seed 1 (`tools/oracle/run.sh --seed 1 --count 6000 --batch 200 --minimize 20`), Windows, Zig 0.17.0 and the patched compiler of the pin, `plain` (std's containers from the table) and `std` (`ZV_AIR_STD=1`) packs. 3275 programs fault in Debug and 2725 do not. The complete reports are next to this file: [before](oracle-1/before.md) is `zv-own` at e7f91a1 (0.17.21, the master this branch started from), [after](oracle-1/after.md) is master at 0.17.24 (PR #28, the choke point and the `COUNTED` verdict, 0.17.22). The same programs, the same ground truth; only `zv-own` differs.
 
-| | silent miss, `plain` | silent miss, `std` | counted miss, `plain` | counted miss, `std` | true finding | false positive |
-|---|---:|---:|---:|---:|---:|---:|
-| before (0.17.21) | 637 (19.5% of 3275) | 273 (8.3%) | 427 | 791 | 2211 | 128 (4.7% of 2725) |
-| after (0.17.24) | 118 (3.6%) | 120 (3.7%) | 946 | 944 | 2211 | 128 (4.7%) |
+| | silent miss, `plain` | silent miss, `std` | counted miss, `plain` | counted miss, `std` | assumed only, `plain` | assumed only, `std` | true finding | false positive |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| before (0.17.21) | 637 (19.5% of 3275) | 273 (8.3%) | 263 | 690 | 164 | 101 | 2211 | 128 (4.7% of 2725) |
+| after (0.17.24) | 118 (3.6%) | 120 (3.7%) | 854 | 873 | 92 | 71 | 2211 | 128 (4.7%) |
 
-Reading: #28 turned silent misses into counted ones and found nothing new: the 2211 true findings and the 128 false positives did not change. That is exactly what the PR claims (a missed end is now counted), and it is the first time the claim is measured on programs nobody wrote after reading the rules. Still faulting and called plainly `clean`: 3.6 percent. A counted miss is not a finding: a program that crashes and is called `COUNTED` is only a program the checker declined to decide, and 944 of 3275 faulting programs are in that state.
+Reading: #28 turned silent misses into counted ones and found nothing new: the 2211 true findings and the 128 false positives did not change. That is exactly what the PR claims (a missed end is now counted), and it is the first time the claim is measured on programs nobody wrote after reading the rules. Still faulting and called plainly `clean`: 3.6 percent. A counted miss is not a finding: a program that crashes and is called `COUNTED` is only a program the checker declined to decide, and 854 (plain) of 3275 faulting programs are in that state. "Assumed only" is a separate column: the verdict is `clean`, the footer holds only an assumption (a call through a function pointer or to code outside the packs, a linear value handed to memory not followed) and the program crashes. Before the report counted these as counted misses; they are not COUNTED by zv-own. 92 programs (plain, 71 with std bodies) depend on that footer read; 82 of the 92 contain a function-pointer call (75 of them the `bug_fnptr_free` step: call the pointer, then use or free the block), the other 10 are a call outside the packs. Without the footer read they would be silent misses (118 + 92 = 210 plain).
 
 The rates per motif, programs of exactly one motif (the clean attribution; the other tables of the reports count a program for every construct it contains):
 

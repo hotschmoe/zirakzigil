@@ -9,7 +9,7 @@ const gen = @import("gen.zig");
 pub const Mode = enum { plain, std };
 pub const Truth = enum { clean, fault, invalid };
 pub const Verdict = enum { clean, counted, findings, unproven, trusted, missing };
-pub const Class = enum { true_finding, silent_miss, counted_miss, false_positive, true_clean, unproven_fault, unproven_clean, invalid };
+pub const Class = enum { true_finding, silent_miss, counted_miss, assumed_miss, false_positive, true_clean, unproven_fault, unproven_clean, invalid };
 
 /// What zv-own printed as assumed or undecided for one function (docs/phase3.md, "What is not followed").
 pub const Counted = struct {
@@ -25,6 +25,14 @@ pub const Counted = struct {
     alias_params: usize = 0,
     open_ends: usize = 0,
     open_uses: usize = 0,
+
+    /// Only calls the checker does not read or values handed to memory it does not follow: zv-own prints them and still says `clean`.
+    pub fn assumedOnly(c: Counted) bool {
+        var rest = c;
+        rest.unknown_calls = 0;
+        rest.transfers = 0;
+        return !c.isEmpty() and rest.isEmpty();
+    }
 
     pub fn isEmpty(c: Counted) bool {
         inline for (@typeInfo(Counted).@"struct".field_names) |name| {
@@ -53,7 +61,7 @@ pub const Result = struct {
             .fault => switch (o.verdict) {
                 .findings => .true_finding,
                 .counted => .counted_miss,
-                .clean => if (o.counted.isEmpty()) .silent_miss else .counted_miss,
+                .clean => if (o.counted.isEmpty()) .silent_miss else if (o.counted.assumedOnly()) .assumed_miss else .counted_miss,
                 else => .unproven_fault,
             },
             else => switch (o.verdict) {
@@ -108,7 +116,7 @@ const Tally = struct {
     }
 
     fn faulting(t: Tally) u32 {
-        return t.get(.true_finding) + t.get(.silent_miss) + t.get(.counted_miss) + t.get(.unproven_fault);
+        return t.get(.true_finding) + t.get(.silent_miss) + t.get(.counted_miss) + t.get(.assumed_miss) + t.get(.unproven_fault);
     }
 
     fn quiet(t: Tally) u32 {
@@ -170,7 +178,7 @@ fn tableRow(w: *Io.Writer, cfg: Config, label: []const u8, row: Row) !void {
         const t = row.modes[m];
         try w.print(" {d} (", .{t.get(.silent_miss)});
         try pct(w, t.get(.silent_miss), f);
-        try w.print(") | {d} | {d} (", .{ t.get(.counted_miss), t.get(.false_positive) });
+        try w.print(") | {d} ({d} assumed) | {d} (", .{ t.get(.counted_miss) + t.get(.assumed_miss), t.get(.assumed_miss), t.get(.false_positive) });
         try pct(w, t.get(.false_positive), q);
         try w.print(") | {d} |", .{t.get(.true_finding)});
     }
@@ -209,14 +217,14 @@ pub fn writeMarkdown(w: *Io.Writer, data: ReportData) !void {
     const overall = rowOf(results, all, {});
     try w.print("# zv-own differential oracle\n\nseed {d}, {d} programs generated; {d} dropped as invalid ({d} did not compile, {d} panicked for a reason that is not a memory error); {d} used.\n\n", .{ cfg.seed, cfg.count, invalid, compile_bad, invalid - compile_bad, overall.programs });
     try w.print("Ground truth: {d} programs fault, {d} do not.\n\n", .{ overall.modes[0].faulting(), overall.modes[0].quiet() });
-    try w.writeAll("A silent miss is a program that faults in Debug while zv-own says `clean` and the function's footer counts nothing it did not decide. A counted miss is the same with something counted. Silent rate = silent / faulting; false-positive rate = false positives / non-faulting. `plain` is the pack of the project alone (std's containers from the table in src/own/spec.zig); `std` is the pack with the std bodies (ZV_AIR_STD=1).\n\n");
-    try w.writeAll("## Overall\n\n| mode | faulting | true finding | silent miss | counted miss | unproven (faulting) | non-faulting | false positive | true clean | unproven (clean) |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    try w.writeAll("A silent miss is a program that faults in Debug while zv-own says `clean` and the function's footer counts nothing it did not decide. A counted miss is the same with something undecided (the COUNTED verdict, or for an older zv-own a footer count); an assumed-only miss is `clean` with only an assumption in the footer (a call through a function pointer or to code outside the packs, a linear value handed to memory it does not follow). Silent rate = silent / faulting; false-positive rate = false positives / non-faulting. `plain` is the pack of the project alone (std's containers from the table in src/own/spec.zig); `std` is the pack with the std bodies (ZV_AIR_STD=1).\n\n");
+    try w.writeAll("## Overall\n\n| mode | faulting | true finding | silent miss | counted miss (COUNTED verdict or undecided) | assumed only (clean, but a call or a value it does not follow) | unproven (faulting) | non-faulting | false positive | true clean | unproven (clean) |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for (0..2) |m| {
         if (!cfg.modes[m]) continue;
         const t = overall.modes[m];
         try w.print("| {t} | {d} | {d} | {d} (", .{ @as(Mode, @fromBackingInt(@intCast(m))), t.faulting(), t.get(.true_finding), t.get(.silent_miss) });
         try pct(w, t.get(.silent_miss), t.faulting());
-        try w.print(") | {d} | {d} | {d} | {d} (", .{ t.get(.counted_miss), t.get(.unproven_fault), t.quiet(), t.get(.false_positive) });
+        try w.print(") | {d} | {d} | {d} | {d} | {d} (", .{ t.get(.counted_miss), t.get(.assumed_miss), t.get(.unproven_fault), t.quiet(), t.get(.false_positive) });
         try pct(w, t.get(.false_positive), t.quiet());
         try w.print(") | {d} | {d} |\n", .{ t.get(.true_clean), t.get(.unproven_clean) });
     }
