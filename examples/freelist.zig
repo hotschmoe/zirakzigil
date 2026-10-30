@@ -4,12 +4,8 @@
 //! ends in `nil`, it holds exactly the blocks whose permission the pool keeps, and `free + live = capacity`; a block
 //! handed out is in bounds, aligned and different from every other live block, and a block cannot be taken back twice.
 //!
-//! The list is described by ghost data, an array `order` of the free blocks (the head last) and its inverse `posn`, and
-//! the invariant is written with `zv.forall`, unrolled at comptime over the `slots` blocks: no quantifier reaches the
-//! solver. A link word belongs to the pool only while its block is free; `free` writes it with the block's permission
-//! in hand, and `alloc` never touches a block it gave away.
-//!
-//! `Heap` is the checked shell over a real buffer.
+//! The code is ordinary Zig. The `spare` token, the ghost `order` and `posn` and the contracts are the only lines that
+//! are about the proof, and they cost nothing in a build without ghost code. `Heap` is the checked shell.
 
 const std = @import("std");
 const zv = @import("zv");
@@ -28,20 +24,10 @@ pub const block_shift = 6;
 pub const block_size = 1 << block_shift;
 pub const nil: u32 = slots;
 
-inline fn bitOf(idx: u32) u64 {
-    return @as(u64, 1) << @truncate(idx);
-}
-
-/// An element by a number that may be out of range: the specification reads it only where it is in range.
-inline fn at(a: [slots]u32, i: u32) u32 {
-    return a[@as(u3, @truncate(i))];
-}
-
 pub const Block = struct {
     idx: u32,
     /// Where the bytes start: `idx * block_size`.
     off: usize,
-    /// Ghost: the permission for this block alone.
     perm: zv.BlockSet,
 };
 
@@ -54,56 +40,51 @@ pub const FreeList = struct {
     head: u32,
     /// The link word of each block: valid only while the block is on the list.
     links: [slots]u32,
-    /// Ghost: the permission for the blocks on the list.
+    /// The permission for the blocks on the list.
     spare: zv.BlockSet,
-    /// Ghost: the blocks on the list, the head last (`order[nfree - 1]`), and where each one is in `order`.
-    order: zv.Ghost([slots]u32),
-    posn: zv.Ghost([slots]u32),
+    /// The blocks on the list, the head last (`order[nfree - 1]`), and where each one is in `order`.
+    order: zv.Ghost([slots]u32) = .{},
+    posn: zv.Ghost([slots]u32) = .{},
 
     pub const assurance = .{ .init = .verified, .alloc = .verified, .free = .verified, .reuse = .verified };
     comptime {
         zv.requireAssurance(FreeList, .tested);
     }
 
-    inline fn inMask(p: FreeList, i: u32) bool {
-        return (p.spare.mask >> @truncate(i)) & 1 == 1;
-    }
-
     /// The k-th block of the list is in range and free, and knows its place.
     fn onList(p: FreeList, k: usize) bool {
-        const o = at(p.order, @truncate(k));
-        return o < slots and inMask(p, o) and at(p.posn, o) == k;
+        const o = p.order.at(k);
+        return o < slots and p.spare.has(o) and p.posn.at(o) == k;
     }
 
     /// Every free block is on the list, where it says it is.
     fn listed(p: FreeList, i: usize) bool {
-        const n: u32 = @truncate(i);
-        return !inMask(p, n) or (at(p.posn, n) < p.nfree and at(p.order, at(p.posn, n)) == n);
+        return !p.spare.has(i) or (p.posn.at(i) < p.nfree and p.order.at(p.posn.at(i)) == i);
     }
 
     /// The k-th block links to the one before it; the first links to `nil`.
     fn linked(p: FreeList, k: usize) bool {
-        const o = at(p.order, @truncate(k));
-        return at(p.links, o) == (if (k == 0) nil else at(p.order, @truncate(k -% 1)));
+        return p.links[p.order.at(k)] == (if (k == 0) nil else p.order.at(k - 1));
     }
 
     inline fn sound(p: FreeList) bool {
-        return p.cap >= slots * block_size and p.nfree <= slots and p.nfree +% p.used == slots and
-            (!zv.ghost or (p.spare.mask >> slots == 0 and @popCount(p.spare.mask) == p.nfree and
-            p.head == (if (p.nfree == 0) nil else at(p.order, p.nfree -% 1)) and
-            zv.forall(slots, p.nfree, p, onList) and zv.forall(slots, slots, p, listed) and zv.forall(slots, p.nfree, p, linked)));
+        return p.cap >= slots * block_size and p.nfree <= slots and p.used <= slots and p.nfree + p.used == slots and
+            p.spare.mask() >> slots == 0 and @popCount(p.spare.mask()) == p.nfree and
+            p.head == (if (p.nfree == 0) nil else p.order.at(p.nfree - 1)) and
+            zv.forall(slots, p.nfree, p, onList) and zv.forall(slots, slots, p, listed) and zv.forall(slots, p.nfree, p, linked);
     }
 
     inline fn owns(p: FreeList, blk: Block) bool {
         return blk.idx < slots and blk.off == @as(usize, blk.idx) << block_shift and
-            (!zv.ghost or (blk.perm.id == p.spare.id and blk.perm.mask == bitOf(blk.idx)));
+            blk.perm.id() == p.spare.id() and blk.perm.mask() == zv.BlockSet.bit(blk.idx);
     }
 
-    inline fn granted(old: FreeList, id: zv.Ghost(usize), mask0: zv.Ghost(u64), now: FreeList, blk: Block) bool {
+    inline fn granted(old: FreeList, id: usize, mask0: u64, now: FreeList, blk: Block) bool {
         return sound(now) and owns(now, blk) and now.cap == old.cap and
-            now.nfree +% 1 == old.nfree and now.used == old.used +% 1 and
-            blk.off +% block_size <= old.cap and blk.off & (block_size - 1) == 0 and
-            (!zv.ghost or (now.spare.id == id and mask0 & bitOf(blk.idx) != 0 and !inMask(now, blk.idx) and mask0 == now.spare.mask | bitOf(blk.idx)));
+            now.nfree + 1 == old.nfree and now.used == old.used + 1 and
+            blk.off + block_size <= old.cap and blk.off % block_size == 0 and
+            now.spare.id() == id and mask0 & zv.BlockSet.bit(blk.idx) != 0 and !now.spare.has(blk.idx) and
+            mask0 == now.spare.mask() | zv.BlockSet.bit(blk.idx);
     }
 
     inline fn unchanged(old: FreeList, now: FreeList) bool {
@@ -113,27 +94,16 @@ pub const FreeList = struct {
     /// A pool over the first `slots * block_size` bytes of `region`, every block free.
     pub fn init(region: []u8) FreeList {
         zv.requires(region.len >= slots * block_size);
-        var p: FreeList = .{
-            .cap = region.len,
-            .nfree = 0,
-            .used = 0,
-            .head = nil,
-            .links = undefined,
-            .spare = undefined,
-            .order = if (zv.ghost) undefined else {},
-            .posn = if (zv.ghost) undefined else {},
-        };
-        const whole = if (zv.ghost) zv.BlockSet.own((1 << slots) - 1) else {};
-        const none = if (zv.ghost) whole.cut(0) else {};
-        p.spare = if (zv.ghost) none.head else {};
-        var rest = if (zv.ghost) none.tail else {};
-        p.used = slots;
+        const all = zv.BlockSet.own((1 << slots) - 1);
+        const none = all.cut(0);
+        var rest = none.tail;
+        var p: FreeList = .{ .cap = region.len, .nfree = 0, .used = slots, .head = nil, .links = undefined, .spare = none.head };
         inline for (0..slots) |i| {
-            const one = if (zv.ghost) rest.cut(bitOf(i)) else {};
-            rest = if (zv.ghost) one.tail else {};
-            p.free(.{ .idx = i, .off = i << block_shift, .perm = if (zv.ghost) one.head else {} });
+            const one = rest.cut(zv.BlockSet.bit(i));
+            rest = one.tail;
+            p.free(.{ .idx = i, .off = i << block_shift, .perm = one.head });
         }
-        if (zv.ghost) rest.discard();
+        rest.discard();
         return zv.ensures(p, sound(p) and p.cap == region.len and p.nfree == slots and p.used == 0);
     }
 
@@ -141,39 +111,32 @@ pub const FreeList = struct {
     pub fn alloc(self: *FreeList) ?Block {
         zv.requires(sound(self.*));
         const old = self.*;
-        const id = if (zv.ghost) self.spare.id else {};
-        const mask0 = if (zv.ghost) self.spare.mask else {};
-        if (self.nfree == 0) {
-            const none: ?Block = null;
-            return zv.ensures(none, unchanged(old, self.*) and old.nfree == 0);
-        }
+        const id = self.spare.id();
+        const mask0 = self.spare.mask();
+        if (self.nfree == 0) return zv.ensures(null, unchanged(old, self.*) and old.nfree == 0);
         const idx = self.head;
-        const next = self.links[idx];
-        const parts = if (zv.ghost) self.spare.cut(bitOf(idx)) else {};
-        self.spare = if (zv.ghost) parts.tail else {};
-        self.head = next;
+        const parts = self.spare.cut(zv.BlockSet.bit(idx));
+        self.spare = parts.tail;
+        self.head = self.links[idx];
         self.nfree -= 1;
         self.used += 1;
-        const blk: Block = .{ .idx = idx, .off = @as(usize, idx) << block_shift, .perm = if (zv.ghost) parts.head else {} };
-        const got: ?Block = blk;
-        return zv.ensures(got, granted(old, id, mask0, self.*, blk));
+        const blk: Block = .{ .idx = idx, .off = @as(usize, idx) << block_shift, .perm = parts.head };
+        return zv.ensures(blk, granted(old, id, mask0, self.*, blk));
     }
 
     /// Puts a block on the front of the list. The permission is the proof that it was handed out and not taken back.
     pub fn free(self: *FreeList, blk: Block) void {
         zv.requires(sound(self.*) and owns(self.*, blk));
         const old = self.*;
-        const lemma = if (zv.ghost) zv.BlockSet.apart(self.spare, blk.perm) else {};
-        self.spare = if (zv.ghost) zv.BlockSet.join(lemma.head, lemma.tail) else {};
+        const lemma = zv.BlockSet.apart(self.spare, blk.perm);
+        self.spare = zv.BlockSet.join(lemma.head, lemma.tail);
         self.links[blk.idx] = self.head;
-        if (zv.ghost) {
-            self.order[@as(u3, @truncate(self.nfree))] = blk.idx;
-            self.posn[@as(u3, @truncate(blk.idx))] = self.nfree;
-        }
+        self.order.put(self.nfree, blk.idx);
+        self.posn.put(blk.idx, self.nfree);
         self.head = blk.idx;
         self.nfree += 1;
         self.used -= 1;
-        return zv.ensures({}, sound(self.*) and self.cap == old.cap and self.nfree == old.nfree +% 1 and self.used +% 1 == old.used and self.head == blk.idx);
+        zv.ensures({}, sound(self.*) and self.cap == old.cap and self.nfree == old.nfree + 1 and self.used + 1 == old.used and self.head == blk.idx);
     }
 
     /// A block taken and given back leaves the pool with the same number of free blocks.
@@ -199,14 +162,14 @@ pub const Heap = struct {
 
     pub fn init(region: []align(block_size) u8) Heap {
         var list = FreeList.init(region);
-        const parts = if (zv.ghost) list.spare.cut(0) else {};
-        list.spare = if (zv.ghost) parts.tail else {};
-        return .{ .region = region, .list = list, .held = if (zv.ghost) parts.head else {} };
+        const parts = list.spare.cut(0);
+        list.spare = parts.tail;
+        return .{ .region = region, .list = list, .held = parts.head };
     }
 
     pub fn alloc(self: *Heap) ?*align(block_size) [block_size]u8 {
         const blk = self.list.alloc() orelse return null;
-        if (zv.ghost) self.held = zv.BlockSet.join(self.held, blk.perm);
+        self.held = zv.BlockSet.join(self.held, blk.perm);
         return @alignCast(self.region[blk.off..][0..block_size]);
     }
 
@@ -216,10 +179,10 @@ pub const Heap = struct {
         const off = @intFromPtr(ptr) - @intFromPtr(self.region.ptr);
         if (off >> block_shift >= slots) @panic("zv.Heap: not a block of this heap");
         const idx: u32 = @intCast(off >> block_shift);
-        if (zv.ghost and (self.held.mask >> @intCast(idx)) & 1 == 0) @panic("zv.Heap: block freed twice");
-        const parts = if (zv.ghost) self.held.cut(bitOf(idx)) else {};
-        self.held = if (zv.ghost) parts.tail else {};
-        self.list.free(.{ .idx = idx, .off = off, .perm = if (zv.ghost) parts.head else {} });
+        if (!self.held.has(idx)) @panic("zv.Heap: block freed twice");
+        const parts = self.held.cut(zv.BlockSet.bit(idx));
+        self.held = parts.tail;
+        self.list.free(.{ .idx = idx, .off = off, .perm = parts.head });
     }
 };
 
@@ -244,10 +207,10 @@ pub const laws = struct {
                     if (@intFromPtr(ptr) % block_size != 0 or @intFromPtr(ptr) < @intFromPtr(&region) or @intFromPtr(ptr) >= @intFromPtr(&region) + region.len) return false;
                     for (live) |l| if (l == ptr) return false;
                     @memset(ptr, @intCast(step + 1));
-                    const at_ = for (live, 0..) |l, i| {
+                    const free_slot = for (live, 0..) |l, i| {
                         if (l == null) break i;
                     } else return false;
-                    live[at_] = ptr;
+                    live[free_slot] = ptr;
                 }
             } else if (live[slot]) |ptr| {
                 for (ptr[1..]) |byte| if (byte != ptr[0]) return false;
@@ -265,15 +228,15 @@ pub const laws = struct {
         var region: [slots * block_size]u8 align(block_size) = undefined;
         var list = FreeList.init(&region);
         var out: [slots]?Block = @splat(null);
-        var i: u4 = 0;
-        while (i < taken % (slots + 1)) : (i += 1) out[i] = list.alloc();
-        if (list.nfree != slots - taken % (slots + 1)) return false;
+        const n = taken % (slots + 1);
+        for (out[0..n]) |*o| o.* = list.alloc();
+        if (list.nfree != slots - n) return false;
         const before = list.nfree;
-        if (list.reuse() != true or list.nfree != before) return false;
+        if (!list.reuse() or list.nfree != before) return false;
         var seen: u64 = 0;
         for (out) |b| if (b) |blk| {
-            if (seen & bitOf(blk.idx) != 0) return false;
-            seen |= bitOf(blk.idx);
+            if (seen & zv.BlockSet.bit(blk.idx) != 0) return false;
+            seen |= zv.BlockSet.bit(blk.idx);
         };
         return true;
     }

@@ -37,7 +37,7 @@ pub const R = struct {
     };
 
     inline fn sound(r: R) bool {
-        return r.next <= r.cap and r.spare.lo == r.next and r.spare.hi == r.cap;
+        return r.next <= r.cap and r.spare.lo() == r.next and r.spare.hi() == r.cap;
     }
 
     // Controls.
@@ -170,11 +170,11 @@ pub const R = struct {
         zv.requires(sound(self.*) and n <= self.cap -% self.next);
         const held = self.spare;
         _ = self.take(n);
-        return zv.ensures(held.lo, true);
+        return zv.ensures(held.lo(), true);
     }
 
     pub fn forgeSpare(self: *R) void {
-        self.spare = .{ .lo = 0, .hi = 99 };
+        self.spare = .{ .from = 0, .to = 99 };
     }
 
     pub fn intPointee(p: *u32) void {

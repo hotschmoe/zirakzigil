@@ -66,15 +66,13 @@ if [ "$name" != zig-stock ]; then
     $hook verify "$compiler/hook/rules.zon" .
 fi
 
-# The baseline CPU keeps the binary portable: it is cached in CI and shipped as a release asset, and a build tuned to
-# the builder's CPU dies with an illegal instruction on another runner.
 # Upstream declares an 8 GB RSS bound for the compiler step, and this step peaks just above it on
 # Windows. The build runner then marks the step failed although the binary is installed and fine
 # (--maxrss only changes scheduling). So: tolerate exactly that one error, and only if the binary
 # passes the checks below. Any other error fails the script.
 log=$work/$name.build.log
 status=0
-"$host_zig" build -Dno-lib -Denable-llvm=false -Dcpu=baseline -Doptimize=ReleaseFast $flags >"$log" 2>&1 || status=$?
+"$host_zig" build -Dno-lib -Denable-llvm=false -Doptimize=ReleaseFast -Dcpu=baseline $flags >"$log" 2>&1 || status=$?
 cat "$log"
 if [ "$status" -ne 0 ]; then
     others=$(grep '^error:' "$log" | grep -v 'memory usage peaked at .* exceeding the declared upper bound' | grep -v 'the following build command' || true)

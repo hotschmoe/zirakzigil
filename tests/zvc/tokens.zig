@@ -50,11 +50,11 @@ pub const Piece = struct { lo: usize, hi: usize, perm: zv.PointsTo };
 pub const Taken = struct { region: Region, piece: ?Piece };
 
 inline fn sound(r: Region) bool {
-    return r.next <= r.cap and r.free.lo == r.next and r.free.hi == r.cap;
+    return r.next <= r.cap and r.free.lo() == r.next and r.free.hi() == r.cap;
 }
 
 inline fn tied(p: Piece) bool {
-    return p.lo <= p.hi and p.perm.lo == p.lo and p.perm.hi == p.hi;
+    return p.lo <= p.hi and p.perm.lo() == p.lo and p.perm.hi() == p.hi;
 }
 
 inline fn startsAligned(t: Taken, alignment: usize) bool {
@@ -90,12 +90,12 @@ pub fn give(r: Region, p: Piece) Region {
 
 /// A token cut in two and joined again is the same range.
 pub fn roundTrip(p: zv.PointsTo, cut: usize) zv.PointsTo {
-    zv.requires(p.lo <= cut and cut <= p.hi);
-    const lo = p.lo;
-    const hi = p.hi;
+    zv.requires(p.lo() <= cut and cut <= p.hi());
+    const lo = p.lo();
+    const hi = p.hi();
     const parts = p.split(cut);
     const back = parts.head.join(parts.tail);
-    return zv.ensures(back, back.lo == lo and back.hi == hi);
+    return zv.ensures(back, back.lo() == lo and back.hi() == hi);
 }
 
 /// Dropping a token is not a memory error (a leak is `zv-own`'s to report), so it is proved.
@@ -110,7 +110,7 @@ pub fn leak(r: Region, n: usize) usize {
 pub fn twoMints(a: []u8, b: []u8) usize {
     const x = zv.PointsTo.own(a);
     const y = zv.PointsTo.own(b);
-    return zv.ensures(x.hi, x.hi == a.len and y.hi == b.len);
+    return zv.ensures(x.hi(), x.hi() == a.len and y.hi() == b.len);
 }
 
 // Overlap, reuse and leaving the region.
@@ -171,7 +171,7 @@ pub fn giveTwice(r: Region, p: Piece) Region {
 pub fn readAfterGive(r: Region, p: Piece) usize {
     zv.requires(sound(r) and tied(p) and p.hi == r.next);
     const back = give(r, p);
-    return zv.ensures(back.next, p.perm.lo == p.lo);
+    return zv.ensures(back.next, p.perm.lo() == p.lo);
 }
 
 /// A copy of a token is the token: giving it back leaves nothing to give through the original.
@@ -204,15 +204,15 @@ pub fn returnConsumed(r: Region, p: Piece) Taken {
 
 /// Cuts one token twice.
 pub fn splitTwice(p: zv.PointsTo, a: usize, b: usize) usize {
-    zv.requires(p.lo <= a and a <= p.hi and p.lo <= b and b <= p.hi);
+    zv.requires(p.lo() <= a and a <= p.hi() and p.lo() <= b and b <= p.hi());
     const x = p.split(a);
     const y = p.split(b);
-    return zv.ensures(x.head.hi, y.head.lo == p.lo);
+    return zv.ensures(x.head.hi(), y.head.lo() == p.lo());
 }
 
 /// Joins two pieces that do not meet.
 pub fn joinGap(p: zv.PointsTo, a: usize, b: usize) zv.PointsTo {
-    zv.requires(p.lo <= a and a < b and b <= p.hi);
+    zv.requires(p.lo() <= a and a < b and b <= p.hi());
     const first = p.split(a);
     const second = first.tail.split(b);
     return first.head.join(second.tail);
@@ -222,13 +222,13 @@ pub fn joinGap(p: zv.PointsTo, a: usize, b: usize) zv.PointsTo {
 
 /// A token from a function that is only checked: whatever it builds, a proof may not rest on it.
 pub fn fakeToken(n: usize) zv.PointsTo {
-    const p: zv.PointsTo = .{ .lo = 0, .hi = n };
+    const p: zv.PointsTo = .{ .from = 0, .to = n };
     return p;
 }
 
 pub fn forgeViaChecked(n: usize) usize {
     const p = fakeToken(n);
-    return zv.ensures(p.hi, p.hi == n);
+    return zv.ensures(p.hi(), p.hi() == n);
 }
 
 /// Gives a piece back on one path only, then reads its token: it may be gone.
@@ -239,25 +239,25 @@ pub fn maybeGive(r: Region, p: Piece, c: bool) usize {
         const back = give(r, p);
         next = back.next;
     }
-    return zv.ensures(next, p.perm.lo == p.lo);
+    return zv.ensures(next, p.perm.lo() == p.lo);
 }
 
 /// A token written out as a literal.
 pub fn forgeLiteral(n: usize) Piece {
-    const p: Piece = .{ .lo = 0, .hi = n, .perm = .{ .lo = 0, .hi = n } };
+    const p: Piece = .{ .lo = 0, .hi = n, .perm = .{ .from = 0, .to = n } };
     return p;
 }
 
 /// A token whose range is changed after the fact.
 pub fn forgeField(p: Piece) Piece {
     var perm = p.perm;
-    perm.hi = 1000;
+    perm.to = 1000;
     return .{ .lo = p.lo, .hi = 1000, .perm = perm };
 }
 
 /// A token made by copying fields into a new one.
 pub fn forgeAgain(p: Piece) zv.PointsTo {
-    const same: zv.PointsTo = .{ .lo = p.perm.lo, .hi = p.perm.hi };
+    const same: zv.PointsTo = .{ .from = p.perm.lo(), .to = p.perm.hi() };
     return same;
 }
 
@@ -327,7 +327,7 @@ pub fn pointeeAndResult(h: *Holder) zv.PointsTo {
 /// An array of tokens: not in the fragment.
 pub fn arrayOfTokens(p: zv.PointsTo, q: zv.PointsTo) usize {
     const both = [2]zv.PointsTo{ p, q };
-    return both[1].lo;
+    return both[1].lo();
 }
 
 /// Carried round a loop without being consumed or copied.

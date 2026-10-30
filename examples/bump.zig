@@ -5,11 +5,9 @@
 //! `reset` give back exactly what was taken. The methods take `*Bump`: the allocator changes in place, and so
 //! does the token it holds (`spare`), which a method must leave in the struct when it returns.
 //!
-//! Positions, not lengths, are what the specification talks about (`end` of a block, not `off + len`): every
-//! fact is then a comparison, and the proofs need no arithmetic beyond computing the positions once.
-//!
-//! `Arena` is the checked shell over a real buffer: it turns blocks into slices and keeps the permission
-//! for everything handed out, so `reset` is always legal for its callers.
+//! The code is ordinary Zig; the tokens and the contracts are the lines about the proof, and they cost nothing in a
+//! build without ghost code. `Arena` is the checked shell over a real buffer: it turns blocks into slices and keeps
+//! the permission for everything handed out, so `reset` is always legal for its callers.
 
 const std = @import("std");
 const zv = @import("zv");
@@ -28,7 +26,7 @@ pub const Block = struct {
     base: usize,
     off: usize,
     end: usize,
-    /// Ghost: the permission for `[base, end)`: the padding and the bytes.
+    /// The permission for `[base, end)`: the padding and the bytes.
     perm: zv.PointsTo,
 };
 
@@ -38,7 +36,7 @@ pub const Bump = struct {
     cap: usize,
     /// Everything below `next` was handed out or skipped for alignment; everything from `next` on is free.
     next: usize,
-    /// Ghost: the permission for the free bytes, `[next, cap)`.
+    /// The permission for the free bytes, `[next, cap)`.
     spare: zv.PointsTo,
 
     pub const assurance = .{ .init = .verified, .padTo = .verified, .carve = .verified, .alloc = .verified, .free = .verified, .reset = .verified, .pair = .verified };
@@ -47,19 +45,15 @@ pub const Bump = struct {
     }
 
     inline fn sound(b: Bump) bool {
-        return !zv.ghost or (b.next <= b.cap and b.spare.lo == b.next and b.spare.hi == b.cap);
+        return b.next <= b.cap and b.spare.lo() == b.next and b.spare.hi() == b.cap;
     }
 
     inline fn owns(blk: Block) bool {
-        return !zv.ghost or (blk.perm.lo == blk.base and blk.perm.hi == blk.end and blk.base <= blk.off and blk.off <= blk.end);
+        return blk.perm.lo() == blk.base and blk.perm.hi() == blk.end and blk.base <= blk.off and blk.off <= blk.end;
     }
 
     inline fn isPow2(n: usize) bool {
-        return n != 0 and n & (n -% 1) == 0;
-    }
-
-    inline fn padFor(n: usize, alignment: usize) usize {
-        return (0 -% n) & (alignment -% 1);
+        return n != 0 and n & (n - 1) == 0;
     }
 
     inline fn carved(old: Bump, off: usize, end: usize, now: Bump, blk: Block) bool {
@@ -69,23 +63,23 @@ pub const Bump = struct {
 
     inline fn granted(old: Bump, len: usize, alignment: usize, now: Bump, blk: Block) bool {
         return sound(now) and owns(blk) and now.cap == old.cap and now.next == blk.end and
-            blk.base == old.next and blk.off +% len == blk.end and blk.off & (alignment -% 1) == 0;
+            blk.base == old.next and blk.off + len == blk.end and blk.off & (alignment - 1) == 0;
     }
 
     /// A request is refused only when it does not fit with the padding it needs, and nothing changes.
     inline fn refused(old: Bump, len: usize, alignment: usize, now: Bump) bool {
-        const room = old.cap -% old.next;
-        const pad = padFor(old.next, alignment);
-        return sound(now) and now.cap == old.cap and now.next == old.next and (pad > room or len > room -% pad);
+        const room = old.cap - old.next;
+        const pad = -%old.next & (alignment - 1);
+        return sound(now) and now.cap == old.cap and now.next == old.next and (pad > room or len > room - pad);
     }
 
     inline fn together(old: Bump, n: usize, m: usize, alignment: usize, now: Bump, t: Two) bool {
         const x = t.first;
         const y = t.second;
         return sound(now) and owns(x) and owns(y) and now.cap == old.cap and now.next == y.end and
-            x.base == old.next and x.off +% n == x.end and y.off +% m == y.end and
-            x.off & (alignment -% 1) == 0 and y.off & (alignment -% 1) == 0 and
-            x.end <= y.off and (!zv.ghost or x.perm.hi <= y.perm.lo);
+            x.base == old.next and x.off + n == x.end and y.off + m == y.end and
+            x.off & (alignment - 1) == 0 and y.off & (alignment - 1) == 0 and
+            x.end <= y.off and x.perm.hi() <= y.perm.lo();
     }
 
     inline fn unchanged(old: Bump, now: Bump) bool {
@@ -93,26 +87,25 @@ pub const Bump = struct {
     }
 
     pub fn init(region: []u8) Bump {
-        const whole = if (zv.ghost) zv.PointsTo.own(region) else {};
-        const b: Bump = .{ .cap = region.len, .next = 0, .spare = whole };
+        const b: Bump = .{ .cap = region.len, .next = 0, .spare = zv.PointsTo.own(region) };
         return zv.ensures(b, b.cap == region.len and b.next == 0 and sound(b));
     }
 
     /// The bytes from `n` to the next multiple of `alignment`, which must be a power of two.
     pub fn padTo(n: usize, alignment: usize) usize {
         zv.requires(isPow2(alignment));
-        const pad = (0 -% n) & (alignment - 1);
-        return zv.ensures(pad, pad < alignment and (n +% pad) & (alignment -% 1) == 0);
+        const pad = -%n & (alignment - 1);
+        return zv.ensures(pad, pad < alignment and (n +% pad) & (alignment - 1) == 0);
     }
 
     /// The block `[off, end)`, with the padding before it from where the allocator was.
     pub fn carve(self: *Bump, off: usize, end: usize) Block {
         zv.requires(sound(self.*) and self.next <= off and off <= end and end <= self.cap);
         const old = self.*;
-        const parts = if (zv.ghost) self.spare.split(end) else {};
+        const parts = self.spare.split(end);
         self.next = end;
-        self.spare = if (zv.ghost) parts.tail else {};
-        const blk: Block = .{ .base = old.next, .off = off, .end = end, .perm = if (zv.ghost) parts.head else {} };
+        self.spare = parts.tail;
+        const blk: Block = .{ .base = old.next, .off = off, .end = end, .perm = parts.head };
         return zv.ensures(blk, carved(old, off, end, self.*, blk));
     }
 
@@ -125,29 +118,26 @@ pub const Bump = struct {
         if (pad <= room and len <= room - pad) {
             const off = self.next + pad;
             const blk = self.carve(off, off + len);
-            const got: ?Block = blk;
-            return zv.ensures(got, granted(old, len, alignment, self.*, blk));
+            return zv.ensures(blk, granted(old, len, alignment, self.*, blk));
         }
-        const none: ?Block = null;
-        return zv.ensures(none, refused(old, len, alignment, self.*));
+        return zv.ensures(null, refused(old, len, alignment, self.*));
     }
 
     /// Takes back the block that was handed out last, padding included.
     pub fn free(self: *Bump, blk: Block) void {
         zv.requires(sound(self.*) and owns(blk) and blk.end == self.next);
-        self.spare = if (zv.ghost) blk.perm.join(self.spare) else {};
+        self.spare = blk.perm.join(self.spare);
         self.next = blk.base;
-        return zv.ensures({}, sound(self.*) and self.next == blk.base);
+        zv.ensures({}, sound(self.*) and self.next == blk.base);
     }
 
     /// Takes back every block at once. `used` is the permission for all of them, joined: `[0, next)`, which is
     /// the proof that nobody holds one any more.
     pub fn reset(self: *Bump, used: zv.PointsTo) void {
-        zv.requires(sound(self.*));
-        zv.requires(!zv.ghost or (used.lo == 0 and used.hi == self.next));
-        self.spare = if (zv.ghost) used.join(self.spare) else {};
+        zv.requires(sound(self.*) and used.lo() == 0 and used.hi() == self.next);
+        self.spare = used.join(self.spare);
         self.next = 0;
-        return zv.ensures({}, sound(self.*) and self.next == 0);
+        zv.ensures({}, sound(self.*) and self.next == 0);
     }
 
     /// Two allocations in a row: a caller that knows `alloc` only through its contract still gets blocks that
@@ -155,15 +145,13 @@ pub const Bump = struct {
     pub fn pair(self: *Bump, n: usize, m: usize, alignment: usize) ?Two {
         zv.requires(sound(self.*) and isPow2(alignment));
         const old = self.*;
-        const none: ?Two = null;
-        const x = self.alloc(n, alignment) orelse return zv.ensures(none, unchanged(old, self.*));
+        const x = self.alloc(n, alignment) orelse return zv.ensures(null, unchanged(old, self.*));
         const y = self.alloc(m, alignment) orelse {
             self.free(x);
-            return zv.ensures(none, unchanged(old, self.*));
+            return zv.ensures(null, unchanged(old, self.*));
         };
         const t: Two = .{ .first = x, .second = y };
-        const got: ?Two = t;
-        return zv.ensures(got, together(old, n, m, alignment, self.*, t));
+        return zv.ensures(t, together(old, n, m, alignment, self.*, t));
     }
 };
 
@@ -183,23 +171,23 @@ pub const Arena = struct {
 
     pub fn init(region: []align(base_alignment) u8) Arena {
         var bump = Bump.init(region);
-        const parts = if (zv.ghost) bump.spare.split(0) else {};
-        bump.spare = if (zv.ghost) parts.tail else {};
-        return .{ .region = region, .bump = bump, .used = if (zv.ghost) parts.head else {} };
+        const parts = bump.spare.split(0);
+        bump.spare = parts.tail;
+        return .{ .region = region, .bump = bump, .used = parts.head };
     }
 
     pub fn alloc(self: *Arena, comptime alignment: usize, len: usize) ?[]align(alignment) u8 {
         comptime std.debug.assert(alignment <= base_alignment);
         const blk = self.bump.alloc(len, alignment) orelse return null;
-        if (zv.ghost) self.used = self.used.join(blk.perm);
+        self.used = self.used.join(blk.perm);
         return @alignCast(self.region[blk.off..blk.end]);
     }
 
     pub fn reset(self: *Arena) void {
         self.bump.reset(self.used);
-        const parts = if (zv.ghost) self.bump.spare.split(0) else {};
-        self.bump.spare = if (zv.ghost) parts.tail else {};
-        self.used = if (zv.ghost) parts.head else {};
+        const parts = self.bump.spare.split(0);
+        self.bump.spare = parts.tail;
+        self.used = parts.head;
     }
 };
 
@@ -285,5 +273,5 @@ test "the core alone: pair gives disjoint blocks and undoes a failed second requ
 }
 
 test "tokens cost nothing outside ghost builds" {
-    try std.testing.expectEqual(@as(usize, if (zv.ghost) 4 * @sizeOf(usize) else 2 * @sizeOf(usize)), @sizeOf(Bump));
+    try std.testing.expect(zv.ghost or @sizeOf(Bump) == 2 * @sizeOf(usize));
 }

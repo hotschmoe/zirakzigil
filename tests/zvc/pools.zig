@@ -7,10 +7,6 @@ const zv = @import("zv");
 pub const Block = struct { idx: u32, perm: zv.BlockSet };
 pub const Two = struct { first: Block, second: Block };
 
-inline fn bit(idx: u32) u64 {
-    return @as(u64, 1) << @truncate(idx);
-}
-
 pub const P = struct {
     free_bits: u64,
     spare: zv.BlockSet,
@@ -35,11 +31,11 @@ pub const P = struct {
     };
 
     inline fn sound(p: P) bool {
-        return p.spare.mask == p.free_bits;
+        return p.spare.mask() == p.free_bits;
     }
 
     inline fn owns(p: P, blk: Block) bool {
-        return blk.perm.id == p.spare.id and blk.perm.mask == bit(blk.idx);
+        return blk.idx < 64 and blk.perm.id() == p.spare.id() and blk.perm.mask() == zv.BlockSet.bit(blk.idx);
     }
 
     // Controls.
@@ -50,12 +46,12 @@ pub const P = struct {
         const before = self.free_bits;
         if (self.free_bits == 0) return null;
         const idx: u32 = @ctz(self.free_bits);
-        const parts = self.spare.cut(bit(idx));
+        const parts = self.spare.cut(zv.BlockSet.bit(idx));
         self.spare = parts.tail;
-        self.free_bits &= ~bit(idx);
+        self.free_bits &= ~zv.BlockSet.bit(idx);
         const blk: Block = .{ .idx = idx, .perm = parts.head };
         const got: ?Block = blk;
-        return zv.ensures(got, sound(self.*) and owns(self.*, blk) and before & bit(idx) != 0 and self.free_bits == before & ~bit(idx));
+        return zv.ensures(got, sound(self.*) and owns(self.*, blk) and before & zv.BlockSet.bit(idx) != 0 and self.free_bits == before & ~zv.BlockSet.bit(idx));
     }
 
     /// Takes a block back, in any order: the lemma says it was not free.
@@ -64,8 +60,8 @@ pub const P = struct {
         const before = self.free_bits;
         const lemma = zv.BlockSet.apart(self.spare, blk.perm);
         self.spare = zv.BlockSet.join(lemma.head, lemma.tail);
-        self.free_bits |= bit(blk.idx);
-        return zv.ensures({}, sound(self.*) and before & bit(blk.idx) == 0 and self.free_bits == before | bit(blk.idx));
+        self.free_bits |= zv.BlockSet.bit(blk.idx);
+        return zv.ensures({}, sound(self.*) and before & zv.BlockSet.bit(blk.idx) == 0 and self.free_bits == before | zv.BlockSet.bit(blk.idx));
     }
 
     /// Two blocks in a row are different.
@@ -77,18 +73,18 @@ pub const P = struct {
     }
 
     pub fn roundTrip(set: zv.BlockSet, bits: u64) zv.BlockSet {
-        zv.requires(bits & ~set.mask == 0);
-        const id = set.id;
-        const mask = set.mask;
+        zv.requires(bits & ~set.mask() == 0);
+        const id = set.id();
+        const mask = set.mask();
         const parts = set.cut(bits);
         const back = zv.BlockSet.join(parts.head, parts.tail);
-        return zv.ensures(back, back.id == id and back.mask == mask);
+        return zv.ensures(back, back.id() == id and back.mask() == mask);
     }
 
     pub fn twoMints(a: u64, b: u64) u64 {
         const x = zv.BlockSet.own(a);
         const y = zv.BlockSet.own(b);
-        return zv.ensures(x.mask, x.mask == a and y.mask == b);
+        return zv.ensures(x.mask(), x.mask() == a and y.mask() == b);
     }
 
     // Reuse and the wrong pool.
@@ -127,7 +123,7 @@ pub const P = struct {
         zv.requires(sound(self.*));
         if (self.free_bits == 0) return null;
         const idx: u32 = @ctz(self.free_bits);
-        const parts = self.spare.cut(bit(idx));
+        const parts = self.spare.cut(zv.BlockSet.bit(idx));
         self.spare = parts.tail;
         const blk: Block = .{ .idx = idx, .perm = parts.head };
         const got: ?Block = blk;
@@ -138,9 +134,9 @@ pub const P = struct {
     pub fn takeFromEmpty(self: *P) Block {
         zv.requires(sound(self.*));
         const idx: u32 = @ctz(self.free_bits);
-        const parts = self.spare.cut(bit(idx));
+        const parts = self.spare.cut(zv.BlockSet.bit(idx));
         self.spare = parts.tail;
-        self.free_bits &= ~bit(idx);
+        self.free_bits &= ~zv.BlockSet.bit(idx);
         const blk: Block = .{ .idx = idx, .perm = parts.head };
         return blk;
     }
@@ -150,7 +146,7 @@ pub const P = struct {
         zv.requires(sound(self.*) and owns(self.*, blk));
         const lemma = zv.BlockSet.apart(self.spare, blk.perm);
         self.spare = zv.BlockSet.join(lemma.head, lemma.tail);
-        self.free_bits |= bit(blk.idx +% 1);
+        self.free_bits |= zv.BlockSet.bit(blk.idx +% 1);
         return zv.ensures({}, sound(self.*));
     }
 
@@ -166,19 +162,19 @@ pub const P = struct {
     // Forging.
 
     pub fn forgeSet(id: usize, mask: u64) zv.BlockSet {
-        const s: zv.BlockSet = .{ .id = id, .mask = mask };
+        const s: zv.BlockSet = .{ .pool = id, .bits = mask };
         return s;
     }
 
     pub fn forgeMask(s: zv.BlockSet) zv.BlockSet {
         var t = s;
-        t.mask = ~@as(u64, 0);
+        t.bits = ~@as(u64, 0);
         return t;
     }
 
     /// The lemma on one token twice: it would say a token shares nothing with itself.
     pub fn apartSame(s: zv.BlockSet) usize {
         const pair = zv.BlockSet.apart(s, s);
-        return pair.head.id;
+        return pair.head.id();
     }
 };

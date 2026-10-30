@@ -185,7 +185,10 @@ pub const Vc = struct {
     pure_target: usize = 0,
     pure_base: usize = 0,
     collected: std.ArrayList(Collected) = .empty,
-    obligations_seen: bool = false,
+    /// Something the function does to its parameters has run: a precondition stated now would be about the changed values.
+    mutated: bool = false,
+    /// The cells that hold a by-value parameter copied in at the start.
+    arg_copies: std.AutoHashMapUnmanaged(u32, void) = .empty,
 
     pub fn arena(v: *Vc) Allocator {
         return v.ctx.arena;
@@ -370,6 +373,12 @@ pub const Vc = struct {
             .void, .type, .func => return .none,
             .undef => {
                 if (c.ty != .none) if (v.ctx.scalarSort(c.ty)) |sort| return .{ .scalar = try pool.fresh("undef", sort) };
+                // An undefined struct is any struct; one that holds a token is not any token.
+                if (c.ty != .none and v.ctx.typeRec(c.ty).kind == .@"struct" and !try v.hasToken(c.ty)) {
+                    const name = try std.fmt.allocPrint(v.arena(), "undef!{d}", .{pool.fresh_count});
+                    pool.fresh_count += 1;
+                    return v.ctx.symbolic(name, c.ty, false);
+                }
                 if (c.ty != .none and v.ctx.typeRec(c.ty).kind == .array) if (v.ctx.intInfo(v.ctx.typeRec(c.ty).child)) |elem| {
                     const mem = try pool.fresh("undef", .{ .array = .{ .idx = 64, .elem = elem.bits } });
                     return .{ .array = .{ .mem = mem, .len = v.ctx.typeRec(c.ty).len } };
@@ -482,7 +491,6 @@ pub const Vc = struct {
             .locals = locals.items,
             .approx = st.cut,
         });
-        if (kind != .ghost) v.obligations_seen = true;
         st.pc = try v.pool.@"and"(st.pc, goal);
     }
 
@@ -548,6 +556,7 @@ pub const Vc = struct {
                 const p = try v.arg(inst, 0);
                 if (p != .place) return v.ctx.unsupported("store through {t}", .{std.meta.activeTag(p)});
                 const new = try v.arg(inst, 1);
+                try v.noteStore(inst, p.place);
                 st.cells[p.place.cell] = try v.update(st.cells[p.place.cell], p.place.path, new);
             },
             .load => {
@@ -836,6 +845,8 @@ pub const Vc = struct {
 
     /// Whether two constants are the same value (a null optional has no payload to compare).
     fn sameConstant(v: *const Vc, a: Value, b: Value) bool {
+        // `zv.ensures(null, ok)` carries a value of the type of `null`, which has no bits: it is any null optional.
+        if (a == .none and b == .opt) return v.pool.isFalse(b.opt.has);
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
             .none => true,
@@ -872,6 +883,18 @@ pub const Vc = struct {
         @memcpy(out[0..path.len], path);
         out[path.len] = s;
         return out;
+    }
+
+    /// A store copies a parameter in (the first store of an `arg` into a cell) or changes something; a precondition
+    /// after the second kind would be about the changed value.
+    fn noteStore(v: *Vc, inst: *const Inst, at: value.Place) Allocator.Error!void {
+        const stored = v.ops(inst)[1];
+        const copies = at.path.len == 0 and stored.kind == .inst and (if (v.by_id[stored.value]) |i| i.tag == .arg else false);
+        if (copies and !v.arg_copies.contains(at.cell)) return v.arg_copies.put(v.arena(), at.cell, {});
+        if (v.arg_copies.contains(at.cell)) v.mutated = true;
+        for (v.ptr_params.items) |p| if (p.cell == at.cell) {
+            v.mutated = true;
+        };
     }
 
     // Tokens (`zv.PointsTo`). A token is a linear value: it has an identity (`Obj.token`), it is consumed by the
@@ -1475,6 +1498,7 @@ pub const Vc = struct {
         const hooks = v.hooks orelse return v.ctx.unsupported("call to {s}", .{callee});
         const summary = try hooks.summaryFn(hooks.context, v, callee);
         if (std.mem.indexOfScalar(*const Summary, v.relied.items, summary) == null) try v.relied.append(v.arena(), summary);
+        if (summary.ptrs.len != 0) v.mutated = true;
         const operands = v.ops(inst)[1..];
         if (operands.len != summary.params.len) return v.ctx.unsupported("call to {s} with {d} arguments, expected {d}", .{ callee, operands.len, summary.params.len });
         for (operands) |o| try v.useTokens(st, try v.operand(o), v.operandType(o), true);
@@ -1660,7 +1684,7 @@ pub const Vc = struct {
                 if (nested) {
                     try v.oblige(st, inst, .precondition, "precondition of {s} may not hold", .{v.inline_names.getLast()}, ok);
                 } else {
-                    if (v.obligations_seen or v.blocks.count() != 0) return v.ctx.unsupported("zv.requires must open the function body", .{});
+                    if (v.mutated or v.blocks.count() != 0) return v.ctx.unsupported("zv.requires must come before the function changes anything", .{});
                     st.pc = try pool.@"and"(st.pc, ok);
                     v.pre = try pool.@"and"(v.pre, ok);
                 }
