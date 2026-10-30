@@ -7,6 +7,9 @@ zv.PointsTo                          src/zv.zig       the token, ghost-only (voi
 src/air/tokens.zig                   the names of the token and its operations, shared by zvc and zv-own
 examples/bump.zig                    the allocator    7 methods .verified, a checked shell, 2 laws
 examples/pool.zig                    a pool of blocks 4 methods .verified, a checked shell, 2 laws
+examples/freelist.zig                an intrusive free list of 8 blocks, 4 methods .verified (quantified invariants)
+tests/zvc/lists.zig                  free-list corruption, the quantifier encoding, array stores
+tests/zvc/cells.zig                  zv.Cell(T)
 tests/zvc/pools.zig                  17 verdicts      BlockSet: reuse, other pools, free-set corruption, forging
 tests/zvc/tokens.zig                 23 verdicts      what zvc must refuse about tokens, and their controls
 tests/zvc/pointers.zig               *Self cases      what a call may rely on of a pointee, aliasing, tokens in a field
@@ -140,6 +143,81 @@ Two smaller changes of `zvc` that the pool needed: a null optional is a constant
 
 **What `zv-own` needs** (`src/own` was not touched this round). It does not know `zv.BlockSet`: a block's token is an ordinary struct to it, so a dropped or doubly-given block in `.checked` code is not reported. To do: (a) `isLinear` also for `zv.BlockSet__struct`; `src/air/tokens.zig` already has the name, the operations (`SetOp`) and `setConsumes`. (b) `tokenOp` for the set operations, where `cut` and `apart` consume their arguments and make two new tokens and `own` makes one; `opOf` returns null for them today on purpose, so the checker runs their bodies and sees no token. (c) The two rules for tokens in `*Self` (take out, put back) apply as they are. (d) `Heap.alloc` and `Heap.free` of `examples/pool.zig` are the first `.checked` code that moves a `BlockSet` through a `*Self`, and should be the seeded cases (`held` joined, taken, a double free, a forgotten `join`).
 
+## Quantified invariants, array stores and a typed cell (M4, 0.17.25)
+
+The M3 pool kept its free set in a bitmap because a chain through the blocks needs three things `zvc` did not have. M4 adds them, and the intrusive free list is proved (`examples/freelist.zig`).
+
+### Quantifiers without a quantifier
+
+The overseer's advice was to stay quantifier-free; the decision was to go deep. The encoding picked is the one that stays predictable: **a bounded `forall` is a conjunction written out at comptime**.
+
+```zig
+pub inline fn forall(comptime bound: usize, n: usize, ctx: anytype, comptime pred: fn (@TypeOf(ctx), usize) bool) bool {
+    if (n > bound) return false;
+    inline for (0..bound) |i| if (i < n and !@call(.always_inline, pred, .{ ctx, i })) return false;
+    return true;
+}
+```
+
+`zvc` sees `bound` guarded instances of `pred` as ordinary straight-line AIR. Nothing about it is special to the verifier and nothing reaches Z3 as a `forall`:
+
+- **No triggers to get wrong.** There is no E-matching, so a badly chosen trigger cannot make a proof pass or hang; the worst case of a big `bound` is a big query, and a query that takes too long is a timeout. Timeouts are never proofs: a function whose obligation times out is UNPROVEN (or REFUTED when another obligation has a counterexample), and `run_zvc.sh` pins that a 1 ms solver timeout on `FreeList.alloc` does not print `proved`.
+- **Sound by construction.** The conjunction is what `forall` means for `n <= bound`; for `n > bound` it is `false` (instances would be missing), so a proof has to show the count is within the bound (`lists.forallShort`, with a bound of 4 over a pool of 8, is refuted).
+- **The price** is that a quantified fact is as big as its range. The pool has 8 blocks and three quantified invariants of 8 instances each; `alloc` takes 4 s and `free` 4.5 s. A `slots` of 64 would not be practical this way. A real `forall` with a trigger would scale with the instances used instead of the range; it is not built, and it is the place where a wrong trigger could matter, which is why it was left out of the soundness argument.
+
+A loop invariant can quantify the same way (`zv.invariant(zv.forall(...))`); the pool needs none, because every method is straight-line.
+
+### Arrays and stores
+
+`zvc` models an array in a struct (or a local) as an SMT array; an element is a place of its own (`ptr_elem_ptr` of a pointer to an array gives a place with an index), so `self.links[i] = v`, a ghost `self.order[n] = i` and `self.links[i]` in a specification are all in the fragment, and `*Self` summaries carry the array across a call (`agrees` equates two arrays, a call binds the callee's array to the caller's). Details that mattered:
+
+- A change below a field the function never set starts from what the field was (`update` materialises the symbolic field); without it a store into `self.order` replaced the whole array by a fresh one, and an invariant over it failed.
+- `undefined` for an array of integers is a fresh array.
+- Two pointers into one array may point at the same element (`overlap` treats two index steps as overlapping).
+- Not done: slices as places (a store into a `[]u8` would have to reach every other slice of the same memory) and arrays of structs. This is why the link words are an array of the pool and not the first bytes of the blocks: **the list is intrusive in the sense that the link of a block is stored for that block and is meaningful only while the block is free, but the words are `links[i]` of the pool, not bytes of the block.** Moving them into the bytes is a layout change that needs byte stores through the block's permission.
+
+### The free list
+
+`FreeList` has 8 blocks. Real state: `head`, `links[8]`, `nfree`, `used`. Ghost state: `spare`, a `BlockSet` for the free blocks, and `order` (the blocks on the list, the head last) with its inverse `posn`. The invariant, each line unrolled over the blocks:
+
+| | |
+| --- | --- |
+| list length | `nfree <= 8`, `nfree + used == 8`, `popcount(spare.mask) == nfree`, `spare.mask >> 8 == 0` |
+| head | `head == nil` when empty, else `order[nfree - 1]` |
+| nodes | for `k < nfree`: `order[k] < 8`, block `order[k]` is in `spare`, `posn[order[k]] == k` |
+| coverage | for every block `i` in `spare`: `posn[i] < nfree` and `order[posn[i]] == i` |
+| links | for `k < nfree`: `links[order[k]] == order[k - 1]`, and `nil` for `k == 0` |
+
+Acyclic follows from the links going strictly down `order`; every node is in bounds and free; no block is on the list twice because `posn` is an inverse; and `used = 8 - nfree` is the live count. `alloc` pops the head (`self.links[head]` is the new head) and cuts its bit from `spare`; `free` takes a block with its permission, proves with `apart` that it is not on the list, writes its link, and pushes it. `init` builds the list by freeing the eight blocks in turn. `reuse` (alloc then free) leaves `nfree` as it was. A double free is the token of the second `free` having been consumed by the first: refused at the caller.
+
+Times (Windows, Z3 4.16.0): `alloc` 4.0 s, `free` 4.6 s, `init` 0.8 s, `reuse` 8.9 s; 19 s for the file, run with `--timeout 120000`. `popcount` and the three unrolled quantifiers are the cost; the bitmap pool takes 2.3 s.
+
+### The typed token, `zv.Cell(T)`
+
+`Cell(T) { slot, value }` is the permission for one cell with the value it holds, ghost like the others. `write(c, v)` consumes the token and returns the one for the cell after the store; `own(slot, v)` is a counted premise. A struct that keeps a real field and a cell token states `cell.value == field` as its invariant (`cells.zig`: `set`, `get`, `swap` are proved; `setNoWrite` is refuted because the cell still says the old value). It is typed in `T` but the pack prints one name for every instantiation (`zv.Cell__struct`), so a pack can hold one `T` per cell type; `zvc` reads the field types from the pack and a second `T` would be a conflict (unknown fields).
+
+Cases: a cell written after it was given away (`writeAfterGive`), a token written twice (`writeTwice`), the old value read after the write (`readStale`), a token kept in two places (`dupCell`), a cell stolen from another struct (`stealCell`), forged (`forgeCell`) and changed (`forgeValue`).
+
+### Axioms, in one list
+
+Everything `zvc` takes without proving about tokens is here. Each is a premise a verdict names or an intrinsic whose pinned cases are listed.
+
+| Axiom | What it says | Where counted |
+| --- | --- | --- |
+| `PointsTo.own`, `BlockSet.own`, `Cell.own` | the memory (or pool, or cell) is exclusively the caller's | one premise per call site, `assuming zv.assume at file:line`, `--max-assume` |
+| `BlockSet.apart` | two live tokens of one pool share no block (`zvc` assumes it of two distinct tokens) | an intrinsic of `zvc`; `pools.apartSame` pins the only misuse it checks; a pool's `own` gives a fresh name, so tokens of two pools are never claimed disjoint |
+| linearity rules | identity, consumption, no use after consumption, no forging, distinct results, loops | `src/zvc/vc.zig`; `tokens.expect` (34 verdicts) enumerates how a token can flow (optional, two fields, stored twice, error union, pointee and result, array, loop) |
+
+No other fact about a token is assumed. The overseer's concern that the rules were found by cases rather than derived is answered in part: the flow cases of `tokens.zig` found no new gap this time, but the rules are still an enumeration, not a theorem; `distinctTokens` came from a case, and a proof that the enumeration is complete is not written.
+
+### What did not work, or is not there
+
+- **The hash map** (stretch) is not done. It needs a map as a ghost type or a quantifier over a slot array with a hash function, and open-addressing probing needs a loop invariant that quantifies over the probe sequence; the pieces (array stores, unrolled quantifiers, loop invariants) exist, the proof was not attempted.
+- **Link words in the block bytes**, as above.
+- **An obligation in a `zv.requires` argument** still stops a function from verifying ("`zv.requires` must open the function body"). The workaround is in the code: an array index by a `u3` truncation (`at`), and a comparison of a zero-extended narrow number with a constant is folded to true so the compiler's own bounds check on it is not an obligation.
+- **Solver time grows with the unrolled range**; 8 blocks is what is practical.
+- **`zv-own` does not know `Cell(T)`** or the block-set operations; `src/own` was not touched (a parallel refactor owns it). What it needs is in the M3 section; add `Cell`: `own`, `write` and `discard` as a source, a consuming transformer and a sink, with the same rule for a cell in a field of `*Self`.
+
 ## What stays `.trusted`, and why
 
 | Item | Count | Why it is not proved |
@@ -171,7 +249,8 @@ M2 numbers: 7 `.verified` methods of `Bump` (`init`, `padTo`, `carve`, `alloc`, 
 | **M1** (0.17.17) | `PointsTo` over byte ranges, linearity and forging rules in `zvc`, bump allocator proved, soundness cases | this document |
 | **M2** (0.17.19) | `zvc` takes `*Self` and `*const T` parameters (in/out summaries), the allocator is a set of methods on `*Bump` with its token in a field, `zv-own` checks tokens (shared names, tokens through `*Self`) | done |
 | **M3** (0.17.21) | `zv.BlockSet` (a token over a set of the blocks of a pool), the lemma `apart`, a pool of fixed-size blocks proved, 17 soundness verdicts | done, with a bitmap for the free set (above) |
-| **M4** | typed `PointsTo(T)` with a value and an initialization flag: `write(perm, ptr, v)` needs the permission and sets the value, `read` needs it initialized; `Tracked(T)` for ghost parameters; frame: a function that does not take a token cannot change its memory | a raw-pointer ring buffer proved with its read/write laws |
+| **M4** (0.17.25) | bounded `zv.forall` (unrolled), element places and stores in arrays, `zv.Cell(T)`, an intrusive free list proved | done, see above; the hash map is not |
+| **M4b** | typed `PointsTo(T)` with an initialization flag, `Tracked(T)`, a ring buffer proved with its read/write laws | |
 | **M5** | region identity and epochs: a token belongs to one allocator instance; `reset` bumps the epoch and revokes outstanding tokens without collecting them | cross-allocator misuse refuted; shell needs no `used` |
 | **M6** | proof agents in CI (below) on the core | the pilot in the next section |
 

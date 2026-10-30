@@ -370,6 +370,10 @@ pub const Vc = struct {
             .void, .type, .func => return .none,
             .undef => {
                 if (c.ty != .none) if (v.ctx.scalarSort(c.ty)) |sort| return .{ .scalar = try pool.fresh("undef", sort) };
+                if (c.ty != .none and v.ctx.typeRec(c.ty).kind == .array) if (v.ctx.intInfo(v.ctx.typeRec(c.ty).child)) |elem| {
+                    const mem = try pool.fresh("undef", .{ .array = .{ .idx = 64, .elem = elem.bits } });
+                    return .{ .array = .{ .mem = mem, .len = v.ctx.typeRec(c.ty).len } };
+                };
                 return .none;
             },
             .bool => return .{ .scalar = try pool.boolean(c.a != 0) },
@@ -628,7 +632,7 @@ pub const Vc = struct {
             .array_elem_val => {
                 const a = try v.arg(inst, 0);
                 if (a != .array) return v.ctx.unsupported("element of {t}", .{std.meta.activeTag(a)});
-                v.setScalar(inst, try pool.select(a.array.mem, try v.scalarArg(inst, 1)));
+                v.setScalar(inst, try pool.select(a.array.mem, try v.index64(try v.scalarArg(inst, 1))));
             },
             .ptr_add, .ptr_sub => {
                 const p = try v.arg(inst, 0);
@@ -639,6 +643,17 @@ pub const Vc = struct {
             },
             .ptr_elem_val, .ptr_elem_ptr => {
                 const p = try v.arg(inst, 0);
+                if (p == .place) {
+                    const array_ty = v.ctx.typeRec(v.operandType(v.ops(inst)[0])).child;
+                    if (array_ty == .none or v.ctx.typeRec(array_ty).kind != .array) return v.ctx.unsupported("element pointer of a pointer to {s}", .{v.ctx.typeName(array_ty)});
+                    const elem: value.Step = .{ .index = .{ .idx = try v.index64(try v.scalarArg(inst, 1)), .len = v.ctx.typeRec(array_ty).len } };
+                    const at: value.Place = .{ .cell = p.place.cell, .path = try append(v.arena(), p.place.path, elem) };
+                    if (inst.tag == .ptr_elem_val) {
+                        try v.livePath(st, st.cells[at.cell], at.path);
+                        v.setResult(inst, try v.read(st.cells[at.cell], at.path, inst.ty));
+                    } else v.setResult(inst, .{ .place = at });
+                    return;
+                }
                 if (p != .elem_ptr) return v.ctx.unsupported("element of {t}", .{std.meta.activeTag(p)});
                 const at = try pool.bin(.add, p.elem_ptr.off, try v.scalarArg(inst, 1));
                 if (inst.tag == .ptr_elem_val) v.setScalar(inst, try pool.select(p.elem_ptr.mem, at)) else v.setResult(inst, .{ .elem_ptr = .{ .mem = p.elem_ptr.mem, .off = at } });
@@ -844,6 +859,12 @@ pub const Vc = struct {
             } else true,
             else => false,
         };
+    }
+
+    /// An array is indexed by 64-bit terms: a `u4` index of a 16-element array is widened.
+    fn index64(v: *Vc, t: Term) Allocator.Error!Term {
+        const bits = v.pool.bitsOf(t);
+        return if (bits < 64) v.pool.zext(t, 64) else t;
     }
 
     fn append(arena_alloc: Allocator, path: []const value.Step, s: value.Step) Allocator.Error![]const value.Step {
@@ -1076,6 +1097,11 @@ pub const Vc = struct {
                 if (cell != .opt) return v.ctx.unsupported("optional payload of {t} in memory", .{std.meta.activeTag(cell)});
                 return v.read(cell.opt.payload, path[1..], ty);
             },
+            .index => |e| {
+                if (path.len != 1) return v.ctx.unsupported("a place below an array element", .{});
+                if (cell != .array) return v.ctx.unsupported("an element of {t} in memory", .{std.meta.activeTag(cell)});
+                return .{ .scalar = try v.pool.select(cell.array.mem, e.idx) };
+            },
             .slice_len => {
                 if (cell != .slice) return v.ctx.unsupported("slice length of {t} in memory", .{std.meta.activeTag(cell)});
                 return .{ .scalar = cell.slice.len };
@@ -1126,9 +1152,13 @@ pub const Vc = struct {
                     else => return v.ctx.unsupported("field store into {t}", .{std.meta.activeTag(cell)}),
                 };
                 if (o.token != 0 and !v.insideTokenOp()) return v.ctx.unsupported("a token changed outside the operations of zv.PointsTo", .{});
-                const inner: Value = for (o.fields) |f| {
+                var inner: Value = for (o.fields) |f| {
                     if (f.index == i) break f.value;
                 } else .none;
+                // A change below a field nothing has set yet starts from what the field was.
+                if (inner == .none and path.len > 1 and o.base != null) if (v.fieldType(fstep)) |fty| {
+                    inner = try v.ctx.field(o, i, fty);
+                };
                 return v.ctx.withField(o, i, try v.update(inner, path[1..], new));
             },
             .payload => {
@@ -1138,6 +1168,15 @@ pub const Vc = struct {
                     else => return v.ctx.unsupported("optional payload store into {t}", .{std.meta.activeTag(cell)}),
                 };
                 return .{ .opt = try v.ctx.create(value.Opt, .{ .has = o.has, .payload = try v.update(o.payload, path[1..], new) }) };
+            },
+            .index => |e| {
+                if (path.len != 1 or new != .scalar) return v.ctx.unsupported("a store below an array element", .{});
+                const mem = switch (cell) {
+                    .array => |a| a.mem,
+                    .none => try v.pool.fresh("undef", .{ .array = .{ .idx = 64, .elem = v.pool.bitsOf(new.scalar) } }),
+                    else => return v.ctx.unsupported("an element store into {t}", .{std.meta.activeTag(cell)}),
+                };
+                return .{ .array = .{ .mem = try v.pool.store(mem, e.idx, new.scalar), .len = e.len } };
             },
             .slice_len => {
                 if (cell != .slice or path.len != 1) return v.ctx.unsupported("store to a slice length", .{});
@@ -1492,7 +1531,11 @@ pub const Vc = struct {
     /// Whether one path into a cell is a prefix of the other: the two places share memory.
     fn overlap(a: []const value.Step, b: []const value.Step) bool {
         const n = @min(a.len, b.len);
-        for (a[0..n], b[0..n]) |x, y| if (!std.meta.eql(x, y)) return false;
+        for (a[0..n], b[0..n]) |x, y| {
+            // Two elements of one array may be the same one.
+            if (x == .index and y == .index) continue;
+            if (!std.meta.eql(x, y)) return false;
+        }
         return true;
     }
 
@@ -1516,7 +1559,7 @@ pub const Vc = struct {
                 try sub.map.put(gpa, s.len, caller.slice.len);
                 try sub.arrays.put(gpa, s.mem, .{ .mem = caller.slice.mem, .off = caller.slice.off });
             },
-            .array => |a| try sub.arrays.put(gpa, a.mem, .{ .mem = caller.array.mem, .off = try v.pool.bv(64, 0) }),
+            .array => |a| try sub.map.put(gpa, a.mem, caller.array.mem),
             .opt => |o| {
                 try sub.map.put(gpa, o.has, caller.opt.has);
                 try v.bind(sub, o.payload, caller.opt.payload, lazy);
@@ -1597,12 +1640,14 @@ pub const Vc = struct {
             if (try v.ghostCall(inst, st, callee, args[0..n])) return;
             const token_op = tokenOpOf(callee);
             const set_op = zv_air.tokens.setOpOf(callee);
+            const cell_op = zv_air.tokens.cellOpOf(callee);
             if (set_op) |op| if (try v.setIntrinsic(inst, st, op, args[0..n])) return;
-            if (token_op != null or set_op != null) try v.tokenOpEnter(inst, st, token_op, args[0..n]);
+            if (token_op != null or set_op != null or cell_op != null) try v.tokenOpEnter(inst, st, token_op, args[0..n]);
+            if (cell_op == .own) try v.premise(inst, st);
             try v.inline_names.append(v.arena(), callee);
             defer _ = v.inline_names.pop();
             try v.block(inst, st, body);
-            const ends = if (token_op) |op| zv_air.tokens.consumes(op) else if (set_op) |op| zv_air.tokens.setConsumes(op) else false;
+            const ends = if (token_op) |op| zv_air.tokens.consumes(op) else if (set_op) |op| zv_air.tokens.setConsumes(op) else if (cell_op) |op| zv_air.tokens.cellConsumes(op) else false;
             if (ends) for (args[0..n]) |a| try v.useTokens(st, try v.operand(a), v.operandType(a), true);
             return;
         };
@@ -1866,7 +1911,7 @@ pub const Vc = struct {
                         else => null,
                     };
                 },
-                .struct_field_ptr, .struct_field_ptr_index_0, .struct_field_ptr_index_1, .struct_field_ptr_index_2, .struct_field_ptr_index_3, .ptr_cast, .ptr_slice_len_ptr, .ptr_slice_ptr_ptr, .bit_cast => cur = v.ops(i)[0],
+                .struct_field_ptr, .struct_field_ptr_index_0, .struct_field_ptr_index_1, .struct_field_ptr_index_2, .struct_field_ptr_index_3, .ptr_cast, .ptr_slice_len_ptr, .ptr_slice_ptr_ptr, .bit_cast, .ptr_elem_ptr => cur = v.ops(i)[0],
                 else => return null,
             }
         }
@@ -2060,7 +2105,11 @@ pub const Vc = struct {
                 }
                 return acc;
             },
-            .slice, .array, .elem_ptr, .place => return v.ctx.unsupported("a returned slice, array or pointer", .{}),
+            .array => |a| {
+                if (a.len != result.array.len) return v.ctx.unsupported("a returned array of another length", .{});
+                return pool.eq(result.array.mem, a.mem);
+            },
+            .slice, .elem_ptr, .place => return v.ctx.unsupported("a returned slice or pointer", .{}),
         }
     }
 };

@@ -172,6 +172,25 @@ pub const Seq = if (ghost) struct {
     }
 } else void;
 
+/// `forall i in [0, n): pred(ctx, i)` for `n <= bound`, a conjunction written out at comptime: the verifier sees `bound`
+/// guarded instances of `pred`, no quantifier, so a proof about it is as predictable as any other and a timeout is a
+/// timeout. Past `bound` the instances would be missing from the conjunction, so `n > bound` is false and a proof must show `n <= bound`. `ctx` is passed by value to an inlined call, so a token in it is read, not consumed.
+pub inline fn forall(comptime bound: usize, n: usize, ctx: anytype, comptime pred: fn (@TypeOf(ctx), usize) bool) bool {
+    if (n > bound) return false;
+    inline for (0..bound) |i| {
+        if (i < n and !@call(.always_inline, pred, .{ ctx, i })) return false;
+    }
+    return true;
+}
+
+/// `exists i in [0, n): pred(ctx, i)`, written out the same way.
+pub inline fn exists(comptime bound: usize, n: usize, ctx: anytype, comptime pred: fn (@TypeOf(ctx), usize) bool) bool {
+    inline for (0..bound) |i| {
+        if (i < n and @call(.always_inline, pred, .{ ctx, i })) return true;
+    }
+    return false;
+}
+
 /// Runtime check over [lo, hi): spec helper for quantified properties.
 pub fn forallRange(lo: usize, hi: usize, ctx: anytype, comptime pred: fn (@TypeOf(ctx), usize) bool) bool {
     var i = lo;
@@ -509,6 +528,33 @@ pub const PointsTo = if (ghost) struct {
         _ = self;
     }
 } else void;
+
+/// The right to one cell of memory of type `T`, and the value it holds: a typed `PointsTo`. Like the others it exists
+/// only in ghost builds, is linear, and is built only by its own operations. `write` consumes the token and makes the
+/// one for the cell after the store, so the old value cannot be read once the new one is written; a function that did
+/// not get the token cannot say what the cell holds.
+pub fn Cell(comptime T: type) type {
+    return if (ghost) struct {
+        slot: usize,
+        value: T,
+
+        const Self = @This();
+
+        /// The token of cell `slot` holding `value`. The trusted source: the caller states that nothing else touches it.
+        pub inline fn own(slot: usize, value: T) Self {
+            return .{ .slot = slot, .value = value };
+        }
+
+        /// The cell after a store of `value`.
+        pub inline fn write(self: Self, value: T) Self {
+            return .{ .slot = self.slot, .value = value };
+        }
+
+        pub inline fn discard(self: Self) void {
+            _ = self;
+        }
+    } else void;
+}
 
 var block_set_ids: usize = 0;
 

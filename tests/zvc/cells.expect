@@ -1,0 +1,15 @@
+# name verdict. zv.Cell(T), the typed token with a ghost value. A verdict changing here is reviewed as a soundness or completeness change of zvc.
+# Controls (proved): set, get, swap, giveAway, twoMints.
+cells.Box.dupCell refuted
+cells.Box.forgeCell unproven
+cells.Box.forgeValue unproven
+cells.Box.get proved
+cells.Box.giveAway proved
+cells.Box.readStale refuted
+cells.Box.set proved
+cells.Box.setNoWrite refuted
+cells.Box.stealCell refuted
+cells.Box.swap proved
+cells.Box.twoMints proved
+cells.Box.writeAfterGive refuted
+cells.Box.writeTwice refuted

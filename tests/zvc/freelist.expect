@@ -1,0 +1,5 @@
+# name verdict. examples/freelist.zig: the free-list pool, every method proved, under the premise of the one zv.BlockSet.own in init.
+freelist.FreeList.alloc proved
+freelist.FreeList.free proved
+freelist.FreeList.init proved
+freelist.FreeList.reuse proved
