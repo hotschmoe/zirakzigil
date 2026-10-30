@@ -41,15 +41,6 @@ jobs:
           export ZIG_LIB=$lib
           sh tools/zvc_packs.sh
           sh tools/own_packs.sh
-      - name: TEMP fresh packs equal the packs committed before 0.17.24
-        run: |
-          git fetch --quiet --depth=1 origin e7f91a1f599e3978c9d2abd9a3701ac44f6f503c
-          n=0
-          for f in $(git ls-tree -r --name-only e7f91a1f599e3978c9d2abd9a3701ac44f6f503c | grep '\.zvp$'); do
-              git show e7f91a1f599e3978c9d2abd9a3701ac44f6f503c:$f | cmp - $f || echo "DIFF $f"
-              n=$((n + 1))
-          done
-          echo "compared $n packs"
       - name: Matrix (every optimize mode, ghost on and off, freestanding, consumer)
         run: zig build matrix --summary all
       - name: Negative suite
