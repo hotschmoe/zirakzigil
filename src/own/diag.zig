@@ -17,6 +17,8 @@ pub const Kind = enum {
     use_after_free,
     /// An allocation freed twice.
     double_free,
+    /// A free of a pointer that is not the start of an allocation (`free(v[1..])`).
+    invalid_free,
     /// A pointer into a stack slot that outlives the function.
     escape_local,
     /// A pointer into an arena or other region that outlives it.
@@ -39,6 +41,7 @@ pub const Kind = enum {
             .leak => "leak",
             .use_after_free => "use after free",
             .double_free => "double free",
+            .invalid_free => "free of a pointer that is not the start of an allocation",
             .escape_local => "pointer to a local escapes",
             .escape_region => "pointer escapes its region",
             .alias => "overlapping ranges",

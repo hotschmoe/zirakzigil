@@ -87,7 +87,7 @@ stdcode.okResizeInPlace counted
 stdcode.okRetainOdd counted
 stdcode.okShrink clean
 stdcode.okSlab clean
-stdcode.okSortedCopy clean
+stdcode.okSortedCopy counted
 stdcode.okSplitJoin counted
 stdcode.okStackEval counted
 stdcode.okSwapContainers counted

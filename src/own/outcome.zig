@@ -52,6 +52,12 @@ pub const Reason = enum(u8) {
         };
     }
 
+    /// Whether the reason keeps a function from being `clean`. Two pointer parameters that do not overlap is a precondition
+    /// that a call is checked against, not something the function's own code left open.
+    pub fn opens(reason: Reason) bool {
+        return reason != .alias_params;
+    }
+
     /// The reasons a callee's run hands to its callers: the effect may be on memory the caller sees and the summary cannot say where.
     pub fn escapes(reason: Reason) bool {
         return switch (reason) {
@@ -138,6 +144,15 @@ pub const Stats = struct {
         var n: u32 = 0;
         for (Reason.all) |reason| {
             if (!reason.assumed()) n += s.count(reason);
+        }
+        return n;
+    }
+
+    /// Everything a `clean` may not have: the undecided events and the assumptions made at an instruction.
+    pub fn open(s: Stats) u32 {
+        var n: u32 = 0;
+        for (Reason.all) |reason| {
+            if (reason.opens()) n += s.count(reason);
         }
         return n;
     }

@@ -16,11 +16,11 @@ tools/run_own.sh                                                 the suite: pack
 zirakzigil.addVerify(b, .{ .exports = ..., .own = .{} })               `zig build verify` and `zig build own` in a consumer project
 ```
 
-A function gets one of four verdicts: `clean` (no finding, and every end and every use the run met was decided: nothing is left open), `COUNTED` (no finding, but at least one end or use is counted as undecided, with the reason printed under the function), `FINDINGS` (at least one mistake, each with `file:line:col`, the source line, notes that point at the related places and the branches taken to get there) or `UNPROVEN` (the function uses a construct outside the supported fragment, with the position and reason; it is neither accepted nor refuted). Exit status is 0 when no function has a finding and none is unproven, or, with `--expect`, when every verdict equals the pinned one (a pinned `counted` also accepts `clean`: a pack with std's bodies may decide what the model leaves open; a pinned `clean` accepts nothing else). `--max-undecided N` and `--baseline FILE` fail the run when it leaves more undecided than allowed, in all and per function (below).
+A function gets one of four verdicts: `clean` (no finding, every end and every use the run met was decided, and nothing was assumed: nothing is left open), `COUNTED` (no finding, but at least one end or use is counted as undecided, or one call or transfer was assumed, with the reason printed under the function), `FINDINGS` (at least one mistake, each with `file:line:col`, the source line, notes that point at the related places and the branches taken to get there) or `UNPROVEN` (the function uses a construct outside the supported fragment, with the position and reason; it is neither accepted nor refuted). Exit status is 0 when no function has a finding and none is unproven, or, with `--expect`, when every verdict equals the pinned one (a pinned `counted` also accepts `clean`: a pack with std's bodies may decide what the model leaves open; a pinned `clean` accepts nothing else). `--max-undecided N` and `--baseline FILE` fail the run when it leaves more undecided than allowed, in all and per function (below).
 
 ## What a verdict means, and what it does not
 
-`clean` is a statement about the constructs the checker validated, not about the program. It says: on every path the checker followed, every `zv.Linear` value is consumed or handed on exactly once, no memory the run follows is used after the operation that ended it, and no end the run met was left undecided. Whatever is outside that sentence is on a list: the assumptions below (printed with every run), the counted classes, and the known silent classes at the end of this section. A reader of a `clean` should read it together with the footer of the same run.
+`clean` is a statement about the constructs the checker validated, not about the program. It says: on every path the checker followed, every `zv.Linear` value is consumed or handed on exactly once, no memory the run follows is used after the operation that ended it, no end the run met was left undecided, and the function assumed nothing (since 0.17.30: a call through a function pointer, a call outside the packs with a pointer or slice among its arguments or result, a linear value handed to memory it does not follow, and a container method with no model all make a function `COUNTED`; two pointer parameters that are taken not to overlap do not, because a call is checked against that). Whatever is outside that sentence is on a list: the assumptions below (printed with every run), the counted classes, and the known silent classes at the end of this section. A reader of a `clean` should read it together with the footer of the same run.
 
 ### The invariant: no event without an outcome (0.17.22)
 
@@ -32,16 +32,16 @@ Four review rounds and an overseer review found silent false negatives, each in 
 - **Backstop.** A call whose callee has an end (an allocator primitive, a container method that invalidates, a summary with kills, frees or may-frees) and whose rules settled none counts `dropped` (`ends whose rule decided nothing`). The suite pins it at zero; it exists so that a new rule that forgets the invariant is counted, not clean.
 - **What the model cannot say.** A request to end memory is classified by where it points: a global (a place of root kind `global`) is counted `global` whatever was ended, because what a global holds is only partly in the run; a value with no provenance (no identity, no place: it came from memory or a call the run does not follow) is counted `untracked`; an identity the request skipped because the summary could not express it is counted `unexpressed`. A function's summary carries the reasons of the ends it made that a caller cannot see (`Summary.outside`: global, untracked, unexpressed, blind), and the caller counts them at the call: a callee that does `gpa.free(cache)` of a global has no slot to kill and used to give `0 of 0 ends`; it is now one end of a value with no provenance in the callee and in each caller.
 - **May-free.** A free of a by-value parameter on one branch of a join (`if (o) |b| gpa.free(b)`) is a may-free: the state keeps the parameters freed on some path as well as on all of them (`freed_some`), where the intersection used to leave nothing and the summary said nothing.
-- **Verdicts and the gate.** A function with something counted (other than an assumption) is `COUNTED`, not `clean`. `--max-undecided N` fails when the project's functions leave more than N events undecided; `--baseline FILE` (lines `NAME N`, written by `--write-baseline FILE`) fails when a function leaves more than its line says, and more than 0 when it has none. In a build: `zirakzigil.addOwnershipGate(b, .{ ..., .max_undecided = 0, .baseline = "own/undecided.baseline" })`. A count that goes down is reported as a reason to write the baseline again; it never fails.
+- **Verdicts and the gate.** A function with something counted, an assumption included (other than the non-overlap of pointer parameters), is `COUNTED`, not `clean`. `--max-undecided N` fails when the project's functions leave more than N events open (counted or assumed); `--baseline FILE` (lines `NAME N`, written by `--write-baseline FILE`) fails when a function leaves more than its line says, and more than 0 when it has none. In a build: `zirakzigil.addOwnershipGate(b, .{ ..., .max_undecided = 0, .baseline = "own/undecided.baseline" })`. A count that goes down is reported as a reason to write the baseline again; it never fails.
 
 ### The classes that are counted
 
 | Counted as | What it is | Kind |
 | --- | --- | --- |
-| `unknown_call` | a call to a function outside the packs, or whose body could not be read, with a pointer or slice among its arguments or result: assumed to end nothing and keep nothing | assumed |
+| `unknown_call` | a call through a function pointer, or to a function outside the packs or whose body could not be read with a pointer or slice among its arguments or result: assumed to end nothing and keep nothing | assumed |
 | `transfer` | a linear value handed to memory the function does not own; the checker stops following it | assumed |
 | `unmodelled` | a container method with no model and no body: taken to invalidate | assumed |
-| `alias_params` | a function that ends or changes memory through two or more pointer parameters of one type: assumed not to overlap (a call that passes one object twice is checked) | assumed |
+| `alias_params` | a function that ends or changes memory through two or more pointer parameters of one type: assumed not to overlap (a call that passes one object twice is checked) | assumed, and the only one that leaves a function `clean` |
 | `blind` | an operation on memory it cannot name a place for (a pointer a callee handed out): its effect is not applied | undecided |
 | `dynamic_len` | `resize`/`remap` by a length it cannot show to be non-zero: assumed not to free | undecided |
 | `lent` | a pointer to a local handed to a call that returns a new block or that the summary does not trace: what the result keeps of it is not followed | undecided |
@@ -53,11 +53,11 @@ Four review rounds and an overseer review found silent false negatives, each in 
 | `unexpressed` | an end of memory the caller sees that the function's summary cannot say (a soft end of a parameter's content, a part of a by-value parameter whose identity is merged with another) | undecided |
 | `dropped` | the backstop above | undecided |
 
-### The classes that are silent (a `clean` that is wrong), as of 0.17.22
+### The classes that are silent (a `clean` that is wrong), as of 0.17.30
 
 | Class | Why it is silent | Found | Status |
 | --- | --- | --- | --- |
-| a call outside the packs with no pointer or slice among its arguments and result | `unknown_call` is only counted when a pointer is involved; such a call can end a global | overseer, 0.17.22 | open: assumed, not counted |
+| a call to a function outside the packs with no pointer or slice among its arguments and result | `unknown_call` is counted for it only when it goes through a pointer; a direct call can end a global | overseer, 0.17.22 | open |
 | a kill removed because a constant the run holds says the callee's condition is false (`gated`) | the constant may be stale; the decision is a named reason, counted in `--effects`, but a wrong constant is a wrong `clean` | review 4 | open: the pair `{a, b}` and "a constant that is not known to be current never deletes a kill" are the guards |
 | a use of memory with no identity (a global, a pointer from a call the run does not follow) | not a use "of memory it follows"; the end that would make it a bug is counted when the run sees it | overseer, 0.17.22 | by design, so that `decided: N of N uses` reads as "of the followed ones" |
 | what is stored inside a std container, or behind a map slot | an element is one of many | review 2 | by design |
@@ -66,6 +66,10 @@ Four review rounds and an overseer review found silent false negatives, each in 
 | a by-value optional (or a part of one) freed on its payload branch in a callee | the join intersected the freed parameters and the summary said nothing | overseer, 0.17.22 | fixed: may-free, counted `summarized` at the caller |
 | a soft end of a parameter's content dropped from a summary | skipped without a trace | 0.17.22 | fixed: `unexpressed` |
 | a `free`-like call with no argument to free | the rule fell through | 0.17.22 | fixed: the backstop counts `dropped` |
+| a heap node chain: `destroy(c)` then a call that reads `c`, a walk of `next`, a read of `n2.next` after `destroy(n1)` | a pointer parameter's own identity was not a dereference in a summary; what a constructor stored in the block it returns was not in the summary; a block ended in a loop kept its name in the values the loop head merged | lost in 0.17.15 (the identity rewrite; 0.17.13 found them), oracle, 0.17.30 | fixed: derefs of pointer parameters, `Summary.fresh_writes` (applied for a result that points to one object, not a buffer: following every buffer doubled the time on zls), a kill of a block already dead on another path renames the values the instruction computed. A walk that frees a node it reached through `next` is `COUNTED` (the value is one of several nodes), not a finding |
+| a global that still names a freed block (`stash(v); a.free(v); rd(g_slice)`) | the store happened in a callee and the global was not followed | oracle, 0.17.30 | fixed: a pointer stored into a global exposes its block (`State.exposed`, `Summary.exposes`); ending an exposed block is counted `global` |
+| `a.free(v[1..])` | the free of a non-allocation was not modelled | oracle, 0.17.30 | fixed: a finding (`invalid_free`) when the pointer is a known constant offset into a block the run saw allocated |
+| a function whose only open item is an assumption (a call through a function pointer, a call outside the packs) | `clean` ignored the assumed counts | oracle, 0.17.30 | fixed: `COUNTED` |
 
 A differential oracle (generated programs, Debug run against `zv-own`) is the intended measure of the silent rate by construct; this table is the list of what the reviews have found, not a measure.
 
@@ -414,6 +418,30 @@ No finding appeared or went away: the project findings are the same in every pac
 | zmoltcp (986 functions) | 0 -> 0 | 986 | 986 | 0 | 6 of 6 | 6 of 6 | none: it has no allocator and no global memory |
 
 Reading: the "no provenance" ends are almost all the idiom `for (list.items) |e| allocator.free(e.field)`: an element of a container is one of many and is not followed, so a double free of an element (freed in the loop, freed again by a `deinit` that walks the same list) was invisible and is now counted. The project functions that fall from `clean` to `COUNTED` are the ones that free or grow what the run does not follow; a project ratchets them with `--baseline`. No rule was added to win precision back. `dropped` is zero in every pack. Time: about 25% more on zls under a loaded machine (2m12s to 2m45s, nostd pack, both runs sharing the CPU with other jobs).
+
+## Oracle round (0.17.30)
+
+The first run of the differential oracle (`docs/reviews/oracle-1.md`, 6000 programs, seed 1) left 118 faulting programs (3.6%) called plainly `clean`, 92 more `clean` with only an assumption in the footer, and put the cause of 42 of the 47 faulting node programs on a regression: a zv-own of 0.17.13 reported the `destroy` walks, and the identity rewrite of 0.17.15 lost them. Bisect: 0.17.13 FINDINGS, 0.17.15 and every later release clean with nothing counted. Two causes. A pointer parameter's own identity was never a dereference in a summary (`nextOf(n)` reads `n.next`, and the summary said it read nothing), and a kill of a block that another path had already ended returned early, leaving the values the instruction computed holding the live block. A third gap hid the rest: what a constructor stores into the block it returns (`n.* = .{ .next = next }`) was not in its summary, so `n2.next` was nothing.
+
+| | silent, plain | silent, std | assumed only, plain | assumed only, std | COUNTED (counted + assumed), plain | true finding | false positive |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0.17.28 (master) | 118 (3.6%) | 120 (3.7%) | 92 | 71 | 854 + 92 | 2211 | 128 (4.7%) |
+| 0.17.30 | 0 | 0 | 0 | 0 | 941 | 2334 | 128 (4.7%) |
+
+Findings went up by 123 and the false positives did not move: the single-motif node programs that fault are 33 findings and 14 counted of 47 (42 were silent). Counted rows stay: a walk that frees the node it reached through `next` is `COUNTED`, not a finding (the value is one of several nodes), and so are the globals (`m_global`: 40 counted of 50 faulting, 10 findings) and the function pointers (29 of 29). Cost on the five projects (packs with std's bodies; "clean" is nothing left open or assumed, which since 0.17.30 includes every call through a pointer and every call outside the packs with a pointer among its arguments):
+
+| Project (pack) | findings | clean, 0.17.28 | clean, 0.17.30 | COUNTED, 0.17.30 | ends decided |
+| --- | --- | --- | --- | --- | --- |
+| zls | 3 -> 3 | 621 | 456 | 590 | 1172 of 2995 (same) |
+| ziggy lib | 0 -> 0 | 83 | 67 | 31 | 332 of 687 (same) |
+| ziggy cli | 1 -> 2 | 48 | 12 | 52 | 40 of 102 (same) |
+| libvaxis (force) | 6 -> 6 | 442 | 355 | 148 | 215 of 443 (same) |
+| libvaxis (capi) | 5 -> 5 | 589 | 419 | 292 | 1041 of 1383 (same) |
+| webzocket (tests) | 2 -> 2 | 236 | 172 | 149 | 194 -> 246 of 620 |
+| rich_zig (tests) | 0 -> 0 | 1044 | 813 | 527 | 2397 of 3083 (same) |
+| zmoltcp (986 functions) | 0 -> 0 | 986 | 890 | 96 | 6 of 6 |
+
+The extra ziggy finding is `cli.lsp.logic.schemaForDoc`: `defer arena.free(dot_schema_path)` where `dot_schema_path` is `dot_schema_uri["file://".len..]`, a free of a pointer seven bytes into the allocation (`invalid_free`). Nothing else changed in a finding. The functions that left `clean` for `COUNTED` did so because of an assumed call (not an undecided end), so the ends-decided figures did not move.
 
 ## Tokens (0.17.19)
 

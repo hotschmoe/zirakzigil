@@ -8,7 +8,7 @@ memory.advFieldPointerAfterDestroy error
 memory.advFreeParamThenUse error
 memory.advFreeViaAlias error
 memory.advGlobalStash error
-memory.advIndirectCall clean
+memory.advIndirectCall counted
 memory.advMemcpyFromFreed error
 memory.advPointerThroughInt unproven
 memory.advPointerThroughOptionalList error
@@ -70,12 +70,12 @@ memory.okAllocFree clean
 memory.okAllocReturn clean
 memory.okAppendLocalPointerToLocalList clean
 memory.okAppendThenIndex clean
-memory.okArenaCopyOut clean
-memory.okArenaResetLoop clean
-memory.okArenaScope clean
+memory.okArenaCopyOut counted
+memory.okArenaResetLoop counted
+memory.okArenaScope counted
 memory.okAttachLocalSocket clean
 memory.okAttachParamBuffer counted
-memory.okDeferOrder clean
+memory.okDeferOrder counted
 memory.okDupeReturn clean
 memory.okErrdeferFree clean
 memory.okFreeEachBranch clean

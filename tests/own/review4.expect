@@ -27,7 +27,7 @@ review4.badSoftParam counted
 review4.badUnionAssign error
 review4.badUnionField error
 review4.box clean
-review4.callFlip clean
+review4.callFlip counted
 review4.ctrlAtomicStore error
 review4.ctrlDeinit error
 review4.ctrlFieldPtr error
@@ -42,7 +42,7 @@ review4.freeIfLen clean
 review4.freeSlot clean
 review4.give clean
 review4.install counted
-review4.main clean
+review4.main counted
 review4.okArmSuccess clean
 review4.okBorrowedUse clean
 review4.okDeinitBorrowed clean

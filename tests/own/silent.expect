@@ -1,12 +1,11 @@
 # The silent law (tools/run_own.sh): a function named bad* that is pinned `clean` (nothing left open) must be listed here, with
-# the reason it is not a silent miss. Every other bad* function is a finding, unproven, or pinned `counted`.
+# the reason it is not a silent miss. A linear value handed to memory the checker does not follow is an assumption, which keeps a
+# function from being `clean` (0.17.30), so badLinearInList is `counted`. Every other bad* function is a finding, unproven, or pinned `counted`.
 #
-# badLinearInList: the linear value goes to memory the checker does not follow; the footer counts it as assumed (a transfer).
 # badInitBufferReturn: reads the byte before the list goes; correct.
 # badReplaceOrFree: the fault is an index past the end of an empty slice, not an ownership mistake.
 # badEscapeOut: the escape is reported on the callee `stash`, which stores the pointer to its local.
 # badInstallOrDrop: the call rejects before it writes; the frees are correct.
-review1.badLinearInList
 review2.badInitBufferReturn
 review3.badReplaceOrFree
 review3b.badEscapeOut

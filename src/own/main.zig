@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         const result = try prog.analyze(.{ .pack = pack, .func = f });
-        const verdict: Verdict = if (trusted.contains(name)) .trusted else if (result.errors() != 0) .@"error" else if (result.unsupported()) .unproven else if (result.stats.undecided() != 0) .counted else .clean;
+        const verdict: Verdict = if (trusted.contains(name)) .trusted else if (result.errors() != 0) .@"error" else if (result.unsupported()) .unproven else if (result.stats.open() != 0) .counted else .clean;
         const module = pack.str(file.module);
         var project = false;
         for (opts.project) |m| project = project or std.mem.eql(u8, m, module);
@@ -161,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
     if (also) try out.writeByte('\n');
     if (total.undecided() != 0) {
         try out.writeAll("zv-own: undecided, counted and not reported: ");
-        try printCounts(out, total);
+        try printCounts(out, total, false);
         try out.writeByte('\n');
     }
     if (opts.effects) {
@@ -179,10 +179,10 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// The reasons of a run that are left open, with their counts (the assumptions about code outside the packs are apart).
-fn printCounts(out: *Io.Writer, stats: check.Stats) !void {
+fn printCounts(out: *Io.Writer, stats: check.Stats, with_assumed: bool) !void {
     var first = true;
     for (check.Reason.all) |reason| {
-        if (reason.assumed() or stats.count(reason) == 0) continue;
+        if ((reason.assumed() and !(with_assumed and reason.opens())) or stats.count(reason) == 0) continue;
         if (!first) try out.writeAll(", ");
         first = false;
         try out.print("{d} {s}", .{ stats.count(reason), reason.phrase() });
@@ -196,7 +196,7 @@ fn gate(io: Io, arena: Allocator, out: *Io.Writer, opts: Options, rows: []const 
     var total: usize = 0;
     for (rows) |row| {
         if (!row.project) continue;
-        const n = row.result.stats.undecided();
+        const n = row.result.stats.open();
         const gop = try per.getOrPut(arena, row.name);
         gop.value_ptr.* = (if (gop.found_existing) gop.value_ptr.* else 0) + n;
         total += n;
@@ -270,9 +270,9 @@ fn printRow(out: *Io.Writer, srcs: *sources.Sources, row: Row, all: bool) !void 
     };
     if ((row.verdict == .clean or row.verdict == .trusted) and !all) return;
     try out.print("{s}{s}\n", .{ label, row.name });
-    if (row.result.stats.undecided() != 0) {
+    if (row.result.stats.open() != 0) {
         try out.writeAll("      counted: ");
-        try printCounts(out, row.result.stats);
+        try printCounts(out, row.result.stats, true);
         try out.writeByte('\n');
     }
     for (row.result.diags) |d| {

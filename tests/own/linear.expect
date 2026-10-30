@@ -3,7 +3,7 @@ linear.advCopyViaVar error
 linear.advHiddenInOptional error
 linear.advLoopCarried unproven
 linear.advLoopCarriedLeak unproven
-linear.advStoreThroughPointer clean
+linear.advStoreThroughPointer counted
 linear.advViaPointer error
 linear.badConsumeInLoop error
 linear.badDropParamPair error

@@ -12,5 +12,5 @@ overseer2.dropHolder clean
 overseer2.dropOptOrElse clean
 overseer2.dropOptPtr clean
 overseer2.dropOptUnwrap clean
-overseer2.main clean
+overseer2.main counted
 overseer2.show clean
