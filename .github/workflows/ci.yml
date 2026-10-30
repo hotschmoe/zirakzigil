@@ -26,6 +26,30 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
+      - id: zigzv
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: compiler/.work/zig-src/zig-out/bin/zig-zv*
+          key: zig-zv-${{ runner.os }}-${{ hashFiles('compiler/src/**', 'compiler/hook/**', 'compiler/ZIG_VERSION', 'tools/build_zig_zv.sh', 'tools/zv_hook.zig', 'src/air/schema.zig', 'src/air/builder.zig', 'src/air/json.zig') }}
+      - name: Build zig-zv (the pinned tag plus the patch queue)
+        if: steps.zigzv.outputs.cache-hit != 'true'
+        run: sh tools/build_zig_zv.sh
+      - name: Export every pack from the sources of this commit
+        run: |
+          lib=$(zig env | sed -n 's/^ *\.lib_dir = "\(.*\)",$/\1/p' | sed 's/\\\\/\//g')
+          echo "ZIG_LIB=$lib" >> "$GITHUB_ENV"
+          export ZIG_LIB=$lib
+          sh tools/zvc_packs.sh
+          sh tools/own_packs.sh
+      - name: TEMP fresh packs equal the packs committed before 0.17.24
+        run: |
+          git fetch --quiet --depth=1 origin e7f91a1f599e3978c9d2abd9a3701ac44f6f503c
+          n=0
+          for f in $(git ls-tree -r --name-only e7f91a1f599e3978c9d2abd9a3701ac44f6f503c | grep '\.zvp$'); do
+              git show e7f91a1f599e3978c9d2abd9a3701ac44f6f503c:$f | cmp - $f || echo "DIFF $f"
+              n=$((n + 1))
+          done
+          echo "compared $n packs"
       - name: Matrix (every optimize mode, ghost on and off, freestanding, consumer)
         run: zig build matrix --summary all
       - name: Negative suite
@@ -33,9 +57,9 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       - name: Z3 (pinned release, checked against its digest)
         run: echo "ZV_Z3=$(sh tools/install_z3.sh "$RUNNER_TEMP/z3")" >> "$GITHUB_ENV"
-      - name: Verifier (zvc) against its pinned AIR packs and verdicts
+      - name: Verifier (zvc) on the fresh packs against its pinned verdicts
         run: sh tools/run_zvc.sh
-      - name: Ownership checker (zv-own) against its pinned AIR packs and verdicts
+      - name: Ownership checker (zv-own) on the fresh packs against its pinned verdicts
         run: sh tools/run_own.sh
 
   hook:

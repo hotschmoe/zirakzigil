@@ -4,3 +4,5 @@ zig-out/
 __pycache__/
 *.pyc
 .venv/
+*.zvp
+tests/consumer/own/SOURCES

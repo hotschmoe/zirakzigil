@@ -6,7 +6,7 @@
 tools/zvc_export.sh OUT_DIR FILE.zig...     AIR pack of each file (Debug, ghost on, fixed target)
 zig build zvc                                zig-out/bin/zvc
 zvc --src DIR [--expect FILE] PACK|INDEX_DIR...
-tools/run_zvc.sh                             the suite: pinned packs against pinned verdicts (CI)
+tools/run_zvc.sh                             the suite: packs exported by tools/zvc_packs.sh against pinned verdicts (CI)
 tools/install_z3.sh DEST                     the pinned Z3 release, checked against its digest
 ```
 
