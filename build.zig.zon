@@ -14,6 +14,16 @@
             .hash = "N-V-__8AAOFqawnUwRTmFTGvbVWfHnkM210U7NpSWbywUh1P",
             .lazy = true,
         },
+        .zig_zv_x86_64_windows = .{
+            .url = "https://github.com/hotschmoe/zirakzigil/releases/download/v0.17.28/zig-zv-0.17.0-dd4a44f883c7-x86_64-windows.tar.gz",
+            .hash = "N-V-__8AADvedwGDTuzQHJIFYF6tn5eBpaStpYwTHRng6OSJ",
+            .lazy = true,
+        },
+        .zig_zv_x86_64_linux = .{
+            .url = "https://github.com/hotschmoe/zirakzigil/releases/download/v0.17.28/zig-zv-0.17.0-dd4a44f883c7-x86_64-linux.tar.gz",
+            .hash = "N-V-__8AAANTkAfRFfI53eR6xb-B1bOO07if0gCQZwxm5LXh",
+            .lazy = true,
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "examples", "tests", "compiler", "tools", "LICENSE", "README.md" },
 }
