@@ -418,6 +418,31 @@ pub fn build(b: *std.Build) void {
     // The ownership checker: the same packs, no solver.
     const own = b.addExecutable(.{ .name = "zv-own", .root_module = ownModule(b, b.path("src"), air, target, optimize) });
     b.step("zv-own", "Install the ownership checker").dependOn(&b.addInstallArtifact(own, .{}).step);
+
+    // The differential oracle (tools/oracle): generated programs, run for ground truth, against zv-own. Needs the
+    // patched compiler in ZIG_ZV. -Doracle-seed, -Doracle-count and -Doracle-minimize set the fixed seed and budget; flags after `--` go to the oracle.
+    const oracle = b.addExecutable(.{ .name = "oracle", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/oracle/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    matrix.dependOn(&oracle.step);
+    const oracle_run = b.addRunArtifact(oracle);
+    oracle_run.has_side_effects = true;
+    oracle_run.addArg("run");
+    oracle_run.addArg("--repo");
+    oracle_run.addDirectoryArg(b.path("."));
+    oracle_run.addArg("--own");
+    oracle_run.addArtifactArg(own);
+    oracle_run.addArgs(&.{ "--zig", b.graph.zig_exe, "--out" });
+    oracle_run.addDirectoryArg(b.path("zig-out/oracle"));
+    oracle_run.addArgs(&.{
+        "--seed",     b.fmt("{d}", .{b.option(u64, "oracle-seed", "Seed of `zig build oracle` (default 1)") orelse 1}),
+        "--count",    b.fmt("{d}", .{b.option(u32, "oracle-count", "Programs of `zig build oracle` (default 300)") orelse 300}),
+        "--minimize", b.fmt("{d}", .{b.option(u32, "oracle-minimize", "Silent misses to minimize (default 6)") orelse 6}),
+    });
+    oracle_run.addPassthruArgs();
+    b.step("oracle", "Differential oracle for zv-own: generated programs against Debug ground truth").dependOn(&oracle_run.step);
 }
 
 /// The module `zv-own` is built from; consumers build it from this package's sources with `addOwnershipGate`.
