@@ -114,6 +114,9 @@ pub const Leaf = struct { path: []const u32, descs: []const Desc };
 /// `on_fail`: some path that returns an error writes it too.
 pub const Write = struct { into: Slot, descs: []const Desc, must: bool, on_fail: bool = false, fail_con: ?u64 = null };
 
+/// The `k`th fresh allocation of the callee holds `descs` at `path` below it when the callee returns.
+pub const FreshWrite = struct { fresh: u32, path: []const u32, descs: []const Desc };
+
 /// A fresh allocation of the callee ends with the objects `regions` (an arena it allocated from).
 pub const Fresh = struct { regions: []const Slot, many: bool = false };
 
@@ -141,6 +144,8 @@ pub const Summary = struct {
     /// What the memory below the pointer parameters holds afterwards.
     writes: []const Write = &.{},
     fresh: []const Fresh = &.{},
+    /// What the function stored into the fresh allocations that flow out of it (`n.* = .{ .next = next }` in a constructor).
+    fresh_writes: []const FreshWrite = &.{},
     /// What the function reads or writes through (the memory a pointer it was given leads into, at these slots).
     derefs: []const Slot = &.{},
     /// Bit i: a linear value passed in parameter i is stored into memory the function does not own.
@@ -151,10 +156,13 @@ pub const Summary = struct {
     /// Ends the function made that this summary cannot say: memory a caller sees but no slot names (a global, a value with
     /// no provenance, a soft end of the caller's own memory). A caller counts them at the call.
     outside: Reasons = .empty,
+    /// Bit i: a pointer into what parameter i leads to is stored into a global.
+    exposes: u64 = 0,
 
     pub fn eql(a: Summary, b: Summary) bool {
-        if (a.complete != b.complete or !a.outside.eql(b.outside) or a.clobbers.len != b.clobbers.len or (a.ok_when == null) != (b.ok_when == null) or (a.ok_when != null and a.ok_when.?.len != b.ok_when.?.len) or a.frees != b.frees or a.maybe_frees != b.maybe_frees or a.token_stores != b.token_stores or a.moves != b.moves) return false;
-        if (a.ret.len != b.ret.len or a.kills.len != b.kills.len or a.writes.len != b.writes.len or a.fresh.len != b.fresh.len or a.derefs.len != b.derefs.len) return false;
+        if (a.complete != b.complete or !a.outside.eql(b.outside) or a.clobbers.len != b.clobbers.len or (a.ok_when == null) != (b.ok_when == null) or (a.ok_when != null and a.ok_when.?.len != b.ok_when.?.len) or a.frees != b.frees or a.maybe_frees != b.maybe_frees or a.token_stores != b.token_stores or a.moves != b.moves or a.exposes != b.exposes) return false;
+        if (a.ret.len != b.ret.len or a.kills.len != b.kills.len or a.writes.len != b.writes.len or a.fresh.len != b.fresh.len or a.derefs.len != b.derefs.len or a.fresh_writes.len != b.fresh_writes.len) return false;
+        for (a.fresh_writes, b.fresh_writes) |x, y| if (x.fresh != y.fresh or !std.mem.eql(u32, x.path, y.path) or !eqlDescs(x.descs, y.descs)) return false;
         for (a.derefs, b.derefs) |x, y| if (!x.eql(y)) return false;
         for (a.ret, b.ret) |x, y| if (!std.mem.eql(u32, x.path, y.path) or !eqlDescs(x.descs, y.descs)) return false;
         for (a.kills, b.kills) |x, y| if (!x.eql(y)) return false;
@@ -420,6 +428,9 @@ pub const State = struct {
     freed: Set = .empty,
     /// Parameter values freed on some path that led here.
     freed_some: Set = .empty,
+    /// Identities a pointer to which was stored into a global: the block has a name the run does not follow, so ending it
+    /// leaves a pointer the run cannot see.
+    exposed: Set = .empty,
     /// Identities that no longer exist, and why (the first cause on this path).
     dead: std.AutoArrayHashMapUnmanaged(dom.Id, Event) = .empty,
     /// Allocations and objects that exist now (on some path): a new one of the same site gets another name.
@@ -470,6 +481,7 @@ pub const State = struct {
         out.live = try a.live.merge(arena, b.live);
         out.freed = try a.freed.minus(arena, try a.freed.minus(arena, b.freed));
         out.freed_some = try a.freed_some.merge(arena, b.freed_some);
+        out.exposed = try a.exposed.merge(arena, b.exposed);
         out.ended = try a.ended.merge(arena, b.ended);
         out.alloced = try a.alloced.merge(arena, b.alloced);
         for (b.touched.keys()) |k| try out.touched.put(arena, k, {});
@@ -528,7 +540,7 @@ pub const State = struct {
         if (a.alive != b.alive) return false;
         if (!a.alive) return true;
         if (!a.live.eql(b.live) or !a.ended.eql(b.ended)) return false;
-        if (!a.freed.eql(b.freed) or !a.freed_some.eql(b.freed_some) or !a.alloced.eql(b.alloced) or !a.multi.eql(b.multi)) return false;
+        if (!a.freed.eql(b.freed) or !a.freed_some.eql(b.freed_some) or !a.exposed.eql(b.exposed) or !a.alloced.eql(b.alloced) or !a.multi.eql(b.multi)) return false;
         if (a.caps.count() != b.caps.count()) return false;
         var caps_it = a.caps.iterator();
         while (caps_it.next()) |e| {
@@ -578,6 +590,7 @@ const Snap = struct {
     ret: []const Leaf,
     ret_place: ?Slot,
     writes: []const SnapWrite,
+    fresh_writes: []const SnapFresh,
     /// The function returns an error here: the result carries nothing, and the caller's `try` does not go on.
     failed: bool,
     /// What this path tested on the parameters (null: nothing).
@@ -585,6 +598,10 @@ const Snap = struct {
 };
 
 const SnapWrite = struct { into: Slot, descs: []const Desc };
+const SnapFresh = struct { fresh: u32, path: []const u32, descs: []const Desc };
+
+/// The bits of a heap place's number that say which of a call's fresh allocations it is.
+const fresh_shift = 20;
 
 pub const Run = struct {
     prog: *Program,
@@ -663,6 +680,8 @@ pub const Run = struct {
     settled: std.AutoHashMapUnmanaged(u64, void) = .empty,
     /// The reasons of the ends this run left open that a caller cannot see from the summary.
     escaped: Reasons = .empty,
+    /// Bit i: a pointer into what parameter i leads to went into a global.
+    exposes: u64 = 0,
     quiet: u32 = 0,
     next_arg: u32 = 0,
     cur_loc: schema.LocId = .none,
@@ -726,6 +745,7 @@ pub const Run = struct {
         var summary = try r.merge(arena);
         summary.complete = complete;
         summary.outside = r.escaped;
+        summary.exposes = r.exposes;
         summary.token_stores = r.token_stored;
         return .{ .name = try arena.dupe(u8, r.name), .diags = diags, .stats = r.stats, .summary = summary };
     }
@@ -781,6 +801,24 @@ pub const Run = struct {
         if ((try r.settled.getOrPut(r.arena, base | (1 + @as(u64, @backingInt(reason))))).found_existing) return;
         r.stats.counts.set(reason, r.stats.count(reason) + 1);
         if (site == .end and reason.escapes()) r.escaped.insert(reason);
+    }
+
+    pub fn rootKind(r: *Run, pl: PlaceId) dom.RootKind {
+        var at = pl;
+        while (r.places.rec(at).parent != dom.no_place) at = r.places.rec(at).parent;
+        return r.places.rec(at).kind;
+    }
+
+    /// The blocks `val` leads to are now also named by a global.
+    pub fn expose(r: *Run, st: *State, val: Val) Allocator.Error!void {
+        for (val.ids.ids) |id| {
+            const rec = r.identRec(id);
+            if (rec.kind != .heap and rec.kind != .init) continue;
+            st.exposed = try st.exposed.with(r.arena, id);
+            if (rec.kind == .init) if (r.paramOf(rec.a)) |n| {
+                if (n < 64) r.exposes |= @as(u64, 1) << @intCast(n);
+            };
+        }
     }
 
     /// An end the whole function made that the summary cannot say, which is not at one instruction.
@@ -896,6 +934,12 @@ pub const Run = struct {
         for (st.pending.values()) |*v| if (v.ident == from) {
             v.ident = to;
         };
+        try r.swapValues(st, from, to, keep, moved);
+    }
+
+    /// `swapAll` for the values the instructions computed, not the memory.
+    fn swapValues(r: *Run, st: *State, from: dom.Id, to: dom.Id, keep: bool, moved: bool) Allocator.Error!void {
+        r.pruneOver(st);
         for (r.carriers.items) |i| {
             if (r.stamps[i] == 0) continue;
             const v = if (st.over.get(i)) |ov| (if (ov.stamp == r.stamps[i]) ov.val else r.vals[i]) else r.vals[i];
@@ -935,13 +979,17 @@ pub const Run = struct {
         const gop = try r.tomb_events.getOrPut(r.arena, t);
         if (!gop.found_existing) gop.value_ptr.* = e;
         const marked = try st.dead.getOrPut(r.arena, id);
-        // Already gone at least as surely: every value holds its tombstone already.
+        // Already gone at least as surely. `dead` is the union over the paths that led here, so a value that came from a path
+        // where the block was alive (a loop head joins the entry with the back edge) may still hold the block itself: it
+        // holds its tombstone from now on.
         if (marked.found_existing and (!marked.value_ptr.soft or unsure)) {
             const old_says = !marked.value_ptr.soft or marked.value_ptr.open;
             if (old_says and !soft) {
                 marked.value_ptr.when = try unite(r.arena, marked.value_ptr.when, e.when);
                 marked.value_ptr.lost = marked.value_ptr.lost or e.lost;
             }
+            const was_soft = marked.value_ptr.soft;
+            try r.swapValues(st, id, try r.tomb(id, was_soft), was_soft, false);
             return;
         }
         marked.value_ptr.* = e;
@@ -1468,10 +1516,10 @@ pub const Run = struct {
     }
 
     /// A read or a write through `val`: the caller must have what it leads into.
-    fn sliceParam(r: *Run, pl: PlaceId) bool {
+    fn pointerParam(r: *Run, pl: PlaceId) bool {
         const n = r.paramOf(pl) orelse return false;
         const ty = r.pack.t.params[r.func.params.off + n].ty;
-        return r.ty.kind(ty) == .pointer and r.ty.rec(ty).flags.size != .one;
+        return r.ty.kind(r.ty.payload(ty)) == .pointer;
     }
 
     fn noteDeref(r: *Run, val: Val, what: []const u8) Allocator.Error!void {
@@ -1480,8 +1528,9 @@ pub const Run = struct {
         for (val.ids.ids) |id| {
             const rec = r.identRec(id);
             if (rec.kind != .init) continue;
-            // A slice passed by value is the block itself: reading through it reads the block the caller gave.
-            if (rec.b == 0 and r.places.rec(rec.a).parent == dom.no_place and !r.sliceParam(rec.a)) continue;
+            // A pointer or slice passed by value is the block itself: reading through it reads the block the caller gave. A
+            // struct passed by value is not memory: reading its fields reads nothing the caller can free.
+            if (rec.b == 0 and r.places.rec(rec.a).parent == dom.no_place and !r.pointerParam(rec.a)) continue;
             const slot = (try r.slotOf(id)) orelse continue;
             if (slot.kind == .view) continue;
             var have = false;
@@ -1681,6 +1730,7 @@ pub const Run = struct {
             // Poison is not a fresh object: what ended stays ended.
             const before = r.objAt(st, pl);
             try r.writeVal(st, pl, written, val_ty);
+            if (r.rootKind(pl) == .global) try r.expose(st, val);
             if (undef) {
                 var k: usize = 0;
                 while (k < st.mem.count()) {
@@ -1884,6 +1934,8 @@ pub const Run = struct {
         // is not decided.
         const open = event.soft or event.open or (st.multi.has(id) and !event.exact);
         try r.settle(inst, .end, if (open) .{ .counted = .summarized } else .applied);
+        // A global still names the block: a read of the global after this is a read of freed memory the run cannot see.
+        if (st.exposed.has(id)) try r.settle(inst, .end, .{ .counted = .global });
         try r.kill(st, id, event);
     }
 
@@ -1967,6 +2019,7 @@ pub const Run = struct {
         var writes: std.ArrayList(Write) = .empty;
         var counts: std.ArrayList(usize) = .empty;
         var goes_counts: std.ArrayList(usize) = .empty;
+        var fws: std.ArrayList(SnapFresh) = .empty;
         var leaves: std.ArrayList(Leaf) = .empty;
         var frees: u64 = ~@as(u64, 0);
         var some_frees: u64 = 0;
@@ -2003,6 +2056,15 @@ pub const Run = struct {
             if (n == 0) {
                 place = s.ret_place;
             } else if ((place == null) != (s.ret_place == null) or (place != null and !place.?.eql(s.ret_place.?))) place_ok = false;
+            for (s.fresh_writes) |w| {
+                var at: ?usize = null;
+                for (fws.items, 0..) |x, i| if (x.fresh == w.fresh and std.mem.eql(u32, x.path, w.path)) {
+                    at = i;
+                };
+                if (at) |i| {
+                    fws.items[i].descs = try mergeDescs(arena, fws.items[i].descs, w.descs);
+                } else try fws.append(arena, .{ .fresh = w.fresh, .path = try arena.dupe(u32, w.path), .descs = try dupeDescs(arena, w.descs) });
+            }
             for (s.writes) |w| {
                 var at: ?usize = null;
                 for (writes.items, 0..) |x, i| if (x.into.eql(w.into)) {
@@ -2053,6 +2115,22 @@ pub const Run = struct {
         for (out.writes) |w| {
             for (w.descs) |*d| count = renumber(d, used, count);
         }
+        // What was stored into an allocation that flows out; what it holds may bring more allocations out.
+        var kept: std.ArrayList(FreshWrite) = .empty;
+        const taken = try arena.alloc(bool, fws.items.len);
+        @memset(taken, false);
+        var again = true;
+        while (again) {
+            again = false;
+            for (fws.items, taken) |w, *done| {
+                if (done.* or used[w.fresh] == std.math.maxInt(u32)) continue;
+                done.* = true;
+                again = true;
+                for (w.descs) |*d| count = renumber(d, used, count);
+                try kept.append(arena, .{ .fresh = used[w.fresh], .path = w.path, .descs = w.descs });
+            }
+        }
+        out.fresh_writes = kept.items;
         const fresh_list = try arena.alloc(Fresh, count);
         for (used, r.fresh_ids.items, many) |new, id, is_many| {
             if (new == std.math.maxInt(u32)) continue;
@@ -2062,6 +2140,8 @@ pub const Run = struct {
         }
         for (out.ret) |l| std.mem.sort(Desc, @constCast(l.descs), {}, lessDesc);
         for (out.writes) |w| std.mem.sort(Desc, @constCast(w.descs), {}, lessDesc);
+        for (out.fresh_writes) |w| std.mem.sort(Desc, @constCast(w.descs), {}, lessDesc);
+        std.mem.sort(FreshWrite, @constCast(out.fresh_writes), {}, lessFreshWrite);
         out.frees = frees;
         out.maybe_frees = some_frees & ~frees;
         out.moves = moves;
@@ -2139,6 +2219,16 @@ pub const Run = struct {
         if (a.param != b.param) return a.param < b.param;
         if (a.kind != b.kind) return @backingInt(a.kind) < @backingInt(b.kind);
         return std.mem.order(u32, a.path, b.path) == .lt;
+    }
+
+    fn lessFreshWrite(_: void, a: FreshWrite, b: FreshWrite) bool {
+        if (a.fresh != b.fresh) return a.fresh < b.fresh;
+        return std.mem.order(u32, a.path, b.path) == .lt;
+    }
+
+    /// The place that the `k`th fresh allocation of the call at `inst_id` points to.
+    pub fn freshPlace(r: *Run, inst_id: u32, k: u32) Allocator.Error!PlaceId {
+        return r.places.root(r.arena, .heap, inst_id | (k << fresh_shift));
     }
 
     fn lessWrite(_: void, a: Write, b: Write) bool {
@@ -2395,7 +2485,27 @@ pub const Run = struct {
             const into = (try r.slotOfPlace(key, .content)) orelse continue;
             try writes.append(r.arena, .{ .into = into, .descs = try r.descsOf(v) });
         }
-        try r.snaps.put(r.arena, inst.id, .{ .kills = kills.items, .frees = frees, .some_frees = some_frees, .moves = moves, .ret = leaves.items, .ret_place = ret_place, .writes = writes.items, .failed = r.returnsError(inst), .when = try r.guardOf(st, &.{}) });
+        // What the function stored into the allocations it hands out.
+        var fresh_writes: std.ArrayList(SnapFresh) = .empty;
+        for (st.mem.keys(), st.mem.values()) |key, v| {
+            var root = key;
+            while (r.places.rec(root).parent != dom.no_place) root = r.places.rec(root).parent;
+            const root_rec = r.places.rec(root);
+            if (root_rec.kind != .heap) continue;
+            const id = try r.ident(.heap, root_rec.n & ((1 << fresh_shift) - 1), (root_rec.n >> fresh_shift) * 2);
+            const k: u32 = for (r.fresh_ids.items, 0..) |x, i| {
+                if (x == id) break @intCast(i);
+            } else continue;
+            const path = try r.places.path(r.arena, key);
+            const inside = for (path) |s| {
+                if (s == dom.obj_step or s == dom.len_step) break false;
+            } else true;
+            if (!inside) continue;
+            const descs = try r.descsOf(v);
+            if (descs.len == 0) continue;
+            try fresh_writes.append(r.arena, .{ .fresh = k, .path = path, .descs = descs });
+        }
+        try r.snaps.put(r.arena, inst.id, .{ .kills = kills.items, .frees = frees, .some_frees = some_frees, .moves = moves, .ret = leaves.items, .ret_place = ret_place, .writes = writes.items, .fresh_writes = fresh_writes.items, .failed = r.returnsError(inst), .when = try r.guardOf(st, &.{}) });
     }
 
     fn ret(r: *Run, inst: *const Inst, st: *State, val: Val) Error!void {

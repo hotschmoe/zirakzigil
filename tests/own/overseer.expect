@@ -20,10 +20,10 @@ overseer.dropOpt clean
 overseer.fillCache clean
 overseer.inspect clean
 overseer.inspectPtr clean
-overseer.main clean
+overseer.main counted
 overseer.makeThenDrop error
 overseer.okAnyopaque clean
 overseer.okGlobalRefill counted
-overseer.okStdEqlBefore clean
+overseer.okStdEqlBefore counted
 overseer.readCache clean
 overseer.show clean

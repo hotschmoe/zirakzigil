@@ -1,6 +1,6 @@
 # Correct: the entry popped in an iteration is not the one the `defer` of the iteration before freed.
-fp_loops.Uri.Context.eql clean
-fp_loops.Uri.Context.hash clean
+fp_loops.Uri.Context.eql counted
+fp_loops.Uri.Context.hash counted
 fp_loops.Uri.deinit clean
 fp_loops.drain counted
 fp_loops.drainStack counted

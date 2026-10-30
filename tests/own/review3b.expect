@@ -10,11 +10,11 @@ review3b.badSavedElem counted
 review3b.diagAppend error
 review3b.diagEnsure error
 review3b.diagSoft counted
-review3b.dispatch clean
+review3b.dispatch counted
 review3b.dropListFirst counted
 review3b.freeOther counted
 review3b.freeOtherFirst counted
-review3b.main clean
+review3b.main counted
 review3b.show clean
-review3b.smash clean
+review3b.smash counted
 review3b.stash error

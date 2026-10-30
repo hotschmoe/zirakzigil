@@ -1,0 +1,26 @@
+# Silent misses found by the differential oracle (docs/reviews/oracle-1.md) and the node chains lost in 0.17.15, with their controls.
+oracle1.badDestroyThenReadNext error
+oracle1.badDestroyWalk error
+oracle1.badDestroyWalkChecked error
+oracle1.badFreeSubslice error
+oracle1.badFreeTail error
+oracle1.badIndirectFree counted
+oracle1.badStashFree counted
+oracle1.badStashFreeInline error
+oracle1.badWalkThenDestroy counted
+oracle1.consume clean
+oracle1.mk clean
+oracle1.mkNode clean
+oracle1.nextOf clean
+oracle1.nextOfChecked clean
+oracle1.okDestroyOrder clean
+oracle1.okDestroyWalk counted
+oracle1.okFreePrefix clean
+oracle1.okIndirectNoPointers counted
+oracle1.okOutsideCall counted
+oracle1.okStashRead counted
+oracle1.okViaPointer counted
+oracle1.plus clean
+oracle1.rd clean
+oracle1.rdn clean
+oracle1.stash clean
