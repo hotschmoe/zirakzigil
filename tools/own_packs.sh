@@ -21,7 +21,7 @@ for out in tests/own tests/own/std; do
     sh tools/zvc_export.sh $out tests/own/real.zig
     sh tools/zvc_export.sh $out tests/own/switchloop.zig
     sh tools/zvc_export.sh $out tests/own/tokens.zig
-    for f in fp_zls fp_zls2 fp_zls3 fp_zls4 fp_zls5 fp_zls6 fp_zls7 fp_idioms fp_loops fp_tags fp_tags2 review3 review3b review4; do
+    for f in fp_zls fp_zls2 fp_zls3 fp_zls4 fp_zls5 fp_zls6 fp_zls7 fp_idioms fp_loops fp_tags fp_tags2 review3 review3b review4 overseer overseer2; do
         ZVC_DEEP=1 sh tools/zvc_export.sh $out tests/own/$f.zig
     done
     ZVC_DEEP=1 sh tools/zvc_export.sh $out tests/own/realish.zig

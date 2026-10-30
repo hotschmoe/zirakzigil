@@ -6,24 +6,74 @@
 tools/zvc_export.sh OUT_DIR FILE.zig [--dep NAME=FILE.zig]...   AIR pack of a file (Debug, fixed target)
 zig build zv-own                                                 zig-out/bin/zv-own
 zv-own [--src DIR] [--module NAME=DIR] [--only PATH] [--files PREFIX] [--project NAME] [--expect FILE] [--pins FILE]
-       [--max-unproven N] [--max-trusted N] [--summary] [--effects] [--dump] PACK|INDEX_DIR...
+       [--max-unproven N] [--max-trusted N] [--max-undecided N] [--baseline FILE] [--write-baseline FILE]
+       [--summary] [--effects] [--dump] PACK|INDEX_DIR...
 ZVC_DEEP=1 tools/zvc_export.sh OUT_DIR FILE.zig [--only PATH]...   a whole project: nested containers and imported files too
 ZV_AIR_STD=1 tools/zvc_export.sh OUT_DIR FILE.zig                  also the std functions the project reaches (the effects of std's containers are then read from their bodies)
 zv-air slice PACK OUT.zvp                                         what `ZV_AIR_STD` does to a pack, on any pack: the project and what it reaches in std
-tools/run_own.sh                                                 the suite: pinned packs against pinned verdicts (CI)
+tools/run_own.sh                                                 the suite: packs from tools/own_packs.sh against pinned verdicts (CI)
 zirakzigil.addOwnershipGate(b, .{ .packs = ..., .pins = ... })   `zig build own` in a consumer project
 ```
 
-A function gets one of three verdicts: `clean` (the checker found nothing and nothing was outside what it models), `FINDINGS` (at least one mistake, each with `file:line:col`, the source line, notes that point at the related places and the branches taken to get there) or `UNPROVEN` (the function uses a construct outside the supported fragment, with the position and reason; it is neither accepted nor refuted). Exit status is 0 only when every function is clean, or, with `--expect`, when every verdict equals the pinned one.
+A function gets one of four verdicts: `clean` (no finding, and every end and every use the run met was decided: nothing is left open), `COUNTED` (no finding, but at least one end or use is counted as undecided, with the reason printed under the function), `FINDINGS` (at least one mistake, each with `file:line:col`, the source line, notes that point at the related places and the branches taken to get there) or `UNPROVEN` (the function uses a construct outside the supported fragment, with the position and reason; it is neither accepted nor refuted). Exit status is 0 when no function has a finding and none is unproven, or, with `--expect`, when every verdict equals the pinned one (a pinned `counted` also accepts `clean`: a pack with std's bodies may decide what the model leaves open; a pinned `clean` accepts nothing else). `--max-undecided N` and `--baseline FILE` fail the run when it leaves more undecided than allowed, in all and per function (below).
 
 ## What a verdict means, and what it does not
 
-`clean` means: on every path the checker followed, every `zv.Linear` value is consumed or handed on exactly once, and (from M2) no memory is used after the operation that ended it. It is relative to a model with stated limits, listed here and printed at the end of every run:
+`clean` is a statement about the constructs the checker validated, not about the program. It says: on every path the checker followed, every `zv.Linear` value is consumed or handed on exactly once, no memory the run follows is used after the operation that ended it, and no end the run met was left undecided. Whatever is outside that sentence is on a list: the assumptions below (printed with every run), the counted classes, and the known silent classes at the end of this section. A reader of a `clean` should read it together with the footer of the same run.
 
-- Calls to functions that are not in the packs, or whose body the checker could not read to the end, and that it has no model of, are assumed to neither end identities nor keep their arguments. `zv-own: assumed, not checked: N calls ...` counts them.
+### The invariant: no event without an outcome (0.17.22)
+
+Four review rounds and an overseer review found silent false negatives, each in a place where a rule dropped an event before anything counted it: a free of a global, a by-value optional freed on one branch, a kill removed by a stale constant, an element end skipped. The footer counted what rules remembered to count, so it could only report what someone had tallied. The structure that replaced it:
+
+- **Events.** An *end* is anything that stops memory from being valid or may have: a `free`, `destroy`, `realloc`, `deinit`, a container growth or shrink, an arena reset, a `toOwnedSlice`, and every kill, free, may-free, move or unexpressible end in a callee's summary applied at a call. A *use* is a read, write or pass of memory the run follows (an identity it knows: an allocation, the storage behind a parameter, an object). Memory the run has no identity for is not "followed"; ends of it are events anyway.
+- **Outcomes.** Every event has an outcome: `reported` (a finding was raised), `clean` (decided without a finding, for one of a closed list of named reasons: `applied`, `empty`, `gated`, `no_realloc`, `not_heap`, `deferred`, `assumed_round`, `query`), or `counted` (left open, for one of a closed list of reasons, below). `src/own/outcome.zig` has the types.
+- **One writer.** Every function that decides an event returns an `Outcome`, and `Run.settle` is the only code that writes one down (`Run.stats` has no other writer). A return type with no empty case, and an unused result not compiling, are what stop a rule from dropping an event: an early `continue` becomes `return .{ .clean = .gated }` and says why. The reasons are visible: `--effects` prints how many events each clean reason decided.
+- **Backstop.** A call whose callee has an end (an allocator primitive, a container method that invalidates, a summary with kills, frees or may-frees) and whose rules settled none counts `dropped` (`ends whose rule decided nothing`). The suite pins it at zero; it exists so that a new rule that forgets the invariant is counted, not clean.
+- **What the model cannot say.** A request to end memory is classified by where it points: a global (a place of root kind `global`) is counted `global` whatever was ended, because what a global holds is only partly in the run; a value with no provenance (no identity, no place: it came from memory or a call the run does not follow) is counted `untracked`; an identity the request skipped because the summary could not express it is counted `unexpressed`. A function's summary carries the reasons of the ends it made that a caller cannot see (`Summary.outside`: global, untracked, unexpressed, blind), and the caller counts them at the call: a callee that does `gpa.free(cache)` of a global has no slot to kill and used to give `0 of 0 ends`; it is now one end of a value with no provenance in the callee and in each caller.
+- **May-free.** A free of a by-value parameter on one branch of a join (`if (o) |b| gpa.free(b)`) is a may-free: the state keeps the parameters freed on some path as well as on all of them (`freed_some`), where the intersection used to leave nothing and the summary said nothing.
+- **Verdicts and the gate.** A function with something counted (other than an assumption) is `COUNTED`, not `clean`. `--max-undecided N` fails when the project's functions leave more than N events undecided; `--baseline FILE` (lines `NAME N`, written by `--write-baseline FILE`) fails when a function leaves more than its line says, and more than 0 when it has none. In a build: `zirakzigil.addOwnershipGate(b, .{ ..., .max_undecided = 0, .baseline = "own/undecided.baseline" })`. A count that goes down is reported as a reason to write the baseline again; it never fails.
+
+### The classes that are counted
+
+| Counted as | What it is | Kind |
+| --- | --- | --- |
+| `unknown_call` | a call to a function outside the packs, or whose body could not be read, with a pointer or slice among its arguments or result: assumed to end nothing and keep nothing | assumed |
+| `transfer` | a linear value handed to memory the function does not own; the checker stops following it | assumed |
+| `unmodelled` | a container method with no model and no body: taken to invalidate | assumed |
+| `alias_params` | a function that ends or changes memory through two or more pointer parameters of one type: assumed not to overlap (a call that passes one object twice is checked) | assumed |
+| `blind` | an operation on memory it cannot name a place for (a pointer a callee handed out): its effect is not applied | undecided |
+| `dynamic_len` | `resize`/`remap` by a length it cannot show to be non-zero: assumed not to free | undecided |
+| `lent` | a pointer to a local handed to a call that returns a new block or that the summary does not trace: what the result keeps of it is not followed | undecided |
+| `maybe_alias` | a use or a free of something ended on some of the things a pointer may lead to | undecided |
+| `maybe_stale` | a pointer into storage that an operation reallocates only if there is no room, and the room is not known | undecided |
+| `summarized` | an end of an identity that stands for several allocations, one of many, a value that may be one of several, a may-free, a growth that depends on room | undecided |
+| `global` | an end or a growth of a global | undecided |
+| `untracked` | an end of a value with no provenance | undecided |
+| `unexpressed` | an end of memory the caller sees that the function's summary cannot say (a soft end of a parameter's content, a part of a by-value parameter whose identity is merged with another) | undecided |
+| `dropped` | the backstop above | undecided |
+
+### The classes that are silent (a `clean` that is wrong), as of 0.17.22
+
+| Class | Why it is silent | Found | Status |
+| --- | --- | --- | --- |
+| a call outside the packs with no pointer or slice among its arguments and result | `unknown_call` is only counted when a pointer is involved; such a call can end a global | overseer, 0.17.22 | open: assumed, not counted |
+| a kill removed because a constant the run holds says the callee's condition is false (`gated`) | the constant may be stale; the decision is a named reason, counted in `--effects`, but a wrong constant is a wrong `clean` | review 4 | open: the pair `{a, b}` and "a constant that is not known to be current never deletes a kill" are the guards |
+| a use of memory with no identity (a global, a pointer from a call the run does not follow) | not a use "of memory it follows"; the end that would make it a bug is counted when the run sees it | overseer, 0.17.22 | by design, so that `decided: N of N uses` reads as "of the followed ones" |
+| what is stored inside a std container, or behind a map slot | an element is one of many | review 2 | by design |
+| heap leaks | the debug allocator's job | design | by design |
+| a free through a global, a growth of a global container | no end was recorded | overseer, 0.17.22 | fixed: counted `global`, `untracked`, and in callers through `Summary.outside` |
+| a by-value optional (or a part of one) freed on its payload branch in a callee | the join intersected the freed parameters and the summary said nothing | overseer, 0.17.22 | fixed: may-free, counted `summarized` at the caller |
+| a soft end of a parameter's content dropped from a summary | skipped without a trace | 0.17.22 | fixed: `unexpressed` |
+| a `free`-like call with no argument to free | the rule fell through | 0.17.22 | fixed: the backstop counts `dropped` |
+
+A differential oracle (generated programs, Debug run against `zv-own`) is the intended measure of the silent rate by construct; this table is the list of what the reviews have found, not a measure.
+
+### What the assumptions are
+
+- Calls to functions that are not in the packs, or whose body the checker could not read to the end, and that it has no model of, are assumed to neither end identities nor keep their arguments. `zv-own: assumed, not checked: N calls ...` counts those with a pointer or slice among their arguments or result.
 - A linear value handed to memory the function does not own (`out.* = token`, a store through a pointer parameter, an `append` or `put` into a container) is a transfer: the function is no longer responsible for it, and the checker stops following it. The count is printed too.
-- More assumptions have their own count, printed on a second line when it is not zero: a container method that is neither in the packs nor in the table (taken to invalidate), an operation on memory the checker cannot name a place for (a pointer a callee handed out; its effects are not applied), and a `resize` or `remap` by a length it cannot show to be non-zero (taken not to free).
-- What the checker cannot decide is counted on a third line and never reported: a use of a pointer that may lead into freed memory without the checker being able to tell which it leads into, a pointer that is stale only if a container had no room (a reserve of a size it cannot read; a heap that sifts), an end that may not have happened to the block (a site that stands for several allocations, an element of many, a value that may be one of several, a growth that depends on room), and the functions that end or change memory through two or more pointer parameters (assumed not to overlap).
+- More assumptions have their own count, printed on a second line when it is not zero: a container method that is neither in the packs nor in the table (taken to invalidate), and the functions that end or change memory through two or more pointer parameters (assumed not to overlap).
+- What the checker cannot decide is counted on a third line and never reported: the undecided classes of the table above.
 - Joins are path-insensitive in what they remember of conditions: facts from two paths are united, so a finding means "on some path". Two branches on the same condition are not correlated, except the test of an optional or an error union, which refines what the place it was read from holds.
 - The footer counts the project's functions (`--project`, by default the modules `target` and `root`) apart from the functions of its dependencies, which are checked, printed and counted on a line of their own.
 
@@ -134,7 +184,7 @@ The caller reads what the result and the writes hold as they are **before** it a
 - The writes of a function are certain if they happen on every path that goes on after a `try`: the paths that return an error (a `wrap_errunion_err` or an error constant) do not make them uncertain, except for a block the function allocates, which the failing paths do not make.
 - A call ends the same memory through two parameters only if another parameter of the call ended it.
 
-### What is not followed (printed at the end of every run, never silent)
+### What is not followed (counted at the end of every run; the classes that still are not are listed under "What a verdict means")
 
 - Calls to functions outside the packs with no entry in the table are assumed to neither end identities nor keep their arguments. The count is printed.
 - What is stored inside a std container is not followed (an element is one of many); a linear value appended to a list is counted as handed to memory the checker does not follow.
@@ -270,7 +320,7 @@ Cost: `zv-own` checked the 986 production functions of zmoltcp and its seeded ca
 
 What the bodies show, with the identity model of M2: `append`, `ensureTotalCapacity`, `put`, `getOrPut`, `insert`, `shrinkAndFree`, `toOwnedSlice` and `deinit` replace or end the storage identities of the container because their bodies do; `pop`, `shrinkRetainingCapacity`, `clearRetainingCapacity`, `lockPointers` and every `AssumeCapacity` and `Bounded` method do not; `toOwnedSlice` of a `MultiArrayList` moves the buffer to its result and leaves the container empty, which is exactly how its body reads. `src/own/spec.zig` keeps the allocator primitives of std, the pool types of zv and `MemoryPool`, and the documented semantics a body cannot show: `deinit` ends the object, `orderedRemove` and `insert` shift, a heap sifts in a way that depends on the data, `ensureTotalCapacity(n)` makes room for a count, the `AssumeCapacity` and `Bounded` methods never reallocate, and which methods hand out pointers into storage (the hash maps' header, metadata, keys and values are one block reached by pointer arithmetic). For a pack without std bodies the table holds the same facts for each method of `ArrayList`, `MultiArrayList`, `HashMap`, `ArrayHashMap`, `Deque`, `PriorityQueue` and `Io.Writer.Allocating`; a method in neither is taken to invalidate and counted (`container methods with no model`). Where a body derives less than the table says, the table is kept (`ends`), so the pack with the std bodies is a superset of the table; `tools/run_own.sh` runs every suite on both packs against the same verdicts.
 
-The probe pack is 181 KB (project only), 842 KB (project and the std it reaches) or 10.8 MB (all of std). The pinned packs of `tests/own` are exported twice (`tests/own/std/`).
+The probe pack is 181 KB (project only), 842 KB (project and the std it reaches) or 10.8 MB (all of std). The packs of `tests/own` are exported twice (`tests/own/std/`).
 
 **What is still the table's.** The first reallocation of an empty container, and any growth policy; the hash maps' result aliasing; element ownership inside containers; a `resize` by a length that is not a constant does not free. Each is in the assumptions above or in the corpus as a `gap*`.
 
@@ -327,6 +377,42 @@ A union with known variants is stored and read one place per variant (`union_ini
 ### Review 4 (0.17.20)
 
 [reviews/own-4.md](reviews/own-4.md). The rule of the repair: a constant that might be stale never suppresses a kill. The corpus numbers of the table in "Measurements" (225 seeded, 211 found) are the seeded set of the first two rounds; the programs of the reviews 3 and 4 and the tag reductions are pinned apart (`review3.zig`, `review3b.zig`, `review4.zig`, `fp_tags*.zig`), and are not in those figures.
+
+## Overseer review (0.17.22)
+
+An independent review of 0.17.21 wrote two files of programs (17 and 8 entry points) avoiding the mechanisms of the four earlier rounds and found seven that fault in Debug while `zv-own` said `clean` with a fully decided footer, in two ordinary classes. All of them are pinned verbatim (`tests/own/overseer.zig`, `overseer2.zig`, exported with and without std, verdicts in the `.expect` files). The repair was structural (see "The invariant: no event without an outcome"), not a new precision rule.
+
+| Program | Debug | 0.17.21 | 0.17.22 |
+| --- | --- | --- | --- |
+| `badGlobalDrop`, `badGlobalDropCallee` (`gpa.free(cache)` of a global in a callee) | segfault | clean, `0 of 0 ends` | `COUNTED`: the callee `dropCache` counts an end of a value with no provenance, and so does each caller through `Summary.outside` |
+| `badGlobalStructDeinit` (`state.deinit(gpa)` of a global struct) | segfault | clean | `COUNTED`: end of a global |
+| `badGlobalListGrow`, `badGlobalListDeinit` (a global `ArrayList`, `items` kept across a growth or `deinit`) | segfault | clean (std bodies too) | `COUNTED`: growth and end of a global |
+| `badOptionalCallee`, `badOptionalPtrCallee` (`if (o) \|b\| gpa.free(b)` with `?[]u8`, `?*Node`) | segfault | clean, `frees=0`, no count | `COUNTED`: a may-free in the summary; the caller's later read is a pointer stale only if the callee freed it |
+| `badOptionalOrelse` | segfault | clean, counted | unchanged: `COUNTED` |
+| `ctrlOptionalUnwrap`, `ctrlOptionalThroughPtr`, `badOptionalFieldByValue`, `badStdEql`, `badStdIndexOf`, `badBytesAsSlice`, `badMemcpySrc`, `badAnyopaque`, `badComptimeFn`, `badByValueDeref`, `badByPtrDeref`, `badReturnedGone`, `badCopyDrop`, `ctrlUseAfterFree` | segfault | FINDINGS | unchanged: FINDINGS |
+
+`okGlobalRefill` (a global refilled after a free) is now `COUNTED` too: the checker does not follow a global, and says so. The cost is that every function that touches a global container is open; the baseline file is how a project ratchets that down.
+
+`tools/run_own.sh` pins each of the seven with the reason the footer must give, runs the gate flags against a baseline made from the run, and fails if any run in the suite counts `dropped`.
+
+Not done, on purpose: following a global as a place of the run (a lazily created identity for the storage behind it, strong updates, a clobber at every call that may write it, a summary slot that names it). That is a precision rule, it would turn the global cases into findings, and it would add a class of false positives for every call the run cannot read; this round counts instead. The cases are pinned as `counted` so that the day a global is followed they change to findings and the pin says so.
+
+### What it cost (measured on the packs of the five projects and zmoltcp, 0.17.21 against 0.17.22)
+
+No finding appeared or went away: the project findings are the same in every pack. What changed is how much is left open. The ends that used to vanish (a free of an element of a container, of a global, of a value from a call the run does not follow) are events now, and a callee's `blind` ends reach its callers. Packs with std's bodies (`ZV_AIR_STD`); the project's own functions; `decided` is ends decided of ends met.
+
+| Project (pack) | findings | clean in 0.17.21 | clean now | COUNTED now | ends decided, 0.17.21 | ends decided, now | largest additions |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| zls | 3 -> 3 | 1046 | 621 | 425 | 1637 of 2262 (72%) | 1172 of 2995 (39%) | 626 ends of a value with no provenance, 1315 operations on memory it cannot name (143 before: callers now count a callee's) |
+| ziggy lib | 0 -> 0 | 98 | 83 | 15 | 344 of 584 (58%) | 332 of 687 (48%) | |
+| ziggy cli | 1 -> 1 | 65 | 48 | 17 | 63 of 67 (94%) | 40 of 102 (39%) | 38 ends of a value with no provenance |
+| libvaxis (force) | 6 -> 6 | 503 | 442 | 61 | 236 of 354 (66%) | 215 of 443 (48%) | 34 no provenance, 2 global |
+| libvaxis (capi) | 5 -> 5 | 711 | 589 | 122 | 1188 of 1294 (91%) | 1041 of 1383 (75%) | 164 no provenance |
+| webzocket (tests) | 2 -> 2 | 321 | 236 | 85 | 348 of 494 (70%) | 194 of 620 (31%) | 179 no provenance, 38 global, 26 unexpressed |
+| rich_zig (tests) | 0 -> 0 | 1340 | 1044 | 296 | 2483 of 2721 (91%) | 2397 of 3083 (77%) | 380 no provenance |
+| zmoltcp (986 functions) | 0 -> 0 | 986 | 986 | 0 | 6 of 6 | 6 of 6 | none: it has no allocator and no global memory |
+
+Reading: the "no provenance" ends are almost all the idiom `for (list.items) |e| allocator.free(e.field)`: an element of a container is one of many and is not followed, so a double free of an element (freed in the loop, freed again by a `deinit` that walks the same list) was invisible and is now counted. The project functions that fall from `clean` to `COUNTED` are the ones that free or grow what the run does not follow; a project ratchets them with `--baseline`. No rule was added to win precision back. `dropped` is zero in every pack. Time: about 25% more on zls under a loaded machine (2m12s to 2m45s, nostd pack, both runs sharing the CPU with other jobs).
 
 ## Tokens (0.17.19)
 
