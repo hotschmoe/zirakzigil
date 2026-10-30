@@ -30,7 +30,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: compiler/.work/zig-src/zig-out/bin/zig-zv*
-          key: zig-zv-${{ runner.os }}-${{ hashFiles('compiler/src/**', 'compiler/hook/**', 'compiler/ZIG_VERSION', 'tools/build_zig_zv.sh', 'tools/zv_hook.zig', 'src/air/schema.zig', 'src/air/builder.zig', 'src/air/json.zig') }}
+          key: zig-zv-${{ runner.os }}-${{ hashFiles('compiler/src/**', 'compiler/hook/**', 'compiler/ZIG_VERSION', 'tools/build_zig_zv.sh', 'tools/zv_hook.zig', 'src/air/schema.zig', 'src/air/builder.zig', 'src/air/json.zig', 'src/air/names.zig') }}
       - name: Build zig-zv (the pinned tag plus the patch queue)
         if: steps.zigzv.outputs.cache-hit != 'true'
         run: sh tools/build_zig_zv.sh
