@@ -1,5 +1,5 @@
 //! What a consumer checks with `zig build own`: a permit that must be spent exactly once.
-//! The pack next to it is the export of this file (tools/own_repin.sh); `own/SOURCES` pins the source.
+//! The pack next to it is the export of this file (tools/own_packs.sh); `own/SOURCES` pins the source.
 
 const zv = @import("zv");
 
