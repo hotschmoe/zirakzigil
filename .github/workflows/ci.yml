@@ -52,7 +52,7 @@ jobs:
         run: sh tools/run_zvc.sh
       - name: Ownership checker (zv-own) on the fresh packs against its pinned verdicts
         run: sh tools/run_own.sh
-      - name: Consumer flow (zig build verify in a fresh project: prebuilt zig-zv fetched and checksummed, Z3 fetched, cold, warm, edit)
+      - name: Consumer flow (fresh project, prebuilt zig-zv and Z3 fetched and checksummed, cold, warm, edit)
         run: sh tools/consumer_flow.sh "$RUNNER_TEMP/flow"
 
   hook:
