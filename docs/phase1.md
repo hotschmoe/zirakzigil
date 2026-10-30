@@ -108,7 +108,7 @@ Controls: `ZV_AIR_OUT=DIR` turns the export on, `ZV_AIR_STD=1` includes std and 
 
 ## Packs are exported in CI, never committed
 
-The packs of the suites (`tests/zvc`, `tests/own`, `tests/consumer/own`) are not in the repository. `tools/zvc_packs.sh` and `tools/own_packs.sh` export them from the sources in the tree; CI does that on every run with a zig-zv built from the pinned tag and `compiler/` (cached by the hash of the tag, the patch queue, the hook rules and the schema files it is built from), so a pack cannot be stale and a change of source or of the exporter shows in the verdicts. This rests on the exporter being deterministic: the 73 packs exported on the Windows and the Linux CI runners were byte-identical to each other and to the packs committed before 0.17.24 (a local Windows export and a WSL export agreed as well). `tools/check.sh` does the same locally.
+The packs of the suites (`tests/zvc`, `tests/own`) are not in the repository. `tools/zvc_packs.sh` and `tools/own_packs.sh` export them from the sources in the tree; CI does that on every run with a zig-zv built from the pinned tag and `compiler/` (cached by the hash of the tag, the patch queue, the hook rules and the schema files it is built from), so a pack cannot be stale and a change of source or of the exporter shows in the verdicts. This rests on the exporter being deterministic: the 73 packs exported on the Windows and the Linux CI runners were byte-identical to each other and to the packs committed before 0.17.24 (a local Windows export and a WSL export agreed as well). `tools/check.sh` does the same locally.
 
 ## Prebuilt zig-zv and Z3 for consumers
 
