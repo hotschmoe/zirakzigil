@@ -33,7 +33,6 @@ pub const assurance = .{
 
 pub fn seqSubWrap(a: u128) bool {
     zv.requires(a == (@as(u128, 1) << 127));
-    if (!zv.ghost) return zv.ensures(true, true);
     const big = zv.Int.of(a).mul(zv.Int.of(a));
     const t = zv.Seq.empty().sub(big, big);
     const ok = t.len().ge(zv.Int.of(0));
@@ -42,7 +41,6 @@ pub fn seqSubWrap(a: u128) bool {
 
 pub fn seqSubMax(a: u128) bool {
     zv.requires(a == (@as(u128, 1) << 127));
-    if (!zv.ghost) return zv.ensures(true, true);
     const big = zv.Int.of(a).mul(zv.Int.of(a));
     const max = big.add(big.sub(zv.Int.of(1)));
     const t = zv.Seq.empty().sub(max, zv.Int.of(1));
@@ -52,7 +50,6 @@ pub fn seqSubMax(a: u128) bool {
 
 pub fn seqSubOk(n: u8) bool {
     zv.requires(n <= 4);
-    if (!zv.ghost) return zv.ensures(true, true);
     var s = zv.Seq.empty();
     inline for (0..4) |i| s = s.push(zv.Int.of(i));
     const t = s.sub(zv.Int.of(0), zv.Int.of(n));
@@ -62,7 +59,6 @@ pub fn seqSubOk(n: u8) bool {
 
 pub fn ghostDivOv(x: i128) bool {
     zv.requires(x == std.math.minInt(i128));
-    if (!zv.ghost) return zv.ensures(true, true);
     const two128 = zv.Int.of(@as(u128, 1) << 127).mul(zv.Int.of(@as(u128, 2)));
     const wide = zv.Int.of(x).mul(two128);
     const q = wide.divFloor(zv.Int.of(-1));
@@ -71,7 +67,6 @@ pub fn ghostDivOv(x: i128) bool {
 
 pub fn ghostModOv(x: i128) bool {
     zv.requires(x == std.math.minInt(i128));
-    if (!zv.ghost) return zv.ensures(true, true);
     const two128 = zv.Int.of(@as(u128, 1) << 127).mul(zv.Int.of(@as(u128, 2)));
     const wide = zv.Int.of(x).mul(two128);
     const r = wide.mod(zv.Int.of(-1));
@@ -80,7 +75,6 @@ pub fn ghostModOv(x: i128) bool {
 
 pub fn ghostDivOk(x: i128) bool {
     zv.requires(x == std.math.minInt(i128));
-    if (!zv.ghost) return zv.ensures(true, true);
     const q = zv.Int.of(x).divFloor(zv.Int.of(-1));
     const ok = q.gt(zv.Int.of(0));
     return zv.ensures(ok, ok);

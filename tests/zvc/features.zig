@@ -28,6 +28,11 @@ pub const assurance = .{
     .callsInline = .verified,
     .callsInlineBad = .verified,
     .countDown = .verified,
+    .requiresAfterCompute = .verified,
+    .requiresObligation = .verified,
+    .nullPlain = .verified,
+    .indexPlain = .verified,
+    .indexUnguarded = .verified,
     .countStuck = .verified,
     .countUpGhost = .verified,
     .addNoWrap = .verified,
@@ -204,7 +209,7 @@ pub fn countUpGhost(n: u32) u32 {
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         zv.invariant(i <= n);
-        if (zv.ghost) zv.decreases(zv.Int.of(n).sub(zv.Int.of(i)));
+        zv.decreases(zv.Int.of(n).sub(zv.Int.of(i)));
     }
     return zv.ensures(i, i == n);
 }
@@ -212,28 +217,28 @@ pub fn countUpGhost(n: u32) u32 {
 // Ghost integers and sequences.
 
 pub fn addNoWrap(a: u32, b: u32) u32 {
-    zv.requires(!zv.ghost or zv.Int.of(a).add(zv.Int.of(b)).le(zv.Int.of(0xffffffff)));
+    zv.requires(zv.Int.of(a).add(zv.Int.of(b)).le(zv.Int.of(0xffffffff)));
     return a + b;
 }
 
 pub fn addMayWrap(a: u32, b: u32) u32 {
-    zv.requires(!zv.ghost or zv.Int.of(a).add(zv.Int.of(b)).le(zv.Int.of(0x1ffffffff)));
+    zv.requires(zv.Int.of(a).add(zv.Int.of(b)).le(zv.Int.of(0x1ffffffff)));
     return a + b;
 }
 
 pub fn wideProduct(x: u32, y: u32) u64 {
     const r = @as(u64, x) * y;
-    return zv.ensures(r, !zv.ghost or zv.Int.of(r).le(zv.Int.of(x).mul(zv.Int.of(y))));
+    return zv.ensures(r, zv.Int.of(r).le(zv.Int.of(x).mul(zv.Int.of(y))));
 }
 
 pub fn seqPush(a: u8, b: u8) u8 {
-    const s = if (zv.ghost) zv.Seq.empty().push(zv.Int.of(a)).push(zv.Int.of(b)) else {};
-    return zv.ensures(b, !zv.ghost or (s.len().eq(zv.Int.of(2)) and s.at(zv.Int.of(0)).eq(zv.Int.of(a)) and s.at(zv.Int.of(1)).eq(zv.Int.of(b))));
+    const s = zv.Seq.empty().push(zv.Int.of(a)).push(zv.Int.of(b));
+    return zv.ensures(b, (s.len().eq(zv.Int.of(2)) and s.at(zv.Int.of(0)).eq(zv.Int.of(a)) and s.at(zv.Int.of(1)).eq(zv.Int.of(b))));
 }
 
 pub fn seqOutOfRange(a: u8) u8 {
-    const s = if (zv.ghost) zv.Seq.empty().push(zv.Int.of(a)) else {};
-    return zv.ensures(a, !zv.ghost or s.at(zv.Int.of(1)).eq(zv.Int.of(a)));
+    const s = zv.Seq.empty().push(zv.Int.of(a));
+    return zv.ensures(a, s.at(zv.Int.of(1)).eq(zv.Int.of(a)));
 }
 
 // switch.
@@ -340,4 +345,36 @@ pub fn popcountBound(x: u16) u8 {
 pub fn trailingZerosWrong(x: u32) u8 {
     const r: u8 = @ctz(x);
     return zv.ensures(r, r < 32);
+}
+
+// Natural code: a requires after pure computation, an obligation inside a requires argument, `return null`, a plain
+// `u32` index into an array.
+
+pub fn requiresAfterCompute(a: u32, b: u32) u32 {
+    const sum = a / 2 + b / 2;
+    zv.requires(sum < 1000);
+    return zv.ensures(sum + 1, sum < 1000);
+}
+
+pub fn requiresObligation(a: u32, b: u32) u32 {
+    zv.requires(b != 0 and a / b < 1000);
+    return zv.ensures(a / b + 1, a / b < 1000);
+}
+
+pub fn nullPlain(x: u32) ?u32 {
+    if (x > 10) return zv.ensures(null, x > 10);
+    return x;
+}
+
+const table = struct { slots: [8]u32 };
+
+pub fn indexPlain(t: *table, i: u32, v: u32) u32 {
+    zv.requires(i < 8);
+    t.slots[i] = v;
+    return zv.ensures(t.slots[i], t.slots[i] == v);
+}
+
+pub fn indexUnguarded(t: *table, i: u32, v: u32) u32 {
+    t.slots[i] = v;
+    return v;
 }

@@ -170,7 +170,6 @@ pub fn sentinelCall(xs: [:0]const u8) u8 {
 
 pub fn ghostMinMul(x: i128) bool {
     zv.requires(x == std.math.minInt(i128));
-    if (!zv.ghost) return zv.ensures(true, true);
     const two128 = zv.Int.of(@as(u128, 1) << 127).mul(zv.Int.of(@as(u128, 2)));
     const wide = zv.Int.of(x).mul(two128);
     const q = wide.divFloor(zv.Int.of(-1));
@@ -178,7 +177,6 @@ pub fn ghostMinMul(x: i128) bool {
 }
 
 pub fn ghostMin() bool {
-    if (!zv.ghost) return zv.ensures(true, true);
     const q = zv.Int.of(std.math.minInt(i256)).divFloor(zv.Int.of(@as(i8, -1)));
     return zv.ensures(q.eq(q), true);
 }
