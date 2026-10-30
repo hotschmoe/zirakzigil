@@ -2,6 +2,6 @@
 fp_loops.Uri.Context.eql clean
 fp_loops.Uri.Context.hash clean
 fp_loops.Uri.deinit clean
-fp_loops.drain clean
-fp_loops.drainStack clean
+fp_loops.drain counted
+fp_loops.drainStack counted
 fp_loops.use clean
